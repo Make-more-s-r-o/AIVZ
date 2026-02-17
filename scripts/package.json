@@ -1,0 +1,36 @@
+{
+  "name": "@vz/scripts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/serve-api.ts",
+    "extract": "tsx src/extract-tender.ts",
+    "analyze": "tsx src/analyze-tender.ts",
+    "match": "tsx src/match-product.ts",
+    "generate": "tsx src/generate-bid.ts",
+    "validate": "tsx src/validate-bid.ts",
+    "full-flow": "tsx src/full-flow.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "cors": "^2.8.5",
+    "docx": "^9.1.0",
+    "docxtemplater": "^3.52.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.0",
+    "mammoth": "^1.8.0",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "pizzip": "^3.1.7",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

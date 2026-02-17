@@ -1,0 +1,84 @@
+const API_BASE = '/api';
+
+export interface TenderSummary {
+  id: string;
+  inputFiles: string[];
+  tenderId: string;
+  steps: PipelineSteps;
+}
+
+export interface PipelineSteps {
+  extract: StepStatus;
+  analyze: StepStatus;
+  match: StepStatus;
+  generate: StepStatus;
+  validate: StepStatus;
+}
+
+export type StepStatus = 'pending' | 'running' | 'done' | 'error';
+export type StepName = keyof PipelineSteps;
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${url}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
+export async function getTenders(): Promise<TenderSummary[]> {
+  return fetchJson('/tenders');
+}
+
+export async function uploadFiles(files: File[], tenderId?: string): Promise<TenderSummary> {
+  const formData = new FormData();
+  files.forEach((f) => formData.append('files', f));
+
+  const url = tenderId
+    ? `${API_BASE}/tenders/${tenderId}/upload`
+    : `${API_BASE}/tenders/upload`;
+
+  const res = await fetch(url, { method: 'POST', body: formData });
+  if (!res.ok) throw new Error('Upload failed');
+  return res.json();
+}
+
+export async function getTenderStatus(id: string) {
+  return fetchJson<{ tenderId: string; steps: PipelineSteps }>(`/tenders/${id}/status`);
+}
+
+export async function getExtractedText(id: string) {
+  return fetchJson<Record<string, unknown>>(`/tenders/${id}/extracted-text`);
+}
+
+export async function getAnalysis(id: string) {
+  return fetchJson<Record<string, unknown>>(`/tenders/${id}/analysis`);
+}
+
+export async function getProductMatch(id: string) {
+  return fetchJson<Record<string, unknown>>(`/tenders/${id}/product-match`);
+}
+
+export async function getDocuments(id: string): Promise<string[]> {
+  return fetchJson(`/tenders/${id}/documents`);
+}
+
+export async function getValidation(id: string) {
+  return fetchJson<Record<string, unknown>>(`/tenders/${id}/validation`);
+}
+
+export async function runStep(id: string, step: StepName) {
+  const res = await fetch(`${API_BASE}/tenders/${id}/run/${step}`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Step ${step} failed`);
+  }
+  return res.json();
+}
+
+export function getDocumentDownloadUrl(id: string, filename: string): string {
+  return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
+}

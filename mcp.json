@@ -1,0 +1,57 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/.mcp.schema.json",
+  "_comment": "MCP servery pro VZ AI Tool. Nahraď placeholder hodnoty svými klíči.",
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--supabase-url", "https://TVUJ_PROJEKT.supabase.co",
+        "--supabase-key", "TVUJ_SERVICE_ROLE_KEY"
+      ],
+      "_setup": "Nahraď TVUJ_PROJEKT a TVUJ_SERVICE_ROLE_KEY. Key najdeš v Supabase → Settings → API → service_role key."
+    },
+    "hlidac-statu": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.api.hlidacstatu.cz",
+        "--header", "Authorization: Token TVUJ_HLIDAC_API_TOKEN"
+      ],
+      "_setup": "1) Registruj se na hlidacstatu.cz. 2) Napiš na api@hlidacstatu.cz o přístup k MCP (beta). 3) Token najdeš na api.hlidacstatu.cz v sekci 'Autorizační token'. POZOR: MCP je v beta provozu."
+    },
+    "n8n": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@leonardsellem/n8n-mcp-server"
+      ],
+      "env": {
+        "N8N_API_URL": "https://TVOJE-N8N.domena.cz/api/v1",
+        "N8N_API_KEY": "TVUJ_N8N_API_KEY"
+      },
+      "_setup": "V n8n: Settings → API → Create API Key. Umožňuje Claude Code spravovat workflows, spouštět je, číst execution logy."
+    },
+    "n8n-knowledge": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@czlonkowski/n8n-mcp@latest"
+      ],
+      "_setup": "Offline databáze 1000+ n8n nodů. Claude Code díky tomu ví jaké nody existují, jaké mají properties a jak je konfigurovat. Nevyžaduje API klíč."
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "TVUJ_GITHUB_PAT"
+      },
+      "_setup": "GitHub → Settings → Developer settings → Personal access tokens → Fine-grained. Oprávnění: repo (read/write), issues (read/write), pull requests (read/write)."
+    }
+  }
+}

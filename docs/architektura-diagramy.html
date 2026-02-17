@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>VZ AI Tool — Architektonické diagramy</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0f1117;
+            color: #e2e8f0;
+            padding: 40px;
+            line-height: 1.6;
+        }
+        h1 {
+            font-size: 28px;
+            color: #60a5fa;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+        .subtitle {
+            color: #94a3b8;
+            font-size: 14px;
+            margin-bottom: 48px;
+            border-bottom: 1px solid #1e293b;
+            padding-bottom: 24px;
+        }
+        h2 {
+            font-size: 20px;
+            color: #f1f5f9;
+            margin: 48px 0 20px 0;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #3b82f6;
+            display: inline-block;
+        }
+        .diagram-container {
+            background: #1a1f2e;
+            border-radius: 12px;
+            padding: 32px;
+            margin: 20px 0 40px 0;
+            border: 1px solid #2d3548;
+            overflow-x: auto;
+        }
+        .mermaid {
+            display: flex;
+            justify-content: center;
+        }
+        .note {
+            background: #1e293b;
+            border-left: 3px solid #3b82f6;
+            padding: 12px 16px;
+            margin: 16px 0;
+            border-radius: 0 8px 8px 0;
+            font-size: 14px;
+            color: #94a3b8;
+        }
+        .legend {
+            display: flex;
+            gap: 24px;
+            flex-wrap: wrap;
+            margin: 16px 0;
+            font-size: 13px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+        }
+        @media print {
+            body { background: white; color: #1a1a1a; }
+            .diagram-container { border-color: #ddd; background: #fafafa; }
+        }
+    </style>
+</head>
+<body>
+
+<h1>VZ AI Tool — Architektonické diagramy</h1>
+<p class="subtitle">Technická dokumentace | Make more s.r.o. | Únor 2026</p>
+
+<!-- DIAGRAM 1: High-level Architecture -->
+<h2>1. Celková architektura systému</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+graph TB
+    subgraph USER["👤 Uživatel"]
+        Browser["Prohlížeč<br/>(Dashboard)"]
+        SlackUser["Slack<br/>(Notifikace)"]
+    end
+
+    subgraph FRONTEND["🖥️ Frontend — Lovable → Next.js"]
+        Dashboard["Dashboard<br/>zakázek"]
+        CenEditor["Cenový<br/>editor"]
+        BidGen["Generátor<br/>nabídek"]
+        Katalog["Produktový<br/>katalog"]
+    end
+
+    subgraph SUPABASE["🗄️ Supabase Cloud"]
+        DB["PostgreSQL<br/>+ pgvector"]
+        Auth["Auth<br/>(uživatelé)"]
+        Storage["Storage<br/>(PDF soubory)"]
+        Edge["Edge<br/>Functions"]
+        RT["Realtime<br/>(websockets)"]
+    end
+
+    subgraph N8N["⚡ n8n Engine — Hostinger VPS"]
+        Monitor["VZ<br/>Monitoring"]
+        Filter["Filtrační<br/>engine"]
+        Analyze["Analyzátor<br/>dokumentů"]
+        Price["Cenový<br/>engine"]
+        BidWF["Generátor<br/>nabídek WF"]
+        Notify["Slack<br/>notifikace"]
+    end
+
+    subgraph AI["🤖 AI API Layer"]
+        Claude["Claude<br/>Sonnet 4.5"]
+        Gemini["Gemini 2.0<br/>Flash"]
+        Cohere["Cohere<br/>Embeddings"]
+    end
+
+    subgraph DATA["📊 Datové zdroje VZ"]
+        HS["Hlídač státu<br/>API"]
+        ISVZ["ISVZ<br/>Open Data"]
+        NEN["NEN<br/>API"]
+        GOV["zakazky.gov.cz"]
+    end
+
+    subgraph LUDONE["📋 LuDone / Tabidoo"]
+        CRM["CRM<br/>kontakty"]
+        Fak["LuFak<br/>fakturace"]
+        Track["LuTrack<br/>timetracking"]
+    end
+
+    Browser --> FRONTEND
+    FRONTEND --> SUPABASE
+    SUPABASE --> N8N
+    N8N --> AI
+    N8N --> DATA
+    N8N --> Notify --> SlackUser
+    N8N --> LUDONE
+    RT --> Browser
+
+    style USER fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style FRONTEND fill:#1a2744,stroke:#60a5fa,color:#e2e8f0
+    style SUPABASE fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style N8N fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+    style AI fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style DATA fill:#1a2e33,stroke:#22d3ee,color:#e2e8f0
+    style LUDONE fill:#2d1a1a,stroke:#f87171,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 2: Product Flow -->
+<h2>2. Životní cyklus zakázky (Product Flow)</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart LR
+    subgraph PHASE1["Fáze 1: Monitoring"]
+        A1["Hlídač státu<br/>ISVZ, NEN"] --> A2["n8n Cron<br/>každých 30 min"]
+        A2 --> A3["Filtrační<br/>engine"]
+        A3 --> A4{"Relevance<br/>> 30?"}
+        A4 -->|Ano| A5["Gemini Flash<br/>AI scoring"]
+        A4 -->|Ne| A6["Uložit jako<br/>nerelevantní"]
+        A5 --> A7{"Score<br/>> 70?"}
+        A7 -->|Ano| A8["📢 Slack alert"]
+    end
+
+    subgraph PHASE2["Fáze 2: Analýza"]
+        B1["Stáhni PDF<br/>dokumentaci"] --> B2["pymupdf4llm<br/>→ markdown"]
+        B2 --> B3["Claude Sonnet<br/>analýza"]
+        B3 --> B4["Strukturovaný<br/>JSON výstup"]
+        B4 --> B5["Kvalifikace<br/>Kritéria<br/>Položky<br/>Termíny"]
+    end
+
+    subgraph PHASE3["Fáze 3: Oceňování"]
+        C1["Položky<br/>z analýzy"] --> C2["Sklad cen<br/>exact match"]
+        C1 --> C3["pgvector<br/>semantic match"]
+        C1 --> C4["Gemini Flash<br/>web estimate"]
+        C1 --> C5["Historie<br/>minulých cen"]
+        C2 --> C6["Cenový návrh<br/>+ confidence"]
+        C3 --> C6
+        C4 --> C6
+        C5 --> C6
+        C6 --> C7["👤 Validace<br/>uživatelem"]
+        C7 --> C8["Aktualizace<br/>skladu cen"]
+    end
+
+    subgraph PHASE4["Fáze 4: Nabídka"]
+        D1["Claude Sonnet:<br/>Technický návrh"] --> D5["Compliance<br/>check"]
+        D2["Claude Sonnet:<br/>Metodika"] --> D5
+        D3["Auto: Krycí list<br/>+ čestná prohl."] --> D5
+        D5 --> D6["📦 ZIP<br/>k odeslání"]
+    end
+
+    A7 --> B1
+    B5 --> C1
+    C7 --> D1
+
+    style PHASE1 fill:#1a2744,stroke:#3b82f6,color:#e2e8f0
+    style PHASE2 fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style PHASE3 fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style PHASE4 fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 3: AI Model Routing -->
+<h2>3. AI Model Routing — Multi-model strategie</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart TB
+    Input["Vstupní úloha"] --> Router{"AI Router<br/>(n8n Code node)"}
+
+    Router -->|"Klasifikace<br/>Triáž<br/>Scoring"| Flash["Gemini 2.0 Flash<br/>$0.075 / $0.30 per 1M<br/>~0.18 CZK/zakázka"]
+
+    Router -->|"Analýza dokumentů<br/>Psaní nabídek<br/>Compliance"| Sonnet["Claude Sonnet 4.5<br/>$3 / $15 per 1M<br/>~3.50 CZK/dokument"]
+
+    Router -->|"Složitá právní<br/>analýza"| Opus["Claude Opus 4.5<br/>$15 / $75 per 1M<br/>~50 CZK/analýza"]
+
+    Router -->|"Embeddings<br/>Vector search"| CohereE["Cohere Multilingual v3<br/>$0.10 per 1M<br/>1024 dimenzí"]
+
+    Router -->|"Cenový odhad<br/>Web search"| Flash2["Gemini Flash<br/>+ web grounding<br/>~1 CZK/položka"]
+
+    Flash --> Cache1["Prompt Caching:<br/>až 90% úspora"]
+    Sonnet --> Cache1
+    Opus --> Cache1
+
+    style Flash fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style Sonnet fill:#1a2744,stroke:#3b82f6,color:#e2e8f0
+    style Opus fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+    style CohereE fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style Flash2 fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style Cache1 fill:#1a1a2e,stroke:#6366f1,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 4: Data Schema -->
+<h2>4. Databázové schéma — vztahy</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+erDiagram
+    zakazky ||--o{ analyzy : "má"
+    zakazky ||--o{ cenove_polozky : "obsahuje"
+    zakazky ||--o{ nabidky : "generuje"
+    analyzy ||--o{ cenove_polozky : "definuje"
+    produkty ||--o{ cenove_polozky : "oceňuje"
+    monitoring_filtry }o--|| users : "vlastní"
+    zakazky }o--|| users : "vlastní"
+
+    zakazky {
+        uuid id PK
+        text external_id
+        text nazev
+        text zadavatel_ico
+        text[] cpv_kody
+        bigint predpokladana_hodnota
+        int relevance_score
+        text status
+        text rozhodnuti
+    }
+
+    analyzy {
+        uuid id PK
+        uuid zakazka_id FK
+        jsonb kvalifikacni_pozadavky
+        jsonb hodnotici_kriteria
+        jsonb terminy
+        jsonb polozky
+        jsonb rizika
+        text doporuceni
+    }
+
+    cenove_polozky {
+        uuid id PK
+        uuid zakazka_id FK
+        uuid produkt_id FK
+        text nazev_polozky
+        decimal jednotkova_cena
+        decimal nakupni_cena
+        decimal marze_procent
+        text cenovy_zdroj
+        text status
+    }
+
+    produkty {
+        uuid id PK
+        text nazev
+        text kategorie
+        text vyrobce
+        jsonb parametry
+        decimal nakupni_cena
+        decimal doporucena_marze
+        text[] tags
+    }
+
+    nabidky {
+        uuid id PK
+        uuid zakazka_id FK
+        decimal celkova_cena
+        text technicky_navrh
+        text metodika
+        jsonb compliance_check
+        text status
+    }
+
+    monitoring_filtry {
+        uuid id PK
+        text nazev
+        text[] cpv_kody
+        text[] klicova_slova
+        text[] regiony
+        bigint min_hodnota
+        text slack_channel
+    }
+
+    vz_embeddings {
+        uuid id PK
+        text zdroj
+        text sekce
+        text chunk_text
+        vector embedding
+    }
+</pre>
+</div>
+
+<!-- DIAGRAM 5: Development Timeline -->
+<h2>5. Vývojový plán — Timeline</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+gantt
+    title VZ AI Tool — Vývojový plán
+    dateFormat  YYYY-MM-DD
+    axisFormat  %b %Y
+
+    section Fáze 0: Setup
+    Infrastruktura (Supabase, API klíče)    :f0a, 2026-03-01, 7d
+    DB schéma + Notion dokumentace           :f0b, 2026-03-01, 7d
+
+    section Fáze 1A: Monitoring
+    n8n: Hlídač státu monitoring             :f1a, 2026-03-08, 10d
+    n8n: Filtrační engine + AI triáž         :f1b, 2026-03-12, 10d
+    n8n: Slack notifikace                    :f1c, 2026-03-18, 5d
+
+    section Fáze 1B: Analýza
+    PDF extraction service                   :f1d, 2026-03-22, 7d
+    n8n: AI analýza dokumentů                :f1e, 2026-03-29, 14d
+    Prompt engineering + testování           :f1f, 2026-03-29, 14d
+
+    section Fáze 1C: Oceňování
+    Produktový katalog (DB + import)          :f1g, 2026-04-12, 7d
+    Cenový matching engine                    :f1h, 2026-04-19, 10d
+    Feedback loop                             :f1i, 2026-04-26, 5d
+
+    section Fáze 1D: Frontend MVP
+    Lovable: Dashboard + Feed                 :f1j, 2026-04-05, 7d
+    Lovable: Detail + Analýza                 :f1k, 2026-04-12, 7d
+    Lovable: Cenový editor                    :f1l, 2026-04-19, 7d
+    Lovable: Katalog + Nastavení              :f1m, 2026-04-26, 7d
+
+    section Fáze 1E: Nabídky
+    Šablony dokumentů                         :f1n, 2026-05-03, 5d
+    n8n: Generátor nabídek                    :f1o, 2026-05-08, 10d
+    Frontend: Generátor screen                :f1p, 2026-05-15, 7d
+
+    section Fáze 2: SaaS
+    Multi-tenancy + billing                   :f2a, 2026-06-01, 21d
+    RAG Knowledge Base                        :f2b, 2026-06-15, 21d
+    Next.js migration                         :f2c, 2026-07-01, 28d
+    LuDone integrace                          :f2d, 2026-07-15, 14d
+</pre>
+</div>
+
+<!-- DIAGRAM 6: Tech Stack -->
+<h2>6. Technologický stack — přehled</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+mindmap
+  root((VZ AI Tool))
+    Frontend
+      Lovable (MVP)
+      Next.js (Scale)
+      Tailwind CSS
+      Vercel hosting
+    Backend
+      Supabase
+        PostgreSQL
+        pgvector
+        Auth
+        Storage
+        Edge Functions
+        Realtime
+      n8n
+        AI Workflows
+        Cron monitoring
+        Webhook API
+        Slack integration
+    AI Layer
+      Claude Sonnet 4.5
+        Analýza dokumentů
+        Psaní nabídek
+        Compliance check
+      Gemini 2.0 Flash
+        Triáž a scoring
+        Cenové odhady
+      Cohere Embeddings
+        RAG vectory
+        Sémantický search
+    Data Sources
+      Hlídač státu API
+      ISVZ Open Data
+      NEN API
+      TED eForms
+    Business
+      Tabidoo LuDone
+        CRM
+        LuFak
+        LuTrack
+      Notion docs
+      Slack comms
+</pre>
+</div>
+
+<!-- DIAGRAM 7: n8n vs Supabase Edge Functions -->
+<h2>7. n8n vs Supabase Edge Functions — kdo co dělá</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart LR
+    User["👤 Uživatel"] --> FE["Frontend"]
+
+    subgraph SYNC["⚡ SYNCHRONNÍ (< 2s)"]
+        FE --> EF["Supabase<br/>Edge Functions"]
+        EF --> Auth["Auth check"]
+        EF --> Valid["Validace"]
+        EF --> Query["DB dotazy"]
+        EF --> Queue["→ Action Queue"]
+    end
+
+    subgraph ASYNC["🔄 ASYNCHRONNÍ (2s–5min)"]
+        Queue --> N8N["n8n Workflows"]
+        N8N --> AI["AI analýza<br/>Claude/Gemini"]
+        N8N --> DocGen["Generování<br/>DOCX/PDF"]
+        N8N --> PriceSync["Cenový<br/>sync"]
+        N8N --> Email["Email/<br/>Slack"]
+    end
+
+    N8N -->|"Update DB"| DB["Supabase DB"]
+    DB -->|"Realtime"| FE
+
+    style SYNC fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style ASYNC fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 8: Price Feed Integration -->
+<h2>8. Integrace cenových feedů z distributorů</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart TB
+    subgraph SOURCES["📦 Zdroje cen"]
+        IM["Ingram Micro<br/>REST API ✅"]
+        ATC["AT Computers<br/>Web Services ⚠️"]
+        ED["eD system<br/>B2B portál ⚠️"]
+        CSV["CSV/Excel<br/>import 📄"]
+        ICE["Icecat<br/>produktová data ✅"]
+    end
+
+    subgraph N8N["n8n: price_feed_sync (cron)"]
+        Fetch["Stažení dat"]
+        Norm["Normalizace"]
+        Match["Product<br/>matching"]
+        Upsert["UPSERT cen"]
+    end
+
+    subgraph MATCH["Matching algoritmus"]
+        M1["1. EAN/GTIN<br/>(100%)"]
+        M2["2. MPN norm.<br/>(95%)"]
+        M3["3. pg_trgm fuzzy<br/>(>0.6)"]
+        M4["4. AI matching<br/>(Gemini)"]
+    end
+
+    subgraph DB["Supabase DB"]
+        PC["products_canonical"]
+        SP["supplier_products"]
+        CP["current_prices"]
+        PH["price_history"]
+        BP["v_best_prices<br/>(VIEW)"]
+    end
+
+    SOURCES --> Fetch --> Norm --> Match
+    Match --> M1 --> M2 --> M3 --> M4
+    Match --> Upsert --> CP
+    Upsert --> PH
+    CP --> BP
+    ICE --> PC
+
+    style SOURCES fill:#1a2744,stroke:#60a5fa,color:#e2e8f0
+    style N8N fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+    style MATCH fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style DB fill:#1a3329,stroke:#34d399,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 9: Multi-tenant Architecture -->
+<h2>9. White-label multi-tenant architektura</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart TB
+    subgraph TENANTS["Tenanti (zákazníci)"]
+        T1["firma1.vzaitool.cz"]
+        T2["firma2.vzaitool.cz"]
+        T3["custom-domain.cz"]
+    end
+
+    subgraph VERCEL["Vercel + Next.js"]
+        MW["Middleware:<br/>tenant detection"]
+        Theme["Dynamic<br/>theming"]
+    end
+
+    subgraph SUPA["Supabase (sdílená DB)"]
+        RLS["Row Level Security<br/>tenant_id na každé tabulce"]
+        TConf["tenant_ai_config"]
+        TProm["tenant_prompt_templates"]
+    end
+
+    subgraph BILLING["Billing"]
+        Stripe["Stripe<br/>Subscriptions"]
+        FDW["Stripe FDW<br/>(SQL přístup)"]
+    end
+
+    subgraph N8N_MT["n8n (sdílená instance)"]
+        WF["Workflows s<br/>tenant_id context"]
+    end
+
+    TENANTS --> MW --> Theme --> SUPA
+    RLS --> WF
+    Stripe --> FDW --> SUPA
+
+    style TENANTS fill:#1a2744,stroke:#60a5fa,color:#e2e8f0
+    style VERCEL fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
+    style SUPA fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style BILLING fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style N8N_MT fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+</pre>
+</div>
+
+<!-- DIAGRAM 10: Dev Environment Workflow -->
+<h2>10. Vývojová prostředí a workflow</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart LR
+    subgraph DESIGN["🎨 UI Design"]
+        Lovable["Lovable<br/>(React + Supabase)"]
+    end
+
+    subgraph CODE["💻 Backend + Logic"]
+        CC["Claude Code<br/>(CLI agent)"]
+        Cursor["Cursor IDE<br/>(alternativa)"]
+    end
+
+    subgraph WORKFLOW["⚡ Workflows"]
+        N8NGUI["n8n GUI<br/>(webový editor)"]
+    end
+
+    subgraph PROMPTS["🤖 AI Prompty"]
+        ClaudeChat["Claude.ai<br/>(iterace)"]
+    end
+
+    subgraph VCS["📁 GitHub"]
+        Repo["Monorepo<br/>vz-ai-tool"]
+    end
+
+    subgraph DEPLOY["🚀 Deploy"]
+        V["Vercel<br/>(frontend)"]
+        S["Supabase<br/>(DB + funcs)"]
+        VPS["Hostinger VPS<br/>(n8n)"]
+    end
+
+    subgraph DOCS["📝 Dokumentace"]
+        Notion["Notion"]
+    end
+
+    Lovable -->|"push/pull"| Repo
+    CC -->|"git push"| Repo
+    N8NGUI -->|"CLI export"| Repo
+    ClaudeChat -->|"uložit"| Notion
+
+    Repo -->|"GitHub Actions"| V
+    Repo -->|"GitHub Actions"| S
+    Repo -->|"SSH deploy"| VPS
+
+    style DESIGN fill:#1a3329,stroke:#34d399,color:#e2e8f0
+    style CODE fill:#1a2744,stroke:#60a5fa,color:#e2e8f0
+    style WORKFLOW fill:#3b1f44,stroke:#a78bfa,color:#e2e8f0
+    style PROMPTS fill:#3b2f1a,stroke:#f59e0b,color:#e2e8f0
+    style VCS fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
+    style DEPLOY fill:#2d1a1a,stroke:#f87171,color:#e2e8f0
+    style DOCS fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
+</pre>
+</div>
+
+<div class="note">
+    <strong>Poznámka:</strong> Diagramy jsou interaktivní — najeďte myší na jednotlivé bloky pro zvýraznění. 
+    Pro tisk použijte Ctrl+P. Diagramy se automaticky přizpůsobí světlému pozadí.
+</div>
+
+<script>
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'dark',
+        themeVariables: {
+            primaryColor: '#1e3a5f',
+            primaryTextColor: '#e2e8f0',
+            primaryBorderColor: '#3b82f6',
+            lineColor: '#475569',
+            secondaryColor: '#1a3329',
+            tertiaryColor: '#3b1f44',
+            background: '#1a1f2e',
+            mainBkg: '#1a1f2e',
+            nodeBorder: '#3b82f6',
+            clusterBkg: '#111827',
+            clusterBorder: '#374151',
+            titleColor: '#e2e8f0',
+            edgeLabelBackground: '#1a1f2e',
+            fontSize: '14px'
+        },
+        flowchart: { curve: 'basis', padding: 20 },
+        gantt: {
+            titleTopMargin: 25,
+            barHeight: 24,
+            barGap: 6,
+            fontSize: 12,
+            sectionFontSize: 13,
+            numberSectionStyles: 6
+        }
+    });
+</script>
+
+</body>
+</html>

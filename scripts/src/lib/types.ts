@@ -1,0 +1,140 @@
+import { z } from 'zod';
+
+// Extracted text from documents
+export const ExtractedDocumentSchema = z.object({
+  filename: z.string(),
+  type: z.enum(['pdf', 'docx', 'doc']),
+  text: z.string(),
+  pageCount: z.number().optional(),
+  isTemplate: z.boolean().default(false),
+});
+
+export const ExtractedTextSchema = z.object({
+  tenderId: z.string(),
+  extractedAt: z.string().datetime(),
+  documents: z.array(ExtractedDocumentSchema),
+  totalCharacters: z.number(),
+});
+
+// AI Analysis output
+export const TenderAnalysisSchema = z.object({
+  zakazka: z.object({
+    nazev: z.string(),
+    evidencni_cislo: z.string().optional().nullable(),
+    zadavatel: z.object({
+      nazev: z.string(),
+      ico: z.string().optional().nullable(),
+      kontakt: z.string().optional().nullable(),
+    }),
+    predmet: z.string(),
+    predpokladana_hodnota: z.number().optional().nullable(),
+    typ_zakazky: z.enum(['dodavky', 'sluzby', 'stavebni_prace']),
+    typ_rizeni: z.string(),
+  }),
+  kvalifikace: z.array(z.object({
+    typ: z.enum(['profesni', 'technicka', 'ekonomicka']),
+    popis: z.string(),
+    splnitelne: z.boolean(),
+  })),
+  hodnotici_kriteria: z.array(z.object({
+    nazev: z.string(),
+    vaha_procent: z.number(),
+    popis: z.string(),
+  })),
+  terminy: z.object({
+    lhuta_nabidek: z.string().optional().nullable(),
+    otevirani_obalek: z.string().optional().nullable(),
+    doba_plneni_od: z.string().optional().nullable(),
+    doba_plneni_do: z.string().optional().nullable(),
+    prohlidka_mista: z.string().optional().nullable(),
+  }),
+  polozky: z.array(z.object({
+    nazev: z.string(),
+    mnozstvi: z.number().optional().nullable(),
+    jednotka: z.string().optional().nullable(),
+    specifikace: z.string(),
+  })),
+  technicke_pozadavky: z.array(z.object({
+    parametr: z.string(),
+    pozadovana_hodnota: z.string(),
+    jednotka: z.string().optional().nullable(),
+    povinny: z.boolean().default(true),
+  })).optional().default([]),
+  rizika: z.array(z.object({
+    popis: z.string(),
+    zavaznost: z.enum(['vysoka', 'stredni', 'nizka']),
+    mitigace: z.string(),
+  })),
+  doporuceni: z.object({
+    rozhodnuti: z.enum(['GO', 'NOGO', 'ZVAZIT']),
+    oduvodneni: z.string(),
+    klicove_body: z.array(z.string()),
+  }),
+});
+
+// Product matching
+export const ProductCandidateSchema = z.object({
+  vyrobce: z.string(),
+  model: z.string(),
+  popis: z.string(),
+  parametry: z.record(z.string(), z.string()),
+  shoda_s_pozadavky: z.array(z.object({
+    pozadavek: z.string(),
+    splneno: z.boolean(),
+    hodnota: z.string(),
+    komentar: z.string().optional(),
+  })),
+  cena_bez_dph: z.number(),
+  cena_s_dph: z.number(),
+  dodavatele: z.array(z.string()),
+  dostupnost: z.string(),
+});
+
+export const ProductMatchSchema = z.object({
+  tenderId: z.string(),
+  matchedAt: z.string().datetime(),
+  kandidati: z.array(ProductCandidateSchema),
+  vybrany_index: z.number(),
+  oduvodneni_vyberu: z.string(),
+});
+
+// Validation report
+export const ValidationCheckSchema = z.object({
+  kategorie: z.string(),
+  kontrola: z.string(),
+  status: z.enum(['pass', 'fail', 'warning']),
+  detail: z.string(),
+});
+
+export const ValidationReportSchema = z.object({
+  tenderId: z.string(),
+  validatedAt: z.string().datetime(),
+  overall_score: z.number().min(1).max(10),
+  ready_to_submit: z.boolean(),
+  checks: z.array(ValidationCheckSchema),
+  kriticke_problemy: z.array(z.string()),
+  doporuceni: z.array(z.string()),
+});
+
+// Pipeline status
+export const PipelineStatusSchema = z.object({
+  tenderId: z.string(),
+  steps: z.object({
+    extract: z.enum(['pending', 'running', 'done', 'error']).default('pending'),
+    analyze: z.enum(['pending', 'running', 'done', 'error']).default('pending'),
+    match: z.enum(['pending', 'running', 'done', 'error']).default('pending'),
+    generate: z.enum(['pending', 'running', 'done', 'error']).default('pending'),
+    validate: z.enum(['pending', 'running', 'done', 'error']).default('pending'),
+  }),
+  errors: z.record(z.string(), z.string()).optional(),
+});
+
+// Infer types
+export type ExtractedDocument = z.infer<typeof ExtractedDocumentSchema>;
+export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
+export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
+export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
+export type ProductMatch = z.infer<typeof ProductMatchSchema>;
+export type ValidationCheck = z.infer<typeof ValidationCheckSchema>;
+export type ValidationReport = z.infer<typeof ValidationReportSchema>;
+export type PipelineStatus = z.infer<typeof PipelineStatusSchema>;
