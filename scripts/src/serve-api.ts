@@ -363,7 +363,7 @@ app.get('/api/tenders/:id/validation', async (req, res) => {
   }
 });
 
-// PUT /api/tenders/:id/product-match/price - save price override
+// PUT /api/tenders/:id/product-match/price - save price override (legacy single-product)
 app.put('/api/tenders/:id/product-match/price', async (req, res) => {
   const { id } = req.params;
   const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
@@ -380,6 +380,33 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
     res.json({ success: true, cenova_uprava: parsed });
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'product-match.json not found — run match step first' });
+    }
+    res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  }
+});
+
+// PUT /api/tenders/:id/product-match/price/:itemIndex - save price override for a specific item
+app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
+  const { id, itemIndex } = req.params;
+  const idx = parseInt(itemIndex, 10);
+  const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+
+  try {
+    const raw = await readFile(matchPath, 'utf-8');
+    const productMatch = JSON.parse(raw);
+
+    if (!productMatch.polozky_match || idx < 0 || idx >= productMatch.polozky_match.length) {
+      return res.status(400).json({ error: `Invalid item index ${idx}` });
+    }
+
+    const parsed = PriceOverrideSchema.parse(req.body);
+    productMatch.polozky_match[idx].cenova_uprava = parsed;
+    await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+
+    res.json({ success: true, itemIndex: idx, cenova_uprava: parsed });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
@@ -417,7 +444,17 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     try {
       const matchRaw = await readFile(join(OUTPUT_DIR, id, 'product-match.json'), 'utf-8');
       const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
-      if (!matchData.cenova_uprava?.potvrzeno) {
+
+      if (matchData.polozky_match) {
+        // Multi-product: all items must have confirmed prices
+        const unconfirmed = matchData.polozky_match.filter(pm => !pm.cenova_uprava?.potvrzeno);
+        if (unconfirmed.length > 0) {
+          const names = unconfirmed.map(pm => pm.polozka_nazev).join(', ');
+          return res.status(400).json({
+            error: `Nejprve potvrďte ceny u všech položek. Nepotvrzené: ${names}`,
+          });
+        }
+      } else if (!matchData.cenova_uprava?.potvrzeno) {
         return res.status(400).json({
           error: 'Nejprve potvrďte ceny v záložce Produkty. Bez potvrzené cenové kalkulace nelze generovat dokumenty.',
         });

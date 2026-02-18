@@ -6,11 +6,13 @@ import {
   fillTemplateWithAI,
   discoverTemplates,
   generateCenovaNabidka,
+  generateCenovaNabidkaMulti,
   generateTechnickyNavrh,
+  type MultiProductItem,
 } from './lib/template-engine.js';
 import { fillExcelWithAI } from './lib/xls-filler.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
-import type { TenderAnalysis, ProductMatch } from './lib/types.js';
+import type { TenderAnalysis, ProductMatch, ProductCandidate } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -38,73 +40,129 @@ async function main() {
     await readFile(join(ROOT, 'config', 'company.json'), 'utf-8')
   );
 
-  const selectedProduct = productMatch.kandidati[productMatch.vybrany_index];
-  const priceOverride = productMatch.cenova_uprava;
-  const bidPriceBezDph = priceOverride?.nabidkova_cena_bez_dph ?? selectedProduct.cena_bez_dph;
-  const bidPriceSdph = priceOverride?.nabidkova_cena_s_dph ?? selectedProduct.cena_s_dph;
   let totalCostCZK = 0;
+  const isMultiProduct = !!productMatch.polozky_match;
 
-  if (priceOverride?.potvrzeno) {
-    console.log(`  Using confirmed prices: ${bidPriceBezDph.toLocaleString('cs-CZ')} Kč bez DPH`);
+  // Resolve products and prices for both paths
+  let selectedProducts: Array<{
+    polozka: string;
+    mnozstvi: number;
+    product: ProductCandidate;
+    priceBezDph: number;
+    priceSdph: number;
+  }>;
+
+  if (isMultiProduct) {
+    console.log(`  Multi-product mode: ${productMatch.polozky_match!.length} items`);
+    selectedProducts = productMatch.polozky_match!.map(pm => {
+      const product = pm.kandidati[pm.vybrany_index];
+      const override = pm.cenova_uprava;
+      return {
+        polozka: pm.polozka_nazev,
+        mnozstvi: pm.mnozstvi || 1,
+        product,
+        priceBezDph: override?.nabidkova_cena_bez_dph ?? product.cena_bez_dph,
+        priceSdph: override?.nabidkova_cena_s_dph ?? product.cena_s_dph,
+      };
+    });
+  } else {
+    const selectedProduct = productMatch.kandidati![productMatch.vybrany_index!];
+    const priceOverride = productMatch.cenova_uprava;
+    selectedProducts = [{
+      polozka: analysis.zakazka.predmet,
+      mnozstvi: 1,
+      product: selectedProduct,
+      priceBezDph: priceOverride?.nabidkova_cena_bez_dph ?? selectedProduct.cena_bez_dph,
+      priceSdph: priceOverride?.nabidkova_cena_s_dph ?? selectedProduct.cena_s_dph,
+    }];
+  }
+
+  // Total prices
+  const totalBezDph = selectedProducts.reduce((s, p) => s + p.priceBezDph * p.mnozstvi, 0);
+  const totalSdph = selectedProducts.reduce((s, p) => s + p.priceSdph * p.mnozstvi, 0);
+  const dphAmount = totalSdph - totalBezDph;
+
+  const allConfirmed = isMultiProduct
+    ? productMatch.polozky_match!.every(pm => pm.cenova_uprava?.potvrzeno)
+    : productMatch.cenova_uprava?.potvrzeno;
+
+  if (allConfirmed) {
+    console.log(`  Using confirmed prices: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH`);
   } else {
     console.log(`  Warning: Using AI-estimated prices (not confirmed by user)`);
   }
 
-  // DPH rate from analysis or default 21%
-  const dphRate = 21;
-  const dphAmount = bidPriceSdph - bidPriceBezDph;
-
-  // Shared data for template filling
+  // Shared tenderData for templates
   const tenderData = {
     nazev_zakazky: analysis.zakazka.nazev,
     evidencni_cislo: analysis.zakazka.evidencni_cislo || undefined,
     zadavatel: analysis.zakazka.zadavatel.nazev,
     zadavatel_ico: analysis.zakazka.zadavatel.ico || undefined,
     zadavatel_kontakt: analysis.zakazka.zadavatel.kontakt || undefined,
-    cena_bez_dph: bidPriceBezDph.toLocaleString('cs-CZ'),
-    cena_s_dph: bidPriceSdph.toLocaleString('cs-CZ'),
+    cena_bez_dph: totalBezDph.toLocaleString('cs-CZ'),
+    cena_s_dph: totalSdph.toLocaleString('cs-CZ'),
     dph: dphAmount.toLocaleString('cs-CZ'),
-    dph_sazba: `${dphRate}`,
+    dph_sazba: '21',
     datum: new Date().toLocaleDateString('cs-CZ'),
-    // Contract-specific fields
     doba_plneni_od: analysis.terminy.doba_plneni_od || undefined,
     doba_plneni_do: analysis.terminy.doba_plneni_do || undefined,
     lhuta_nabidek: analysis.terminy.lhuta_nabidek || undefined,
-    produkt_nazev: `${selectedProduct.vyrobce} ${selectedProduct.model}`,
-    produkt_popis: selectedProduct.popis,
+    produkt_nazev: selectedProducts.map(p => `${p.product.vyrobce} ${p.product.model}`).join(', '),
+    produkt_popis: selectedProducts.map(p => p.product.popis).join('; '),
   };
 
   // 4A: Generate technical proposal content with AI
   console.log('\n4A: Generating technical proposal with AI...');
+
+  // For multi-product: generate content for each product, concatenated
+  const primaryProduct = selectedProducts[0].product;
   const technicalResult = await callClaude(
     TECHNICAL_PROPOSAL_SYSTEM,
     buildTechnicalProposalUserMessage(
       analysis.zakazka.nazev,
       analysis.zakazka.predmet,
       analysis.technicke_pozadavky,
-      selectedProduct,
+      isMultiProduct
+        ? {
+            vyrobce: selectedProducts.map(p => p.product.vyrobce).join(', '),
+            model: selectedProducts.map(p => `${p.product.vyrobce} ${p.product.model}`).join('; '),
+            popis: selectedProducts.map(p => `${p.polozka}: ${p.product.popis}`).join('\n'),
+            parametry: Object.assign({}, ...selectedProducts.map(p => p.product.parametry)),
+          }
+        : primaryProduct,
       company
     ),
-    { maxTokens: 8192, temperature: 0.3 }
+    { maxTokens: isMultiProduct ? 12288 : 8192, temperature: 0.3 }
   );
   totalCostCZK += technicalResult.costCZK;
 
   // 4B: Generate documents
   console.log('\n4B: Generating DOCX documents...');
 
-  // 1. Technický návrh (AI-generated from scratch)
+  // 1. Technický návrh
   console.log('  - technicky_navrh.docx');
   const techNavrh = await generateTechnickyNavrh(
-    analysis, selectedProduct, company, technicalResult.content
+    analysis, primaryProduct, company, technicalResult.content
   );
   await writeFile(join(outputDir, 'technicky_navrh.docx'), techNavrh);
 
-  // 2. Cenová nabídka (generated from scratch)
+  // 2. Cenová nabídka
   console.log('  - cenova_nabidka.docx');
-  const cenovaNabidka = await generateCenovaNabidka(analysis, selectedProduct, company, bidPriceBezDph, bidPriceSdph);
+  let cenovaNabidka: Buffer;
+  if (isMultiProduct) {
+    cenovaNabidka = await generateCenovaNabidkaMulti(
+      analysis,
+      selectedProducts as MultiProductItem[],
+      company,
+    );
+  } else {
+    cenovaNabidka = await generateCenovaNabidka(
+      analysis, primaryProduct, company, totalBezDph, totalSdph
+    );
+  }
   await writeFile(join(outputDir, 'cenova_nabidka.docx'), cenovaNabidka);
 
-  // 3. Template-based documents (krycí list, čestné prohlášení, seznam poddodavatelů)
+  // 3. Template-based documents
   console.log('\n4C: Discovering and filling templates...');
   const templates = await discoverTemplates(inputDir);
   console.log(`  Found ${templates.length} template(s): ${templates.map((t) => t.type).join(', ')}`);
@@ -120,7 +178,6 @@ async function main() {
   const typeCounters = new Map<string, number>();
 
   for (const template of templates) {
-    // Handle duplicate types (e.g. 2× cestne_prohlaseni)
     const count = typeCounters.get(template.type) || 0;
     typeCounters.set(template.type, count + 1);
 
@@ -134,7 +191,6 @@ async function main() {
 
     try {
       if (isExcel) {
-        // Use Excel filler for XLS/XLSX templates
         const result = await fillExcelWithAI(template.path, company, tenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
@@ -149,7 +205,6 @@ async function main() {
           console.log(`    Saved ${result.replacements.length} replacements to ${logName}`);
         }
       } else {
-        // Use DOCX filler for DOCX templates
         const result = await fillTemplateWithAI(template.path, company, tenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
@@ -170,6 +225,7 @@ async function main() {
   }
 
   console.log(`\nGeneration complete!`);
+  console.log(`  Total price: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH / ${totalSdph.toLocaleString('cs-CZ')} Kč s DPH`);
   console.log(`  AI cost: ${totalCostCZK.toFixed(2)} CZK`);
   console.log(`  Output: ${outputDir}/`);
 }

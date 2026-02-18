@@ -102,6 +102,21 @@ export async function updatePriceOverride(id: string, data: PriceOverrideData): 
   return res.json();
 }
 
+export async function updateItemPriceOverride(
+  id: string, itemIndex: number, data: PriceOverrideData
+): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/${itemIndex}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to save item price override');
+  }
+  return res.json();
+}
+
 export async function deleteTender(id: string): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE' });
   if (!res.ok) {

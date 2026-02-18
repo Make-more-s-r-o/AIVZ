@@ -613,6 +613,132 @@ export async function generateCenovaNabidka(
   return Buffer.from(await Packer.toBuffer(doc));
 }
 
+export interface MultiProductItem {
+  polozka: string;
+  mnozstvi: number;
+  product: ProductCandidate;
+  priceBezDph: number;
+  priceSdph: number;
+}
+
+export async function generateCenovaNabidkaMulti(
+  analysis: TenderAnalysis,
+  items: MultiProductItem[],
+  company: CompanyProfile,
+): Promise<Buffer> {
+  const thinBorder = { style: BorderStyle.SINGLE, size: 1, color: '999999' };
+  const borders = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
+
+  const headerRow = new TableRow({
+    children: [
+      new TableCell({
+        children: [new Paragraph({ children: [new TextRun({ text: 'Položka', bold: true })] })],
+        width: { size: 30, type: WidthType.PERCENTAGE },
+        shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
+        borders,
+      }),
+      new TableCell({
+        children: [new Paragraph({ children: [new TextRun({ text: 'Produkt', bold: true })] })],
+        width: { size: 25, type: WidthType.PERCENTAGE },
+        shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
+        borders,
+      }),
+      new TableCell({
+        children: [new Paragraph({ children: [new TextRun({ text: 'Množství', bold: true })] })],
+        width: { size: 10, type: WidthType.PERCENTAGE },
+        shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
+        borders,
+      }),
+      new TableCell({
+        children: [new Paragraph({ children: [new TextRun({ text: 'Cena bez DPH (Kč)', bold: true })] })],
+        width: { size: 17, type: WidthType.PERCENTAGE },
+        shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
+        borders,
+      }),
+      new TableCell({
+        children: [new Paragraph({ children: [new TextRun({ text: 'Cena s DPH (Kč)', bold: true })] })],
+        width: { size: 18, type: WidthType.PERCENTAGE },
+        shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
+        borders,
+      }),
+    ],
+  });
+
+  const dataRows = items.map(item => new TableRow({
+    children: [
+      new TableCell({ children: [new Paragraph(item.polozka)], borders }),
+      new TableCell({ children: [new Paragraph(`${item.product.vyrobce} ${item.product.model}`)], borders }),
+      new TableCell({ children: [new Paragraph(`${item.mnozstvi} ks`)], borders }),
+      new TableCell({ children: [new Paragraph((item.priceBezDph * item.mnozstvi).toLocaleString('cs-CZ'))], borders }),
+      new TableCell({ children: [new Paragraph((item.priceSdph * item.mnozstvi).toLocaleString('cs-CZ'))], borders }),
+    ],
+  }));
+
+  const totalBezDph = items.reduce((sum, i) => sum + i.priceBezDph * i.mnozstvi, 0);
+  const totalSdph = items.reduce((sum, i) => sum + i.priceSdph * i.mnozstvi, 0);
+  const dph = totalSdph - totalBezDph;
+
+  const doc = new Document({
+    styles: DOC_STYLES,
+    sections: [{
+      children: [
+        new Paragraph({
+          text: 'CENOVÁ NABÍDKA',
+          heading: HeadingLevel.HEADING_1,
+          alignment: AlignmentType.CENTER,
+        }),
+        new Paragraph({ text: '' }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Veřejná zakázka: ', bold: true }),
+            new TextRun(analysis.zakazka.nazev),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Uchazeč: ', bold: true }),
+            new TextRun(company.nazev),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'IČO: ', bold: true }),
+            new TextRun(company.ico),
+          ],
+        }),
+        new Paragraph({ text: '' }),
+        new Table({ rows: [headerRow, ...dataRows], width: { size: 100, type: WidthType.PERCENTAGE } }),
+        new Paragraph({ text: '' }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Celková nabídková cena bez DPH: ', bold: true }),
+            new TextRun(`${totalBezDph.toLocaleString('cs-CZ')} Kč`),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'DPH 21 %: ', bold: true }),
+            new TextRun(`${dph.toLocaleString('cs-CZ')} Kč`),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Celková nabídková cena s DPH: ', bold: true }),
+            new TextRun({ text: `${totalSdph.toLocaleString('cs-CZ')} Kč`, bold: true }),
+          ],
+        }),
+        new Paragraph({ text: '' }),
+        new Paragraph(`V Praze dne ${new Date().toLocaleDateString('cs-CZ')}`),
+        new Paragraph({ text: '' }),
+        new Paragraph(company.jednajici_osoba),
+        new Paragraph(company.nazev),
+      ],
+    }],
+  });
+
+  return Buffer.from(await Packer.toBuffer(doc));
+}
+
 // --- Technický návrh ---
 
 /** Parse AI-generated markdown content into docx elements */

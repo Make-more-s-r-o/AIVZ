@@ -56,7 +56,26 @@ async function main() {
 
   console.log(`\nFound ${docxFiles.length} DOCX documents to validate`);
 
-  const selectedProduct = productMatch.kandidati[productMatch.vybrany_index];
+  // Resolve selected products for both single and multi-product paths
+  let productsSection: string;
+  if (productMatch.polozky_match) {
+    productsSection = productMatch.polozky_match.map((pm) => {
+      const product = pm.kandidati[pm.vybrany_index];
+      return `Položka: ${pm.polozka_nazev}
+Nabízený produkt: ${product.vyrobce} ${product.model}
+Cena bez DPH: ${product.cena_bez_dph} Kč
+Cena s DPH: ${product.cena_s_dph} Kč
+Shoda parametrů:
+${product.shoda_s_pozadavky.map((s: any) => `- ${s.pozadavek}: ${s.splneno ? 'OK' : 'NESPLNĚNO'} (${s.hodnota})`).join('\n')}`;
+    }).join('\n\n');
+  } else {
+    const selectedProduct = productMatch.kandidati![productMatch.vybrany_index!];
+    productsSection = `Nabízený produkt: ${selectedProduct.vyrobce} ${selectedProduct.model}
+Cena bez DPH: ${selectedProduct.cena_bez_dph} Kč
+Cena s DPH: ${selectedProduct.cena_s_dph} Kč
+Shoda parametrů:
+${selectedProduct.shoda_s_pozadavky.map((s: any) => `- ${s.pozadavek}: ${s.splneno ? 'OK' : 'NESPLNĚNO'} (${s.hodnota})`).join('\n')}`;
+  }
 
   const userMessage = `Zadávací dokumentace požaduje:
 
@@ -73,15 +92,10 @@ ${analysis.hodnotici_kriteria.map((k) => `- ${k.nazev} (${k.vaha_procent}%): ${k
 Technické požadavky:
 ${analysis.technicke_pozadavky.map((r) => `- ${r.parametr}: ${r.pozadovana_hodnota}`).join('\n')}
 
-Nabízený produkt: ${selectedProduct.vyrobce} ${selectedProduct.model}
-Cena bez DPH: ${selectedProduct.cena_bez_dph} Kč
-Cena s DPH: ${selectedProduct.cena_s_dph} Kč
+${productsSection}
 
 Vygenerované dokumenty:
 ${docxFiles.map((f) => `- ${f}`).join('\n')}
-
-Shoda parametrů:
-${selectedProduct.shoda_s_pozadavky.map((s) => `- ${s.pozadavek}: ${s.splneno ? 'OK' : 'NESPLNĚNO'} (${s.hodnota})`).join('\n')}
 
 Odpověz ve formátu:
 {

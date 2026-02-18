@@ -90,6 +90,8 @@ export const ProductCandidateSchema = z.object({
   cena_komentar: z.string().optional(),
   dodavatele: z.array(z.string()),
   dostupnost: z.string(),
+  zdroj_ceny: z.string().optional(),
+  reference_urls: z.array(z.string()).optional(),
 });
 
 export const PriceOverrideSchema = z.object({
@@ -102,14 +104,31 @@ export const PriceOverrideSchema = z.object({
   poznamka: z.string().optional(),
 });
 
-export const ProductMatchSchema = z.object({
-  tenderId: z.string(),
-  matchedAt: z.string().datetime(),
+export const PolozkaMatchSchema = z.object({
+  polozka_nazev: z.string(),
+  polozka_index: z.number(),
+  mnozstvi: z.number().optional(),
+  jednotka: z.string().optional(),
+  specifikace: z.string().optional(),
   kandidati: z.array(ProductCandidateSchema),
   vybrany_index: z.number(),
   oduvodneni_vyberu: z.string(),
   cenova_uprava: PriceOverrideSchema.optional(),
 });
+
+export const ProductMatchSchema = z.object({
+  tenderId: z.string(),
+  matchedAt: z.string().datetime(),
+  // Legacy single-product fields
+  kandidati: z.array(ProductCandidateSchema).optional(),
+  vybrany_index: z.number().optional(),
+  oduvodneni_vyberu: z.string().optional(),
+  cenova_uprava: PriceOverrideSchema.optional(),
+  // Multi-product fields
+  polozky_match: z.array(PolozkaMatchSchema).optional(),
+}).refine(d => d.kandidati || d.polozky_match,
+  { message: "Must have 'kandidati' or 'polozky_match'" }
+);
 
 // Validation report
 export const ValidationCheckSchema = z.object({
@@ -152,6 +171,7 @@ export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
 export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
 export type PriceOverride = z.infer<typeof PriceOverrideSchema>;
+export type PolozkaMatch = z.infer<typeof PolozkaMatchSchema>;
 export type ProductMatch = z.infer<typeof ProductMatchSchema>;
 export type ValidationCheck = z.infer<typeof ValidationCheckSchema>;
 export type ValidationReport = z.infer<typeof ValidationReportSchema>;
