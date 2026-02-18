@@ -5,6 +5,7 @@ config({ path: new URL('../../../.env', import.meta.url).pathname });
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
+  timeout: 10 * 60 * 1000, // 10 minutes for large multi-item requests
 });
 
 interface AICallResult {
