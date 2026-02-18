@@ -469,9 +469,11 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
 
   try {
     console.log(`Running ${step} for tender ${id}...`);
+    // Match and generate steps can take longer for multi-item tenders
+    const stepTimeout = (step === 'match' || step === 'generate') ? 600000 : 300000;
     execSync(
       `node --import tsx "${join(SCRIPTS_DIR, scriptFile)}" --tender-id=${id}`,
-      { cwd: join(ROOT, 'scripts'), timeout: 300000 }
+      { cwd: join(ROOT, 'scripts'), timeout: stepTimeout }
     );
     const status = await getPipelineStatus(id);
     res.json({ success: true, ...status });
