@@ -86,8 +86,9 @@ async function main() {
 
   console.log(`\nMatching products for ${items.length} item(s) with ${requirements.length} technical requirements...`);
 
-  // Dynamic maxTokens
-  const maxTokens = items.length > 1 ? 16384 : 8192;
+  // Dynamic maxTokens — scale with number of items × candidates
+  // Each item+3 candidates ≈ 3000 tokens output
+  const maxTokens = Math.min(32768, 8192 + items.length * 4000);
 
   // Call Claude for product matching
   const result = await callClaude(
