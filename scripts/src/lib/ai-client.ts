@@ -35,7 +35,7 @@ export async function callClaude(
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-5-20250929',
+        model: process.env.AI_MODEL || 'claude-sonnet-4-5-20250929',
         max_tokens: maxTokens,
         temperature,
         system: systemPrompt,

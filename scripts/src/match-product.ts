@@ -38,7 +38,8 @@ async function main() {
     buildProductMatchUserMessage(
       requirements,
       analysis.zakazka.nazev,
-      analysis.zakazka.predmet
+      analysis.zakazka.predmet,
+      analysis.zakazka.predpokladana_hodnota
     ),
     { maxTokens: 8192, temperature: 0.3 }
   );

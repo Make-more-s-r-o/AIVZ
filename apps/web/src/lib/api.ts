@@ -79,6 +79,38 @@ export async function runStep(id: string, step: StepName) {
   return res.json();
 }
 
+export interface PriceOverrideData {
+  nakupni_cena_bez_dph: number;
+  nakupni_cena_s_dph: number;
+  marze_procent: number;
+  nabidkova_cena_bez_dph: number;
+  nabidkova_cena_s_dph: number;
+  potvrzeno: boolean;
+  poznamka?: string;
+}
+
+export async function updatePriceOverride(id: string, data: PriceOverrideData): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to save price override');
+  }
+  return res.json();
+}
+
+export async function deleteTender(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to delete tender');
+  }
+  return res.json();
+}
+
 export function getDocumentDownloadUrl(id: string, filename: string): string {
   return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
 }

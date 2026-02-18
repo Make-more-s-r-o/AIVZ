@@ -1,8 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { getTenders, uploadFiles, type TenderSummary } from '../lib/api';
+import { getTenders, uploadFiles, deleteTender, type TenderSummary } from '../lib/api';
 import FileUpload from './FileUpload';
-import { FileText, CheckCircle2 } from 'lucide-react';
+import { FileText, CheckCircle2, Trash2 } from 'lucide-react';
 import { cn } from '../lib/cn';
 
 interface TenderListProps {
@@ -32,11 +32,22 @@ export default function TenderList({ onSelect }: TenderListProps) {
     }
   };
 
+  const handleDelete = async (e: React.MouseEvent, tenderId: string) => {
+    e.stopPropagation();
+    if (!confirm(`Smazat zakázku "${tenderId}"? Tato akce je nevratná.`)) return;
+    try {
+      await deleteTender(tenderId);
+      queryClient.invalidateQueries({ queryKey: ['tenders'] });
+    } catch (err) {
+      alert(`Chyba při mazání: ${err}`);
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div>
         <h2 className="text-lg font-semibold">Nová zakázka</h2>
-        <p className="mb-4 text-sm text-gray-500">Nahrajte PDF a DOCX soubory zadávací dokumentace</p>
+        <p className="mb-4 text-sm text-gray-500">Nahrajte soubory zadávací dokumentace (PDF, DOCX, XLS, XLSX)</p>
         <FileUpload onUpload={handleUpload} isUploading={isUploading} />
       </div>
 
@@ -61,11 +72,20 @@ export default function TenderList({ onSelect }: TenderListProps) {
                       <FileText className="h-5 w-5 text-blue-500" />
                       <span className="font-medium">{tender.id}</span>
                     </div>
-                    {completed === 5 ? (
-                      <CheckCircle2 className="h-5 w-5 text-green-500" />
-                    ) : completed > 0 ? (
-                      <span className="text-xs text-gray-500">{completed}/5</span>
-                    ) : null}
+                    <div className="flex items-center gap-2">
+                      {completed === 5 ? (
+                        <CheckCircle2 className="h-5 w-5 text-green-500" />
+                      ) : completed > 0 ? (
+                        <span className="text-xs text-gray-500">{completed}/5</span>
+                      ) : null}
+                      <span
+                        role="button"
+                        onClick={(e) => handleDelete(e, tender.id)}
+                        className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </span>
+                    </div>
                   </div>
                   <div className="mt-2 text-xs text-gray-500">
                     {tender.inputFiles.length} soubor(ů)

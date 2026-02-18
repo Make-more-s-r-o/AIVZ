@@ -5,9 +5,12 @@ node_modules/
 dist/
 .turbo/
 
-# Environment
+# Environment & secrets
 .env
 .env.local
+.env.prod
+docker/.env.prod
+.mcp.json
 
 # Output (generated files)
 output/
@@ -25,6 +28,16 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Test/scratch dirs
+TEST/
+TEST 2/
+TEST3/
+LuDone/
+miniMVP/
+
+# Temporary tender uploads
+input/tender-*/
 
 # Misc
 *.pptx

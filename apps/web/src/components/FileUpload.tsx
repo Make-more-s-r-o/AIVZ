@@ -27,7 +27,7 @@ export default function FileUpload({ onUpload, isUploading }: FileUploadProps) {
     setIsDragging(false);
     const files = Array.from(e.dataTransfer.files).filter((f) => {
       const ext = f.name.split('.').pop()?.toLowerCase();
-      return ext === 'pdf' || ext === 'docx' || ext === 'doc';
+      return ext === 'pdf' || ext === 'docx' || ext === 'doc' || ext === 'xls' || ext === 'xlsx';
     });
     if (files.length > 0) {
       setSelectedFiles((prev) => [...prev, ...files]);
@@ -70,12 +70,12 @@ export default function FileUpload({ onUpload, isUploading }: FileUploadProps) {
         <p className="text-sm font-medium text-gray-700">
           Přetáhněte soubory sem nebo klikněte
         </p>
-        <p className="mt-1 text-xs text-gray-500">PDF, DOCX, DOC</p>
+        <p className="mt-1 text-xs text-gray-500">PDF, DOCX, DOC, XLS, XLSX</p>
         <input
           ref={inputRef}
           type="file"
           multiple
-          accept=".pdf,.docx,.doc"
+          accept=".pdf,.docx,.doc,.xls,.xlsx"
           onChange={handleFileSelect}
           className="hidden"
         />

@@ -1,0 +1,361 @@
+{
+  "name": "VZ Monitor - Hlídač státu",
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Daily 8AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "search-hlidac",
+      "name": "Search Hlídač státu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.hlidacstatu.cz/api/v2/verejnezakazky/hledat",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "dotaz",
+              "value": "=(CPV:30000000 OR CPV:48000000 OR CPV:72000000 OR CPV:30232100 OR CPV:30213000 OR \"informační technologie\" OR \"IT vybavení\" OR \"tiskárna\" OR \"projektor\" OR \"počítač\" OR \"notebook\" OR \"server\") AND stavVZ:zadpisp"
+            },
+            {
+              "name": "strana",
+              "value": "1"
+            },
+            {
+              "name": "razeni",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Hlídač státu API"
+        }
+      }
+    },
+    {
+      "id": "filter-score",
+      "name": "Filter & Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Filter and score tenders for relevance\nconst results = $input.first().json.Results || $input.first().json.results || [];\nconst staticData = $getWorkflowStaticData('global');\n\n// Track seen tender IDs to avoid duplicates\nif (!staticData.seenIds) staticData.seenIds = [];\n\n// Keywords that boost relevance score\nconst highRelevance = ['3d tisk', 'projektor', 'videomapping', 'interaktivní', 'notebook', 'server', 'tiskárna', 'it vybavení', 'informační technologie', 'počítač'];\nconst mediumRelevance = ['hardware', 'software', 'ict', 'digitální', 'multimediální', 'av technika', 'audiovizuální'];\n\nconst scored = [];\n\nfor (const tender of results) {\n  const id = tender.Id || tender.id;\n  \n  // Skip already processed\n  if (staticData.seenIds.includes(id)) continue;\n  \n  const text = [\n    tender.NazevZakazky || tender.nazevZakazky || '',\n    tender.PopisZakazky || tender.popisZakazky || '',\n    tender.Zadavatel?.Jmeno || ''\n  ].join(' ').toLowerCase();\n  \n  let score = 0;\n  \n  // Score by keywords\n  for (const kw of highRelevance) {\n    if (text.includes(kw)) score += 3;\n  }\n  for (const kw of mediumRelevance) {\n    if (text.includes(kw)) score += 1;\n  }\n  \n  // Budget bonus (prefer 100k-10M CZK range)\n  const budget = tender.OdhadovanaHodnotaBezDPH || tender.odhadovanaHodnotaBezDPH || 0;\n  if (budget >= 100000 && budget <= 10000000) score += 2;\n  if (budget > 10000000) score += 1;\n  \n  if (score >= 3) {\n    scored.push({\n      json: {\n        id,\n        nazev: tender.NazevZakazky || tender.nazevZakazky,\n        zadavatel: tender.Zadavatel?.Jmeno || tender.zadavatel?.jmeno || 'Neznámý',\n        budget,\n        lhuta: tender.LhutaDoruceni || tender.lhutaDoruceni || 'Neuvedeno',\n        stavVZ: tender.StavVZ || tender.stavVZ,\n        url: `https://www.hlidacstatu.cz/verejnezakazky/zakazka/${id}`,\n        dokumenty: (tender.Dokumenty || tender.dokumenty || []).map(d => ({\n          nazev: d.TypDokumentu || d.nazev || 'Dokument',\n          url: d.DirectUrl || d.Url || d.url\n        })).filter(d => d.url),\n        score,\n        cpv: tender.CPV || tender.cpv || []\n      }\n    });\n    \n    // Mark as seen\n    staticData.seenIds.push(id);\n  }\n}\n\n// Keep seenIds manageable (last 500)\nif (staticData.seenIds.length > 500) {\n  staticData.seenIds = staticData.seenIds.slice(-500);\n}\n\nreturn scored.length > 0 ? scored : [{ json: { _empty: true, count: 0 } }];"
+      }
+    },
+    {
+      "id": "has-results",
+      "name": "Has Results?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition_0",
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notTrue"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "upload-to-vz",
+      "name": "Upload to VZ API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -60],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/upload-url",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ urls: $json.dokumenty.map(d => d.url), tenderId: 'hs-' + $json.id, metadata: { source: 'hlidac-statu', nazev: $json.nazev, zadavatel: $json.zadavatel, budget: $json.budget, lhuta: $json.lhuta, hlidacUrl: $json.url, score: $json.score } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "VZ API Token"
+        }
+      }
+    },
+    {
+      "id": "run-extract",
+      "name": "Run Extract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -60],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/run/extract",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "VZ API Token"
+        }
+      }
+    },
+    {
+      "id": "run-analyze",
+      "name": "Run Analyze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, -60],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/run/analyze",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "VZ API Token"
+        }
+      }
+    },
+    {
+      "id": "get-analysis",
+      "name": "Get Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -60],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/analysis",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "VZ API Token"
+        }
+      }
+    },
+    {
+      "id": "format-slack",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -60],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const tender = $('Filter & Score').item.json;\nconst analysis = $json;\n\n// Build GO/NOGO recommendation\nconst doporuceni = (analysis.doporuceni || analysis.recommendation || 'N/A').toUpperCase();\nconst emoji = doporuceni.includes('GO') && !doporuceni.includes('NOGO') ? '✅' : doporuceni.includes('NOGO') ? '❌' : '🔶';\n\nconst budget = tender.budget \n  ? `${(tender.budget / 1000000).toFixed(1)} mil. Kč` \n  : 'Neuvedeno';\n\nconst blocks = [\n  {\n    type: 'header',\n    text: {\n      type: 'plain_text',\n      text: `${emoji} ${tender.nazev}`\n    }\n  },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*Zadavatel:*\\n${tender.zadavatel}` },\n      { type: 'mrkdwn', text: `*Budget:*\\n${budget}` },\n      { type: 'mrkdwn', text: `*Lhůta:*\\n${tender.lhuta}` },\n      { type: 'mrkdwn', text: `*Score:*\\n${tender.score}/10` }\n    ]\n  },\n  {\n    type: 'section',\n    text: {\n      type: 'mrkdwn',\n      text: `*Doporučení:* ${doporuceni}\\n${analysis.shrnuti || analysis.summary || ''}`\n    }\n  },\n  {\n    type: 'actions',\n    elements: [\n      {\n        type: 'button',\n        text: { type: 'plain_text', text: '🔗 Hlídač státu' },\n        url: tender.url\n      },\n      {\n        type: 'button',\n        text: { type: 'plain_text', text: '📋 VZ Dashboard' },\n        url: `${$env.VZ_API_URL}`\n      }\n    ]\n  },\n  { type: 'divider' }\n];\n\nreturn { json: { blocks, text: `Nova zakazka: ${tender.nazev}` } };"
+      }
+    },
+    {
+      "id": "slack-notify",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1980, -60],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "",
+          "mode": "name"
+        },
+        "messageType": "block",
+        "blocksUi": "={{ JSON.stringify($json.blocks) }}",
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "Slack VZ"
+        }
+      }
+    },
+    {
+      "id": "no-results",
+      "name": "No New Tenders",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [880, 120],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Daily 8AM": {
+      "main": [
+        [
+          {
+            "node": "Search Hlídač státu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Hlídač státu": {
+      "main": [
+        [
+          {
+            "node": "Filter & Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Score": {
+      "main": [
+        [
+          {
+            "node": "Has Results?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Results?": {
+      "main": [
+        [
+          {
+            "node": "Upload to VZ API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No New Tenders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to VZ API": {
+      "main": [
+        [
+          {
+            "node": "Run Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Extract": {
+      "main": [
+        [
+          {
+            "node": "Run Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Analyze": {
+      "main": [
+        [
+          {
+            "node": "Get Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": "{\"global\":{\"seenIds\":[]}}",
+  "tags": [
+    {
+      "name": "vz-ai-tool"
+    }
+  ]
+}

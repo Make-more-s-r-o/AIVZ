@@ -3,7 +3,7 @@ import { z } from 'zod';
 // Extracted text from documents
 export const ExtractedDocumentSchema = z.object({
   filename: z.string(),
-  type: z.enum(['pdf', 'docx', 'doc']),
+  type: z.enum(['pdf', 'docx', 'doc', 'xls', 'xlsx']),
   text: z.string(),
   pageCount: z.number().optional(),
   isTemplate: z.boolean().default(false),
@@ -32,7 +32,7 @@ export const TenderAnalysisSchema = z.object({
     typ_rizeni: z.string(),
   }),
   kvalifikace: z.array(z.object({
-    typ: z.enum(['profesni', 'technicka', 'ekonomicka']),
+    typ: z.enum(['zakladni_zpusobilost', 'profesni', 'technicka', 'ekonomicka']),
     popis: z.string(),
     splnitelne: z.boolean(),
   })),
@@ -40,7 +40,7 @@ export const TenderAnalysisSchema = z.object({
     nazev: z.string(),
     vaha_procent: z.number(),
     popis: z.string(),
-  })),
+  })).optional().default([]),
   terminy: z.object({
     lhuta_nabidek: z.string().optional().nullable(),
     otevirani_obalek: z.string().optional().nullable(),
@@ -86,8 +86,20 @@ export const ProductCandidateSchema = z.object({
   })),
   cena_bez_dph: z.number(),
   cena_s_dph: z.number(),
+  cena_spolehlivost: z.enum(['vysoka', 'stredni', 'nizka']).default('nizka'),
+  cena_komentar: z.string().optional(),
   dodavatele: z.array(z.string()),
   dostupnost: z.string(),
+});
+
+export const PriceOverrideSchema = z.object({
+  nakupni_cena_bez_dph: z.number(),
+  nakupni_cena_s_dph: z.number(),
+  marze_procent: z.number().default(0),
+  nabidkova_cena_bez_dph: z.number(),
+  nabidkova_cena_s_dph: z.number(),
+  potvrzeno: z.boolean().default(false),
+  poznamka: z.string().optional(),
 });
 
 export const ProductMatchSchema = z.object({
@@ -96,6 +108,7 @@ export const ProductMatchSchema = z.object({
   kandidati: z.array(ProductCandidateSchema),
   vybrany_index: z.number(),
   oduvodneni_vyberu: z.string(),
+  cenova_uprava: PriceOverrideSchema.optional(),
 });
 
 // Validation report
@@ -134,6 +147,7 @@ export type ExtractedDocument = z.infer<typeof ExtractedDocumentSchema>;
 export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
 export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
+export type PriceOverride = z.infer<typeof PriceOverrideSchema>;
 export type ProductMatch = z.infer<typeof ProductMatchSchema>;
 export type ValidationCheck = z.infer<typeof ValidationCheckSchema>;
 export type ValidationReport = z.infer<typeof ValidationReportSchema>;

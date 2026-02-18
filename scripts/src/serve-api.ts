@@ -1,10 +1,14 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
-import { readFile, readdir, mkdir, stat, writeFile } from 'fs/promises';
-import { join, extname } from 'path';
+import { readFile, readdir, mkdir, stat, writeFile, rm } from 'fs/promises';
+import { join, extname, basename } from 'path';
+import { existsSync, createWriteStream } from 'fs';
 import { execSync } from 'child_process';
 import { config } from 'dotenv';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
+import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -18,11 +22,31 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Bearer token auth middleware (only active when API_TOKEN is set)
+const API_TOKEN = process.env.API_TOKEN;
+if (API_TOKEN) {
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/')) return next();
+    if (req.path === '/api/health') return next();
+    const auth = req.headers.authorization;
+    if (auth === `Bearer ${API_TOKEN}`) return next();
+    res.status(401).json({ error: 'Unauthorized' });
+  });
+}
+
+// Middleware: assign a stable tender ID once per request (not per file)
+function assignTenderId(req: express.Request, _res: express.Response, next: express.NextFunction) {
+  if (!req.params.id && !(req as any)._tenderId) {
+    (req as any)._tenderId = `tender-${Date.now()}`;
+  }
+  next();
+}
+
 // File upload config
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (req, _file, cb) => {
-      const tenderId = req.params.id || `tender-${Date.now()}`;
+      const tenderId = req.params.id || (req as any)._tenderId || `tender-${Date.now()}`;
       const dir = join(INPUT_DIR, tenderId);
       await mkdir(dir, { recursive: true });
       cb(null, dir);
@@ -34,10 +58,10 @@ const upload = multer({
   }),
   fileFilter: (_req, file, cb) => {
     const ext = extname(file.originalname).toLowerCase();
-    if (['.pdf', '.docx', '.doc'].includes(ext)) {
+    if (['.pdf', '.docx', '.doc', '.xls', '.xlsx'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF, DOCX, and DOC files are allowed'));
+      cb(new Error('Only PDF, DOCX, DOC, XLS, and XLSX files are allowed'));
     }
   },
 });
@@ -79,6 +103,11 @@ async function getPipelineStatus(tenderId: string) {
   return { tenderId, steps };
 }
 
+// GET /api/health - health check (no auth required)
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0' });
+});
+
 // GET /api/tenders - list all tenders
 app.get('/api/tenders', async (_req, res) => {
   try {
@@ -104,7 +133,7 @@ app.get('/api/tenders', async (_req, res) => {
 });
 
 // POST /api/tenders/upload - upload new tender documents
-app.post('/api/tenders/upload', upload.array('files', 20), async (req, res) => {
+app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
@@ -136,6 +165,103 @@ app.post('/api/tenders/:id/upload', upload.array('files', 20), async (req, res) 
       uploadedFiles: files.map((f) => f.filename),
       ...status,
     });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/tenders/upload-url - download tender documents from URLs (for n8n integration)
+app.post('/api/tenders/upload-url', async (req, res) => {
+  try {
+    const { urls, tenderId: customId, metadata } = req.body as {
+      urls: string[];
+      tenderId?: string;
+      metadata?: Record<string, unknown>;
+    };
+
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'Provide "urls" array with document URLs' });
+    }
+
+    const allowedExts = ['.pdf', '.docx', '.doc', '.xls', '.xlsx'];
+    const tenderId = customId || `tender-${Date.now()}`;
+    const dir = join(INPUT_DIR, tenderId);
+    await mkdir(dir, { recursive: true });
+
+    const downloaded: string[] = [];
+    const errors: string[] = [];
+
+    for (const url of urls) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          errors.push(`${url}: HTTP ${response.status}`);
+          continue;
+        }
+
+        // Extract filename from URL or Content-Disposition header
+        const disposition = response.headers.get('content-disposition');
+        let filename: string;
+        if (disposition) {
+          const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/i);
+          filename = match ? decodeURIComponent(match[1]) : basename(new URL(url).pathname);
+        } else {
+          filename = decodeURIComponent(basename(new URL(url).pathname));
+        }
+
+        // Ensure valid extension
+        const ext = extname(filename).toLowerCase();
+        if (!allowedExts.includes(ext)) {
+          // Try to infer from content-type
+          const ct = response.headers.get('content-type') || '';
+          if (ct.includes('pdf')) filename += '.pdf';
+          else if (ct.includes('word') || ct.includes('docx')) filename += '.docx';
+          else if (ct.includes('spreadsheet') || ct.includes('xlsx')) filename += '.xlsx';
+          else {
+            errors.push(`${url}: unsupported file type (${ext || ct})`);
+            continue;
+          }
+        }
+
+        const filePath = join(dir, filename);
+        const body = response.body;
+        if (!body) {
+          errors.push(`${url}: empty response body`);
+          continue;
+        }
+        await pipeline(Readable.fromWeb(body as any), createWriteStream(filePath));
+        downloaded.push(filename);
+      } catch (err) {
+        errors.push(`${url}: ${String(err)}`);
+      }
+    }
+
+    // Save metadata if provided (e.g. from Hlídač státu)
+    if (metadata) {
+      await writeFile(join(dir, '_metadata.json'), JSON.stringify(metadata, null, 2), 'utf-8');
+    }
+
+    const status = await getPipelineStatus(tenderId);
+    res.json({
+      id: tenderId,
+      downloadedFiles: downloaded,
+      errors: errors.length > 0 ? errors : undefined,
+      ...status,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /api/tenders/:id - delete a tender (input + output)
+app.delete('/api/tenders/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const inputPath = join(INPUT_DIR, id);
+    const outputPath = join(OUTPUT_DIR, id);
+    await rm(inputPath, { recursive: true, force: true });
+    await rm(outputPath, { recursive: true, force: true });
+    res.json({ success: true, deleted: id });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -195,8 +321,8 @@ app.get('/api/tenders/:id/documents', async (req, res) => {
   try {
     const outputDir = join(OUTPUT_DIR, req.params.id);
     const files = await readdir(outputDir);
-    const docxFiles = files.filter((f) => f.endsWith('.docx'));
-    res.json(docxFiles);
+    const docFiles = files.filter((f) => f.endsWith('.docx') || f.endsWith('.xlsx'));
+    res.json(docFiles);
   } catch {
     res.status(404).json({ error: 'No documents found — run generate step first' });
   }
@@ -226,6 +352,31 @@ app.get('/api/tenders/:id/validation', async (req, res) => {
   }
 });
 
+// PUT /api/tenders/:id/product-match/price - save price override
+app.put('/api/tenders/:id/product-match/price', async (req, res) => {
+  const { id } = req.params;
+  const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+
+  try {
+    const raw = await readFile(matchPath, 'utf-8');
+    const productMatch = JSON.parse(raw);
+
+    // Validate the incoming price override
+    const parsed = PriceOverrideSchema.parse(req.body);
+
+    // Merge into product-match.json
+    productMatch.cenova_uprava = parsed;
+    await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+
+    res.json({ success: true, cenova_uprava: parsed });
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'product-match.json not found — run match step first' });
+    }
+    res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  }
+});
+
 // POST /api/tenders/:id/run/:step - run a pipeline step
 const stepFiles: Record<string, string> = {
   extract: 'extract-tender.ts',
@@ -250,6 +401,24 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
+  // Gate: require confirmed prices before document generation
+  if (step === 'generate') {
+    try {
+      const matchRaw = await readFile(join(OUTPUT_DIR, id, 'product-match.json'), 'utf-8');
+      const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
+      if (!matchData.cenova_uprava?.potvrzeno) {
+        return res.status(400).json({
+          error: 'Nejprve potvrďte ceny v záložce Produkty. Bez potvrzené cenové kalkulace nelze generovat dokumenty.',
+        });
+      }
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        return res.status(400).json({ error: 'Nejprve spusťte krok "Produkty" a potvrďte ceny.' });
+      }
+      return res.status(400).json({ error: `Chyba při čtení product-match.json: ${String(err)}` });
+    }
+  }
+
   try {
     console.log(`Running ${step} for tender ${id}...`);
     execSync(
@@ -266,6 +435,14 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     });
   }
 });
+
+// Static file serving for production (React build)
+const staticDir = join(ROOT, 'apps', 'web', 'dist');
+if (existsSync(staticDir)) {
+  app.use(express.static(staticDir));
+  app.get('*', (_req, res) => res.sendFile(join(staticDir, 'index.html')));
+  console.log(`Serving static files from: ${staticDir}`);
+}
 
 app.listen(PORT, () => {
   console.log(`\nVZ AI Tool API server running on http://localhost:${PORT}`);

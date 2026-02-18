@@ -200,11 +200,20 @@ Projekt používá tyto MCP servery (konfigurace v `.mcp.json`):
 
 Cíl: Vzít konkrétní zakázku (3D tiskárna pro tisk termoplastů) a demonstrovat celý flow od analýzy po vygenerování nabídkových dokumentů.
 
-Kroky:
-1. ✅ Strategická analýza a technický blueprint hotový
-2. → Založení projektu (Supabase + Lovable + GitHub)
-3. → Mini MVP: ruční flow s jednou zakázkou
-4. → Automatizace přes n8n workflows
+### Hotové:
+1. ✅ Strategická analýza a technický blueprint
+2. ✅ Založení projektu (monorepo, scripts, web app)
+3. ✅ Pipeline scripts: extract → analyze → match → generate → validate
+4. ✅ API server (Express) + React dashboard s pipeline vizualizací
+5. ✅ AI pricing improvements: confidence rating, budget comparison, cenový komentář
+6. ✅ User price review: cenová kalkulace panel, marže, potvrzení před generováním
+7. ✅ DOCX quality: inline bold, markdown tabulky, numbered lists, Calibri font, borders
+8. ✅ 2× úspěšný end-to-end průchod zakázkou (TEST, TEST 2 složky)
+
+### Další kroky (příští session):
+9. → **Opravit vyplňování template DOCX** — Krycí list, Čestné prohlášení, Seznam poddodavatelů používají volný text "doplní účastník" / "[účastník vyplní]" místo `{{placeholder}}`. Docxtemplater je nedokáže nahradit. Řešení: AI identifikuje placeholder texty v šablonách a nahradí je daty firmy.
+10. → **Validace a opravy** — re-run celého pipeline, kontrola všech dokumentů
+11. → Automatizace přes n8n workflows
 
 ## Známé problémy a workaroundy
 
@@ -212,6 +221,9 @@ Kroky:
 - n8n Sustainable Use License zakazuje hosting n8n jako služby pro zákazníky — API musí jít přes Supabase Edge Functions
 - Supabase Edge Functions CPU limit 2s (I/O wait se nepočítá) — dlouhé AI volání řešit přes n8n
 - Carbone.io community node v n8n (`n8n-nodes-carbone`) nebo alternativa docxtemplater v Code node
+- **Template DOCX z tendrů** mají free-text placeholdery ("doplní účastník"), ne `{{}}` — docxtemplater je nenahradí
+- **API server (serve-api.ts)** se nereloaduje automaticky — po změnách restartovat ručně
+- **hodnotici_kriteria** v TenderAnalysisSchema — AI občas vynechá, řešeno `.optional().default([])`
 
 ## Referenční dokumenty
 

@@ -1,0 +1,47 @@
+services:
+  vz-api:
+    image: ${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}
+    container_name: vz-api
+    restart: always
+    environment:
+      - NODE_ENV=production
+      - API_PORT=3001
+      - API_TOKEN=${API_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AI_MODEL=${AI_MODEL:-claude-sonnet-4-5-20250929}
+    volumes:
+      - vz-input:/app/input
+      - vz-output:/app/output
+      - vz-config:/app/config
+    expose:
+      - "3001"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.vz.rule=Host(`${VZ_SUBDOMAIN:-vz}.${DOMAIN_NAME:-srv997068.hstgr.cloud}`)
+      - traefik.http.routers.vz.tls=true
+      - traefik.http.routers.vz.entrypoints=web,websecure
+      - traefik.http.routers.vz.tls.certresolver=mytlschallenge
+      - traefik.http.middlewares.vz.headers.SSLRedirect=true
+      - traefik.http.middlewares.vz.headers.STSSeconds=315360000
+      - traefik.http.middlewares.vz.headers.browserXSSFilter=true
+      - traefik.http.middlewares.vz.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.vz.headers.forceSTSHeader=true
+      - traefik.http.middlewares.vz.headers.STSIncludeSubdomains=true
+      - traefik.http.routers.vz.middlewares=vz@docker
+      - traefik.http.services.vz.loadbalancer.server.port=3001
+    networks:
+      - root_default
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  vz-input:
+  vz-output:
+  vz-config:
+
+networks:
+  root_default:
+    external: true

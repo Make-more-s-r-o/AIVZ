@@ -145,23 +145,21 @@ Typ:       VZMR (veřejná zakázka malého rozsahu)
 ```
 KROK 4: Stáhni zadávací dokumentaci
 ────────────────────────────────────
-□ V Claude Code s MCP Hlídač státu:
+✅ V Claude Code s MCP Hlídač státu:
   "Najdi zakázku '3D tiskárna pro tisk termoplastů' a ukaž mi
    všechny dostupné informace — zadavatel, popis, termíny,
    podmínky, dokumenty ke stažení."
 
-□ Stáhni zadávací dokumentaci (PDF) z profilu zadavatele
-  → Ulož do: templates/demo/zadavaci-dokumentace.pdf
+✅ Stáhni zadávací dokumentaci (PDF) z profilu zadavatele
+  → Uloženo v: input/3d-tiskarna/ (10 souborů — PDF + DOCX přílohy)
 
-□ Pokud PDF není dostupný přes MCP, stáhni ručně z:
-  - NEN (nen.nipez.cz)
-  - Profilu zadavatele
-  - podo.fen.cz
+✅ Pokud PDF není dostupný přes MCP, stáhni ručně z:
+  - Staženo z profilu zadavatele (podo.fen.cz)
 
 
 KROK 5: AI analýza zadávací dokumentace
 ────────────────────────────────────────
-□ Otevři Claude.ai (web chat) — NE Claude Code
+✅ Realizováno jako pipeline script (scripts/src/analyze-tender.ts)
 □ Nahraj PDF zadávací dokumentace
 □ Prompt:
 
@@ -206,15 +204,13 @@ KROK 5: AI analýza zadávací dokumentace
 
    Odpověz strukturovaně v češtině."
 
-□ Výstup ulož do: docs/demo/analyza-3d-tiskarna.md
-□ Toto je tvůj REFERENČNÍ VÝSTUP — takto bude AI analýza
-  vypadat v produkčním systému
+✅ Výstup: output/3d-tiskarna/analysis.json
+✅ Referenční výstup — strukturovaný JSON s kvalifikací, kritérii, riziky, GO/NOGO
 
 
 KROK 6: Výběr produktu k nabídce
 ─────────────────────────────────
-□ Na základě technických požadavků z analýzy
-  najdi vhodnou 3D tiskárnu, která splňuje specifikaci.
+✅ Realizováno jako pipeline script (scripts/src/match-product.ts)
 
 □ V Claude Code / Claude.ai:
   "Na základě těchto technických požadavků:
@@ -224,9 +220,9 @@ KROK 6: Výběr produktu k nabídce
    Pro každý model uveď: výrobce, model, klíčové parametry,
    orientační cenu v CZK, kde koupit."
 
-□ Vyber JEDEN konkrétní produkt pro nabídku
-□ Zapiš: výrobce, model, parametry, nákupní cena, prodejní cena (s marží)
-□ Ulož do: docs/demo/produkt-3d-tiskarna.md
+✅ AI navrhne 3 kandidáty, vybere nejlepšího, user potvrdí cenu v dashboardu
+✅ Cenová kalkulace: nákupní cena + marže → nabídková cena (s DPH auto-calc)
+✅ Výstup: output/3d-tiskarna/product-match.json (vč. cenova_uprava)
 ```
 
 ### Den 5–6: Generování nabídkových dokumentů
@@ -234,7 +230,7 @@ KROK 6: Výběr produktu k nabídce
 ```
 KROK 7: Vytvoř DOCX šablony
 ────────────────────────────
-□ V Claude Code:
+✅ Realizováno v scripts/src/lib/template-engine.ts (docx lib + docxtemplater)
   "Vytvoř 4 DOCX šablony pro nabídku do veřejné zakázky.
    Použij python-docx knihovnu.
    Šablony ukládej do templates/.
@@ -265,7 +261,7 @@ KROK 7: Vytvoř DOCX šablony
 
 KROK 8: AI vygeneruje obsah nabídky
 ────────────────────────────────────
-□ V Claude.ai (web chat):
+✅ Realizováno jako pipeline script (scripts/src/generate-bid.ts)
 
   PROMPT PRO TECHNICKÝ NÁVRH:
   "Jsi expert na psaní nabídek do veřejných zakázek v ČR.
@@ -293,7 +289,10 @@ KROK 8: AI vygeneruje obsah nabídky
 
 KROK 9: Naplň šablony a vygeneruj dokumenty
 ────────────────────────────────────────────
-□ V Claude Code:
+✅ Cenová nabídka + Technický návrh: generovány programaticky (docx lib)
+✅ Krycí list, Čestné prohlášení, Seznam poddodavatelů: docxtemplater šablony
+⚠️ PROBLÉM: Template DOCX z tendrů používají free-text placeholdery ("doplní
+   účastník"), ne {{placeholder}} — docxtemplater je nenahradí. Třeba opravit.
   "Vytvoř Python skript generate_demo_bid.py který:
    1. Načte DOCX šablony z templates/
    2. Naplní je daty:
@@ -319,7 +318,8 @@ KROK 9: Naplň šablony a vygeneruj dokumenty
 ```
 KROK 10: Kontrola kvality nabídky
 ──────────────────────────────────
-□ V Claude.ai — nahraj VŠECHNY vygenerované dokumenty:
+✅ Realizováno jako pipeline script (scripts/src/validate-bid.ts)
+⚠️ Validace projde, ale template dokumenty mají nevyplněné placeholder texty
 
   "Jsi kontrolor kvality nabídek do VZ. Zkontroluj tyto dokumenty:
    [nahraj 4 PDF/DOCX]
@@ -344,7 +344,7 @@ KROK 10: Kontrola kvality nabídky
 
 KROK 11: Změř výsledky Mini MVP
 ────────────────────────────────
-□ Zapiš časy (kolik minut/hodin trvala každá fáze):
+□ TODO — po opravě template problému. Zapiš časy:
   - Získání a čtení zadávací dokumentace: ___ min
   - AI analýza dokumentace: ___ min
   - Výběr produktu: ___ min
@@ -363,8 +363,9 @@ KROK 11: Změř výsledky Mini MVP
 
 □ Ulož výsledky: docs/demo/mini-mvp-vysledky.md
 
-✅ FÁZE 0.5 HOTOVÁ — máš důkaz, že koncept funguje.
-   Teď víš, co automatizovat a co nechat na člověku.
+⏳ FÁZE 0.5 TÉMĚŘ HOTOVÁ — pipeline funguje end-to-end.
+   Zbývá: opravit template vyplňování (krycí list, čestné prohlášení),
+   pak změřit výsledky a zapsat learnings.
 ```
 
 ---
