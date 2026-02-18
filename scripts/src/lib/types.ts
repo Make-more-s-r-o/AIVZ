@@ -28,11 +28,11 @@ export const TenderAnalysisSchema = z.object({
     }),
     predmet: z.string(),
     predpokladana_hodnota: z.number().optional().nullable(),
-    typ_zakazky: z.enum(['dodavky', 'sluzby', 'stavebni_prace']),
+    typ_zakazky: z.string(),
     typ_rizeni: z.string(),
   }),
   kvalifikace: z.array(z.object({
-    typ: z.enum(['zakladni_zpusobilost', 'profesni', 'technicka', 'ekonomicka']),
+    typ: z.string(),
     popis: z.string(),
     splnitelne: z.boolean(),
   })),
@@ -62,11 +62,11 @@ export const TenderAnalysisSchema = z.object({
   })).optional().default([]),
   rizika: z.array(z.object({
     popis: z.string(),
-    zavaznost: z.enum(['vysoka', 'stredni', 'nizka']),
+    zavaznost: z.string(),
     mitigace: z.string(),
   })),
   doporuceni: z.object({
-    rozhodnuti: z.enum(['GO', 'NOGO', 'ZVAZIT']),
+    rozhodnuti: z.string().transform(v => v.toUpperCase()),
     oduvodneni: z.string(),
     klicove_body: z.array(z.string()),
   }),
