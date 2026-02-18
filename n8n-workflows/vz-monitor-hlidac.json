@@ -137,7 +137,7 @@
       "position": [1100, -60],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/run/extract",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/{{ $('Upload to VZ API').item.json.id }}/run/extract",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -159,7 +159,7 @@
       "position": [1320, -60],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/run/analyze",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/{{ $('Upload to VZ API').item.json.id }}/run/analyze",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -181,7 +181,7 @@
       "position": [1540, -60],
       "parameters": {
         "method": "GET",
-        "url": "={{ $env.VZ_API_URL }}/api/tenders/hs-{{ $('Upload to VZ API').item.json.id || $json.id }}/analysis",
+        "url": "={{ $env.VZ_API_URL }}/api/tenders/{{ $('Upload to VZ API').item.json.id }}/analysis",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}

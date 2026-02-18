@@ -49,20 +49,25 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Restart VPS container via Hostinger API
+        run: |
+          curl -sf -X POST \
+            "https://developers.hostinger.com/api/vps/v1/virtual-machines/${{ secrets.HOSTINGER_VM_ID }}/docker/vz-ai-tool/restart" \
+            -H "Authorization: Bearer ${{ secrets.HOSTINGER_API_KEY }}" \
+            -H "Content-Type: application/json"
 
-      - name: Deploy to Hostinger VPS
-        uses: hostinger/deploy-on-vps@v2
-        with:
-          api-key: ${{ secrets.HOSTINGER_API_KEY }}
-          virtual-machine: ${{ secrets.HOSTINGER_VM_ID }}
-          project-name: vz-ai-tool
-          docker-compose-path: docker/docker-compose.prod.yml
-          environment-variables: |
-            VZ_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            API_TOKEN=${{ secrets.VZ_API_TOKEN }}
-            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-            AI_MODEL=claude-sonnet-4-5-20250929
-            VZ_SUBDOMAIN=vz
-            DOMAIN_NAME=srv997068.hstgr.cloud
+      - name: Wait and health check
+        run: |
+          echo "Waiting 60s for container restart..."
+          sleep 60
+          for i in 1 2 3 4 5; do
+            if curl -sf --max-time 10 "https://vz.srv997068.hstgr.cloud/api/health"; then
+              echo ""
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i failed, waiting 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 5 attempts"
+          exit 1

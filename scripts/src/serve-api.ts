@@ -18,18 +18,29 @@ const OUTPUT_DIR = join(ROOT, 'output');
 const SCRIPTS_DIR = join(ROOT, 'scripts', 'src');
 const PORT = process.env.API_PORT || 3001;
 
+// Startup validation
+const companyConfigPath = join(ROOT, 'config', 'company.json');
+if (!existsSync(companyConfigPath)) {
+  console.error('WARNING: config/company.json not found — generate step will fail');
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 // Bearer token auth middleware (only active when API_TOKEN is set)
+// GET requests are public (frontend reads), POST/PUT/DELETE require Bearer token or same-origin
 const API_TOKEN = process.env.API_TOKEN;
 if (API_TOKEN) {
   app.use((req, res, next) => {
     if (!req.path.startsWith('/api/')) return next();
     if (req.path === '/api/health') return next();
+    if (req.method === 'GET') return next();
     const auth = req.headers.authorization;
     if (auth === `Bearer ${API_TOKEN}`) return next();
+    // Allow same-origin browser requests (frontend on same server)
+    const origin = req.headers.origin || req.headers.referer;
+    if (origin && req.hostname && origin.includes(req.hostname)) return next();
     res.status(401).json({ error: 'Unauthorized' });
   });
 }
@@ -422,7 +433,7 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   try {
     console.log(`Running ${step} for tender ${id}...`);
     execSync(
-      `npx tsx "${join(SCRIPTS_DIR, scriptFile)}" --tender-id=${id}`,
+      `node --import tsx "${join(SCRIPTS_DIR, scriptFile)}" --tender-id=${id}`,
       { cwd: join(ROOT, 'scripts'), timeout: 300000 }
     );
     const status = await getPipelineStatus(id);
