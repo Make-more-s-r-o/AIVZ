@@ -125,8 +125,12 @@ export const ValidationReportSchema = z.object({
   overall_score: z.number().min(1).max(10),
   ready_to_submit: z.boolean(),
   checks: z.array(ValidationCheckSchema),
-  kriticke_problemy: z.array(z.string()),
-  doporuceni: z.array(z.string()),
+  kriticke_problemy: z.array(z.union([z.string(), z.object({}).passthrough()])).transform(
+    items => items.map(i => typeof i === 'string' ? i : JSON.stringify(i))
+  ),
+  doporuceni: z.array(z.union([z.string(), z.object({}).passthrough()])).transform(
+    items => items.map(i => typeof i === 'string' ? i : JSON.stringify(i))
+  ),
 });
 
 // Pipeline status
