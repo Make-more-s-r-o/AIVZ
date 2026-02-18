@@ -49,16 +49,42 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Restart VPS container via Hostinger API
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS via Hostinger API
         run: |
-          curl -sf -X POST \
-            "https://developers.hostinger.com/api/vps/v1/virtual-machines/${{ secrets.HOSTINGER_VM_ID }}/docker/vz-ai-tool/restart" \
+          # Read compose file and build JSON payload with resolved env vars
+          COMPOSE_CONTENT=$(cat docker/docker-compose.prod.yml \
+            | sed "s|\${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}|ghcr.io/make-more-s-r-o/aivz:latest|g" \
+            | sed "s|\${API_TOKEN}|${{ secrets.VZ_API_TOKEN }}|g" \
+            | sed "s|\${ANTHROPIC_API_KEY}|${{ secrets.ANTHROPIC_API_KEY }}|g" \
+            | sed "s|\${AI_MODEL:-claude-sonnet-4-5-20250929}|claude-sonnet-4-5-20250929|g" \
+            | sed "s|\${VZ_SUBDOMAIN:-vz}|vz|g" \
+            | sed "s|\${DOMAIN_NAME:-srv997068.hstgr.cloud}|srv997068.hstgr.cloud|g")
+
+          PAYLOAD=$(jq -n --arg content "$COMPOSE_CONTENT" --arg name "vz-ai-tool" \
+            '{content: $content, project_name: $name}')
+
+          HTTP_CODE=$(curl -s -o /tmp/deploy-response.txt -w "%{http_code}" -X POST \
+            "https://developers.hostinger.com/api/vps/v1/virtual-machines/${{ secrets.HOSTINGER_VM_ID }}/docker" \
             -H "Authorization: Bearer ${{ secrets.HOSTINGER_API_KEY }}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          cat /tmp/deploy-response.txt
+          echo ""
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Deploy triggered successfully (HTTP $HTTP_CODE)"
+          else
+            echo "Deploy failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
 
       - name: Wait and health check
         run: |
-          echo "Waiting 60s for container restart..."
+          echo "Waiting 60s for container to pull image and start..."
           sleep 60
           for i in 1 2 3 4 5; do
             if curl -sf --max-time 10 "https://vz.srv997068.hstgr.cloud/api/health"; then

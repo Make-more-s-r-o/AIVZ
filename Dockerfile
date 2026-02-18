@@ -28,14 +28,19 @@ COPY --from=api-build /app/node_modules node_modules
 COPY --from=api-build /app/package.json package.json
 
 # Create data directories
-RUN mkdir -p input output config
+RUN mkdir -p input output config config-defaults
 
-# Copy default company config if available
-COPY config/ config/
+# Copy default company config to a non-volume path (volumes override /app/config)
+COPY config/ config-defaults/
+
+# Entrypoint seeds defaults into volumes on first run
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 3001
 
 ENV NODE_ENV=production
 ENV API_PORT=3001
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["node", "--import", "tsx", "scripts/src/serve-api.ts"]
