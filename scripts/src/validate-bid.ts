@@ -108,8 +108,12 @@ Odpověz ve formátu:
   "doporuceni": ["..."]
 }`;
 
+  // Scale maxTokens for multi-item tenders (more checks = longer response)
+  const itemCount = productMatch.polozky_match?.length ?? 1;
+  const maxTokens = Math.min(4096 + itemCount * 1500, 16384);
+
   const result = await callClaude(VALIDATE_SYSTEM, userMessage, {
-    maxTokens: 4096,
+    maxTokens,
     temperature: 0.1,
   });
 
