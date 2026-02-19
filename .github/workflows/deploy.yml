@@ -59,7 +59,7 @@ jobs:
             | sed "s|\${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}|ghcr.io/make-more-s-r-o/aivz:latest|g" \
             | sed "s|\${API_TOKEN}|${{ secrets.VZ_API_TOKEN }}|g" \
             | sed "s|\${ANTHROPIC_API_KEY}|${{ secrets.ANTHROPIC_API_KEY }}|g" \
-            | sed "s|\${AI_MODEL:-claude-sonnet-4-5-20250929}|claude-sonnet-4-5-20250929|g" \
+            | sed "s|\${AI_MODEL:-claude-sonnet-4-6-20250514}|claude-sonnet-4-6-20250514|g" \
             | sed "s|\${VZ_SUBDOMAIN:-vz}|vz|g" \
             | sed "s|\${DOMAIN_NAME:-srv997068.hstgr.cloud}|srv997068.hstgr.cloud|g")
 

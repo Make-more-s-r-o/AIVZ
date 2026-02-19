@@ -20,7 +20,8 @@ Pro každý produkt uveď:
 - Dostupné dodavatele v ČR
 - Dostupnost (skladem / na objednávku / dodací lhůta)
 
-Vyber nejlepší kandidáta a zdůvodni výběr.
+Seřaď kandidáty od NEJLEVNĚJŠÍHO. vybrany_index = index nejlevnějšího produktu, který splňuje VŠECHNY povinné požadavky.
+U veřejných zakázek je nejčastější hodnotící kritérium NEJNIŽŠÍ NABÍDKOVÁ CENA — proto preferuj levnější produkt, pokud splňuje všechny povinné požadavky.
 
 DŮLEŽITÉ PRAVIDLA PRO CENY:
 - Ceny jsou ORIENTAČNÍ ODHAD — nemáš přístup k aktuálním e-shopům

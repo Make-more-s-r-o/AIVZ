@@ -1,5 +1,5 @@
 import { readFile, readdir } from 'fs/promises';
-import { basename } from 'path';
+import { basename, join } from 'path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { callClaude } from './ai-client.js';
@@ -20,6 +20,7 @@ import {
   LevelFormat,
   convertMillimetersToTwip,
 } from 'docx';
+import { parseDocx, parseExcel } from './document-parser.js';
 import type { TenderAnalysis, ProductCandidate } from './types.js';
 
 interface CompanyProfile {
@@ -423,7 +424,7 @@ export async function fillTemplateWithAI(
 export interface DiscoveredTemplate {
   path: string;
   filename: string;
-  type: 'kryci_list' | 'cestne_prohlaseni' | 'seznam_poddodavatelu' | 'kupni_smlouva' | 'technicka_specifikace' | 'unknown';
+  type: 'kryci_list' | 'cestne_prohlaseni' | 'seznam_poddodavatelu' | 'kupni_smlouva' | 'technicka_specifikace' | 'other';
 }
 
 const TEMPLATE_PATTERNS: Array<{ type: DiscoveredTemplate['type']; patterns: RegExp[] }> = [
@@ -449,8 +450,39 @@ const TEMPLATE_PATTERNS: Array<{ type: DiscoveredTemplate['type']; patterns: Reg
   },
 ];
 
+// Files that should NOT be treated as fillable templates (tender docs, instructions)
+const SKIP_FILENAME_PATTERNS = [
+  /obchodn[ií]\s*podm[ií]nky/i,
+  /výzva/i,
+  /zadávac[ií]\s*dokument/i,
+];
+
 /**
- * Scan an input directory and classify DOCX template files by name.
+ * Classify template type by content keywords.
+ * Returns 'other' if placeholders are present but type cannot be determined.
+ */
+function classifyByContent(text: string): DiscoveredTemplate['type'] | null {
+  const lower = text.toLowerCase();
+  if (/kryc[ií]\s*list/i.test(lower)) return 'kryci_list';
+  if (/čestně\s*prohlašuj/i.test(lower) || /čestné\s*prohlášení/i.test(lower)) return 'cestne_prohlaseni';
+  if (/poddodavatel/i.test(lower)) return 'seznam_poddodavatelu';
+  if (/kupní\s*smlouv/i.test(lower) || /smlouva\s*o\s*dodávce/i.test(lower)) return 'kupni_smlouva';
+  if (/technická\s*specifikace/i.test(lower)) return 'technicka_specifikace';
+  return null;
+}
+
+/**
+ * Check if text contains placeholder patterns that signal "needs manual input".
+ */
+function hasPlaceholders(text: string): boolean {
+  const lower = text.toLowerCase();
+  return UNFILLED_PATTERNS.some(p => lower.includes(p.toLowerCase()))
+    || /_{3,}|\.{4,}|…{2,}|\[vyplnit\]|\[doplnit\]|\[účastník vyplní\]/i.test(text);
+}
+
+/**
+ * Scan an input directory and classify DOCX/XLSX template files.
+ * Uses filename regex first, then falls back to content-based detection.
  */
 export async function discoverTemplates(inputDir: string): Promise<DiscoveredTemplate[]> {
   const files = await readdir(inputDir);
@@ -461,10 +493,13 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
     const lowerFilename = filename.toLowerCase();
     // Support both .docx and .xls/.xlsx templates
     if (!lowerFilename.endsWith('.docx') && !lowerFilename.endsWith('.xls') && !lowerFilename.endsWith('.xlsx')) continue;
-    // Skip non-template files (main tender docs that shouldn't be filled)
-    if (/obchodn[ií]\s*podm[ií]nky/i.test(filename)) continue;
+    // Skip non-template files by filename
+    if (SKIP_FILENAME_PATTERNS.some(p => p.test(filename))) continue;
 
-    let type: DiscoveredTemplate['type'] = 'unknown';
+    const filePath = join(inputDir, filename);
+
+    // 1. Try filename-based classification first (fast)
+    let type: DiscoveredTemplate['type'] | null = null;
     for (const { type: t, patterns } of TEMPLATE_PATTERNS) {
       if (patterns.some((p) => p.test(filename))) {
         type = t;
@@ -472,12 +507,31 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
       }
     }
 
-    // Include recognized template types, allow up to 2 per type (e.g. 2× čestné prohlášení)
-    if (type !== 'unknown') {
+    // 2. Fallback: content-based detection
+    if (!type) {
+      try {
+        let text: string;
+        if (lowerFilename.endsWith('.docx')) {
+          text = await parseDocx(filePath);
+        } else {
+          text = await parseExcel(filePath);
+        }
+
+        // Only consider files that have placeholder patterns
+        if (hasPlaceholders(text)) {
+          type = classifyByContent(text) || 'other';
+        }
+      } catch (err) {
+        console.log(`  Warning: Could not read ${filename} for content detection: ${err}`);
+      }
+    }
+
+    // 3. Add if detected, with dedup limit of 4 per type
+    if (type) {
       const count = typeCounts.get(type) || 0;
-      if (count < 2) {
+      if (count < 4) {
         typeCounts.set(type, count + 1);
-        templates.push({ path: `${inputDir}/${filename}`, filename, type });
+        templates.push({ path: filePath, filename, type });
       }
     }
   }

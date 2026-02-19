@@ -15,7 +15,7 @@ interface AICallResult {
   costCZK: number;
 }
 
-// Claude Sonnet 4.5 pricing: $3/M input, $15/M output
+// Claude Sonnet 4.6 pricing: $3/M input, $15/M output
 // At ~24 CZK/USD
 const PRICE_INPUT_PER_TOKEN = (3 / 1_000_000) * 24;
 const PRICE_OUTPUT_PER_TOKEN = (15 / 1_000_000) * 24;
@@ -36,7 +36,7 @@ export async function callClaude(
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await client.messages.create({
-        model: process.env.AI_MODEL || 'claude-sonnet-4-5-20250929',
+        model: process.env.AI_MODEL || 'claude-sonnet-4-6-20250514',
         max_tokens: maxTokens,
         temperature,
         system: systemPrompt,

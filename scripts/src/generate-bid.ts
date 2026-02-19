@@ -16,6 +16,17 @@ import type { TenderAnalysis, ProductMatch, ProductCandidate } from './lib/types
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
+/** Remove diacritics, replace spaces with underscores, strip extension */
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/\.[^.]+$/, '') // remove extension
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // remove diacritics
+    .replace(/[^a-zA-Z0-9_-]/g, '_') // replace non-alphanum
+    .replace(/_+/g, '_') // collapse underscores
+    .replace(/^_|_$/g, '') // trim
+    .toLowerCase();
+}
+
 const ROOT = new URL('../../', import.meta.url).pathname;
 
 async function main() {
@@ -181,7 +192,7 @@ async function main() {
     const count = typeCounters.get(template.type) || 0;
     typeCounters.set(template.type, count + 1);
 
-    const baseName = OUTPUT_NAMES[template.type] || template.type;
+    const baseName = OUTPUT_NAMES[template.type] || sanitizeFilename(template.filename);
     const suffix = count > 0 ? `_${count + 1}` : '';
     const isExcel = template.filename.toLowerCase().endsWith('.xls') || template.filename.toLowerCase().endsWith('.xlsx');
     const ext = isExcel ? '.xlsx' : '.docx';

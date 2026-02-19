@@ -8,7 +8,7 @@ services:
       - API_PORT=3001
       - API_TOKEN=${API_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - AI_MODEL=${AI_MODEL:-claude-sonnet-4-5-20250929}
+      - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6-20250514}
     volumes:
       - vz-input:/app/input
       - vz-output:/app/output
