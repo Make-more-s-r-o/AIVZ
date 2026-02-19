@@ -31,6 +31,11 @@ KRITICKÉ PRAVIDLO PRO PŘESNÉ PARAMETRY:
 - V "shoda_s_pozadavky" uveď PŘESNOU hodnotu z datasheetu vybraného produktu, ne požadovanou hodnotu
 - Pokud u příslušenství (myš, brašna, klávesnice) nejsou přesné parametry, stačí odpovídající kvalita
 
+EFEKTIVITA VÝSTUPU:
+- V "shoda_s_pozadavky" uváděj POUZE požadavky RELEVANTNÍ pro danou položku (ne všechny z celé zakázky)
+- Např. pro "NB typ 1" uváděj jen požadavky na notebooky, NE požadavky na monitory
+- To výrazně zkrátí odpověď a zabrání oříznutí
+
 DŮLEŽITÉ PRAVIDLA PRO CENY:
 - Ceny jsou ORIENTAČNÍ ODHAD — nemáš přístup k aktuálním e-shopům
 - U každého produktu uveď "cena_spolehlivost": "vysoka" / "stredni" / "nizka"

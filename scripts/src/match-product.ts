@@ -127,7 +127,10 @@ async function main() {
   if (items.length > 0) {
     console.log(`\nMatching ${items.length} product/accessory item(s) with ${requirements.length} technical requirements...`);
 
-    const maxTokens = Math.min(32768, 8192 + items.length * 4000);
+    // Scale tokens: base + items × candidates × requirements
+    // 6 items × 3 candidates × 30 requirements can easily hit 40k+ tokens
+    const reqCount = items[0]?.technicke_pozadavky?.length || 10;
+    const maxTokens = Math.min(65536, 8192 + items.length * candidateCount * Math.max(reqCount * 80, 2000));
 
     const result = await callClaude(
       PRODUCT_MATCH_SYSTEM,
@@ -146,7 +149,36 @@ async function main() {
       jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
     }
 
-    const parsed = JSON.parse(jsonStr);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch (parseErr) {
+      // Try to recover truncated JSON by finding the last complete polozky_match entry
+      console.log(`  Warning: JSON parse failed, attempting recovery...`);
+      const lastComplete = jsonStr.lastIndexOf('"oduvodneni_vyberu"');
+      if (lastComplete > 0) {
+        // Find the end of that value string and close the array/object
+        const afterOduvodneni = jsonStr.indexOf('\n', lastComplete);
+        if (afterOduvodneni > 0) {
+          const truncated = jsonStr.substring(0, afterOduvodneni).replace(/,\s*$/, '');
+          // Count unclosed brackets and close them
+          const opens = (truncated.match(/[\[{]/g) || []).length;
+          const closes = (truncated.match(/[\]}]/g) || []).length;
+          const closers = ']}'.repeat(Math.max(0, opens - closes));
+          const fixed = truncated + closers;
+          try {
+            parsed = JSON.parse(fixed);
+            console.log(`  Recovery successful — parsed ${parsed.polozky_match?.length || 0} items`);
+          } catch {
+            throw parseErr; // Recovery failed, throw original
+          }
+        } else {
+          throw parseErr;
+        }
+      } else {
+        throw parseErr;
+      }
+    }
 
     // Enrich candidates with fallback URLs
     if (parsed.kandidati) {
