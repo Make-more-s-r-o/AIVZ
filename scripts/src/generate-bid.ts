@@ -64,7 +64,12 @@ async function main() {
   }>;
 
   if (isMultiProduct) {
-    console.log(`  Multi-product mode: ${productMatch.polozky_match!.length} items`);
+    const itemTypes = productMatch.polozky_match!.reduce((acc, pm) => {
+      const t = (pm as any).typ || 'produkt';
+      acc[t] = (acc[t] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    console.log(`  Multi-product mode: ${productMatch.polozky_match!.length} items (${Object.entries(itemTypes).map(([k,v]) => `${v} ${k}`).join(', ')})`);
     selectedProducts = productMatch.polozky_match!.map(pm => {
       const product = pm.kandidati[pm.vybrany_index];
       const override = pm.cenova_uprava;

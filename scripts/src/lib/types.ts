@@ -110,6 +110,7 @@ export const PolozkaMatchSchema = z.object({
   mnozstvi: z.number().optional(),
   jednotka: z.string().optional(),
   specifikace: z.string().optional(),
+  typ: z.enum(['produkt', 'prislusenstvi', 'sluzba']).default('produkt'),
   kandidati: z.array(ProductCandidateSchema),
   vybrany_index: z.number(),
   oduvodneni_vyberu: z.string(),

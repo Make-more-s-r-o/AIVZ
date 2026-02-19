@@ -4,6 +4,7 @@ export interface MatchableItem {
   jednotka?: string | null;
   specifikace: string;
   technicke_pozadavky: Array<{ parametr: string; pozadovana_hodnota: string; jednotka?: string | null; povinny: boolean }>;
+  typ?: 'produkt' | 'prislusenstvi';
 }
 
 export const PRODUCT_MATCH_SYSTEM = `Jsi expert na IT hardware, techniku a technologie s hlubokými znalostmi trhu v České republice. Na základě technických požadavků ze zadávací dokumentace veřejné zakázky navrhneš konkrétní produkty, které splňují požadavky.
@@ -22,6 +23,13 @@ Pro každý produkt uveď:
 
 Seřaď kandidáty od NEJLEVNĚJŠÍHO. vybrany_index = index nejlevnějšího produktu, který splňuje VŠECHNY povinné požadavky.
 U veřejných zakázek je nejčastější hodnotící kritérium NEJNIŽŠÍ NABÍDKOVÁ CENA — proto preferuj levnější produkt, pokud splňuje všechny povinné požadavky.
+
+KRITICKÉ PRAVIDLO PRO PŘESNÉ PARAMETRY:
+- Pokud požadavek uvádí KONKRÉTNÍ hodnotu (např. "DDR5 5600 MHz", "PCIe Gen4 NVMe", "min. 16GB"), vybraný produkt MUSÍ mít PŘESNĚ tuto nebo vyšší hodnotu
+- DDR5 5600 MHz ≠ DDR5 5200 MHz (5200 NESPLŇUJE požadavek 5600!)
+- Pokud levnější model nesplňuje přesný parametr, vyber dražší model, který jej splňuje
+- V "shoda_s_pozadavky" uveď PŘESNOU hodnotu z datasheetu vybraného produktu, ne požadovanou hodnotu
+- Pokud u příslušenství (myš, brašna, klávesnice) nejsou přesné parametry, stačí odpovídající kvalita
 
 DŮLEŽITÉ PRAVIDLA PRO CENY:
 - Ceny jsou ORIENTAČNÍ ODHAD — nemáš přístup k aktuálním e-shopům
@@ -144,6 +152,46 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
       ],
       "vybrany_index": 0,
       "oduvodneni_vyberu": "..."
+    }
+  ]
+}`;
+}
+
+export function buildServicePricingMessage(
+  services: Array<{ nazev: string; mnozstvi?: number | null; jednotka?: string | null; specifikace: string }>,
+  tenderName: string,
+  budgetBezDph?: number | null,
+): string {
+  const budgetLine = budgetBezDph
+    ? `\nPředpokládaná hodnota celé zakázky (bez DPH): ${budgetBezDph.toLocaleString('cs-CZ')} Kč\n`
+    : '';
+
+  const serviceList = services.map((s, i) => {
+    const qty = s.mnozstvi ? ` (množství: ${s.mnozstvi}${s.jednotka ? ` ${s.jednotka}` : ''})` : '';
+    return `${i + 1}. ${s.nazev}${qty}\n   Specifikace: ${s.specifikace}`;
+  }).join('\n');
+
+  return `Zakázka: ${tenderName}
+${budgetLine}
+Následující položky jsou SLUŽBY (doprava, instalace, školení, apod.). Nejsou to fyzické produkty — nemají kandidáty.
+Odhadni realistickou cenu za každou službu v kontextu dané zakázky.
+
+Služby k ocenění:
+${serviceList}
+
+Odpověz ve formátu:
+{
+  "sluzby": [
+    {
+      "nazev": "Doprava a instalace",
+      "mnozstvi": 1,
+      "jednotka": "soubor",
+      "popis": "Doprava na místo dodání, instalace a zprovoznění",
+      "cena_bez_dph": 5000,
+      "cena_s_dph": 6050,
+      "cena_spolehlivost": "stredni",
+      "cena_komentar": "Standardní cena dopravy a instalace IT techniky",
+      "oduvodneni": "Běžná cena za dopravu a instalaci"
     }
   ]
 }`;

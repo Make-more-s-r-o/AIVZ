@@ -129,3 +129,26 @@ export async function deleteTender(id: string): Promise<{ success: boolean }> {
 export function getDocumentDownloadUrl(id: string, filename: string): string {
   return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
 }
+
+// Attachments (qualification documents)
+export async function getAttachments(id: string): Promise<string[]> {
+  return fetchJson(`/tenders/${id}/attachments`);
+}
+
+export async function uploadAttachments(id: string, files: File[]): Promise<{ uploaded: string[]; attachments: string[] }> {
+  const formData = new FormData();
+  files.forEach((f) => formData.append('files', f));
+  const res = await fetch(`${API_BASE}/tenders/${id}/attachments`, { method: 'POST', body: formData });
+  if (!res.ok) throw new Error('Upload failed');
+  return res.json();
+}
+
+export async function deleteAttachment(id: string, filename: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Delete failed');
+  return res.json();
+}
+
+export function getAttachmentDownloadUrl(id: string, filename: string): string {
+  return `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
+}

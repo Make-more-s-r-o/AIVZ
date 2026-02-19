@@ -415,6 +415,81 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
   }
 });
 
+// --- Attachments (qualification documents) ---
+
+const attachmentUpload = multer({
+  storage: multer.diskStorage({
+    destination: async (req, _file, cb) => {
+      const dir = join(OUTPUT_DIR, req.params.id as string, 'prilohy');
+      await mkdir(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'));
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = extname(file.originalname).toLowerCase();
+    if (['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF, DOCX, XLS/XLSX, and image files are allowed'));
+    }
+  },
+});
+
+// POST /api/tenders/:id/attachments - upload qualification documents
+app.post('/api/tenders/:id/attachments', attachmentUpload.array('files', 20), async (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+    const dir = join(OUTPUT_DIR, req.params.id as string, 'prilohy');
+    const allFiles = await readdir(dir);
+    res.json({
+      uploaded: files.map(f => f.filename),
+      attachments: allFiles.filter(f => !f.startsWith('.')),
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/attachments - list attachments
+app.get('/api/tenders/:id/attachments', async (req, res) => {
+  try {
+    const dir = join(OUTPUT_DIR, req.params.id, 'prilohy');
+    await mkdir(dir, { recursive: true });
+    const files = await readdir(dir);
+    res.json(files.filter(f => !f.startsWith('.')));
+  } catch {
+    res.json([]);
+  }
+});
+
+// DELETE /api/tenders/:id/attachments/:filename - delete an attachment
+app.delete('/api/tenders/:id/attachments/:filename', async (req, res) => {
+  try {
+    const filePath = join(OUTPUT_DIR, req.params.id, 'prilohy', req.params.filename);
+    await rm(filePath, { force: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/attachments/:filename - download an attachment
+app.get('/api/tenders/:id/attachments/:filename', async (req, res) => {
+  try {
+    const filePath = join(OUTPUT_DIR, req.params.id, 'prilohy', req.params.filename);
+    await stat(filePath);
+    res.download(filePath);
+  } catch {
+    res.status(404).json({ error: 'Attachment not found' });
+  }
+});
+
 // POST /api/tenders/:id/run/:step - run a pipeline step
 const stepFiles: Record<string, string> = {
   extract: 'extract-tender.ts',

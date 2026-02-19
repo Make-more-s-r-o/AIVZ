@@ -54,7 +54,18 @@ async function main() {
   const files = await readdir(outputDir);
   const docxFiles = files.filter((f) => f.endsWith('.docx'));
 
+  // List qualification attachments
+  let attachments: string[] = [];
+  try {
+    const prilohyDir = join(outputDir, 'prilohy');
+    attachments = await readdir(prilohyDir);
+    attachments = attachments.filter(f => !f.startsWith('.'));
+  } catch {}
+
   console.log(`\nFound ${docxFiles.length} DOCX documents to validate`);
+  if (attachments.length > 0) {
+    console.log(`Found ${attachments.length} qualification attachments: ${attachments.join(', ')}`);
+  }
 
   // Resolve selected products for both single and multi-product paths
   let productsSection: string;
@@ -96,6 +107,7 @@ ${productsSection}
 
 Vygenerované dokumenty:
 ${docxFiles.map((f) => `- ${f}`).join('\n')}
+${attachments.length > 0 ? `\nKvalifikační přílohy (nahrané uživatelem):\n${attachments.map((f) => `- ${f}`).join('\n')}` : '\nKvalifikační přílohy: ŽÁDNÉ (uživatel zatím nenahrál výpis z OR, reference apod.)'}
 
 Odpověz ve formátu:
 {

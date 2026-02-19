@@ -8,7 +8,7 @@ import {
   type PriceOverrideData,
 } from '../lib/api';
 import { cn } from '../lib/cn';
-import { ChevronDown, ChevronRight, Package } from 'lucide-react';
+import { ChevronDown, ChevronRight, Package, Wrench, Mouse } from 'lucide-react';
 import ProductCandidateCard from './ProductCandidateCard';
 import ItemPriceCalculator from './ItemPriceCalculator';
 
@@ -177,6 +177,10 @@ function MultiItemView({ match, tenderId, budget, queryClient }: any) {
         const isExpanded = expandedItems.has(idx);
         const selectedProduct = pm.kandidati[pm.vybrany_index];
         const isItemConfirmed = pm.cenova_uprava?.potvrzeno;
+        const itemType = pm.typ || 'produkt';
+        const TypeIcon = itemType === 'sluzba' ? Wrench : itemType === 'prislusenstvi' ? Mouse : Package;
+        const typeBadge = itemType === 'sluzba' ? 'Služba' : itemType === 'prislusenstvi' ? 'Příslušenství' : null;
+        const typeBadgeColor = itemType === 'sluzba' ? 'bg-purple-100 text-purple-700' : 'bg-cyan-100 text-cyan-700';
 
         return (
           <div key={idx} className={cn(
@@ -193,11 +197,19 @@ function MultiItemView({ match, tenderId, budget, queryClient }: any) {
                   ? <ChevronDown className="h-4 w-4 text-gray-400" />
                   : <ChevronRight className="h-4 w-4 text-gray-400" />
                 }
+                <TypeIcon className="h-4 w-4 text-gray-400" />
                 <div className="text-left">
-                  <div className="text-sm font-medium">{pm.polozka_nazev}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{pm.polozka_nazev}</span>
+                    {typeBadge && (
+                      <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', typeBadgeColor)}>
+                        {typeBadge}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-gray-500">
                     {pm.mnozstvi ? `${pm.mnozstvi} ${pm.jednotka || 'ks'}` : ''}
-                    {selectedProduct && ` — ${selectedProduct.vyrobce} ${selectedProduct.model}`}
+                    {selectedProduct && itemType !== 'sluzba' && ` — ${selectedProduct.vyrobce} ${selectedProduct.model}`}
                   </div>
                 </div>
               </div>
