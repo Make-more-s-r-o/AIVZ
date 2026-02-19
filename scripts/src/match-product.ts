@@ -36,16 +36,24 @@ const ACCESSORY_KEYWORDS = [
 type ItemCategory = 'produkt' | 'prislusenstvi' | 'sluzba';
 
 function categorizeItem(item: { nazev: string; specifikace: string }): ItemCategory {
+  const name = item.nazev.toLowerCase();
   const text = `${item.nazev} ${item.specifikace}`.toLowerCase();
 
-  // Check services first (most restrictive)
-  if (SERVICE_KEYWORDS.some(kw => text.startsWith(kw) || text.includes(`pouze ${kw}`))) {
+  // Check services first — match on item NAME only (not full spec)
+  if (SERVICE_KEYWORDS.some(kw => name.startsWith(kw) || name.includes(`pouze ${kw}`))) {
     return 'sluzba';
   }
 
-  // Check accessories
-  if (ACCESSORY_KEYWORDS.some(kw => text.includes(kw))) {
+  // Check accessories — match on item NAME only
+  // (specs may mention accessories like "myš" as part of a bigger product description)
+  if (ACCESSORY_KEYWORDS.some(kw => name.includes(kw))) {
     return 'prislusenstvi';
+  }
+
+  // Double-check: if name looks like a main product category, force 'produkt'
+  const productPatterns = ['notebook', 'nb ', 'nb typ', 'pc ', 'pc typ', 'počítač', 'monitor', 'server', 'tiskárna', 'projektor', 'switch', 'nas ', 'laptop', 'workstation', 'desktop'];
+  if (productPatterns.some(p => name.includes(p))) {
+    return 'produkt';
   }
 
   return 'produkt';
