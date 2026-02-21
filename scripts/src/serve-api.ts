@@ -5,11 +5,12 @@ import { readFile, readdir, mkdir, stat, writeFile, rm } from 'fs/promises';
 import { getCostSummary } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
 import { existsSync, createWriteStream } from 'fs';
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { randomUUID } from 'crypto';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -44,6 +45,117 @@ if (API_TOKEN) {
     if (origin && req.hostname && origin.includes(req.hostname)) return next();
     res.status(401).json({ error: 'Unauthorized' });
   });
+}
+
+// --- Async Job Queue ---
+
+interface Job {
+  id: string;
+  tenderId: string;
+  step: string;
+  status: 'queued' | 'running' | 'done' | 'error';
+  logs: string[];
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+const jobs = new Map<string, Job>();
+let currentJob: string | null = null;
+const jobQueue: string[] = [];
+
+function processQueue() {
+  if (currentJob) return;
+  const nextId = jobQueue.shift();
+  if (!nextId) return;
+
+  const job = jobs.get(nextId);
+  if (!job) return;
+
+  currentJob = nextId;
+  job.status = 'running';
+
+  const stepFiles: Record<string, string> = {
+    extract: 'extract-tender.ts',
+    analyze: 'analyze-tender.ts',
+    match: 'match-product.ts',
+    generate: 'generate-bid.ts',
+    validate: 'validate-bid.ts',
+  };
+
+  const scriptFile = stepFiles[job.step];
+  if (!scriptFile) {
+    job.status = 'error';
+    job.error = `Unknown step: ${job.step}`;
+    job.finishedAt = new Date().toISOString();
+    currentJob = null;
+    processQueue();
+    return;
+  }
+
+  const stepTimeout = (job.step === 'match' || job.step === 'generate') ? 600000 : 300000;
+
+  const child = spawn(
+    'node',
+    ['--import', 'tsx', join(SCRIPTS_DIR, scriptFile), `--tender-id=${job.tenderId}`],
+    {
+      cwd: join(ROOT, 'scripts'),
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+
+  const timeout = setTimeout(() => {
+    child.kill('SIGTERM');
+    job.logs.push(`[TIMEOUT] Process killed after ${stepTimeout / 1000}s`);
+  }, stepTimeout);
+
+  child.stdout.on('data', (data: Buffer) => {
+    const lines = data.toString().split('\n').filter(Boolean);
+    job.logs.push(...lines);
+  });
+
+  child.stderr.on('data', (data: Buffer) => {
+    const lines = data.toString().split('\n').filter(Boolean);
+    job.logs.push(...lines);
+  });
+
+  child.on('close', (code) => {
+    clearTimeout(timeout);
+    if (code === 0) {
+      job.status = 'done';
+    } else {
+      job.status = 'error';
+      job.error = `Process exited with code ${code}`;
+    }
+    job.finishedAt = new Date().toISOString();
+    currentJob = null;
+    console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
+    processQueue();
+  });
+
+  child.on('error', (err) => {
+    clearTimeout(timeout);
+    job.status = 'error';
+    job.error = String(err);
+    job.finishedAt = new Date().toISOString();
+    currentJob = null;
+    processQueue();
+  });
+
+  console.log(`Job ${job.id} started: ${job.step} for ${job.tenderId}`);
+}
+
+// Clean up old jobs (keep last 100)
+function cleanupJobs() {
+  if (jobs.size <= 100) return;
+  const sorted = [...jobs.values()]
+    .filter(j => j.status === 'done' || j.status === 'error')
+    .sort((a, b) => (a.startedAt > b.startedAt ? 1 : -1));
+  const toRemove = sorted.slice(0, jobs.size - 100);
+  for (const j of toRemove) {
+    jobs.delete(j.id);
+  }
 }
 
 // Middleware: assign a stable tender ID once per request (not per file)
@@ -111,6 +223,13 @@ async function getPipelineStatus(tenderId: string) {
     await stat(join(outputDir, 'validation-report.json'));
     steps.validate = 'done';
   } catch {}
+
+  // Check if any step is currently running via job queue
+  for (const job of jobs.values()) {
+    if (job.tenderId === tenderId && (job.status === 'running' || job.status === 'queued')) {
+      steps[job.step as keyof typeof steps] = 'running';
+    }
+  }
 
   return { tenderId, steps };
 }
@@ -501,7 +620,50 @@ app.get('/api/tenders/:id/attachments/:filename', async (req, res) => {
   }
 });
 
-// POST /api/tenders/:id/run/:step - run a pipeline step
+// --- Job Queue API ---
+
+// GET /api/jobs - list all jobs (optional ?tenderId= filter)
+app.get('/api/jobs', (req, res) => {
+  const tenderId = req.query.tenderId as string | undefined;
+  let allJobs = [...jobs.values()];
+  if (tenderId) {
+    allJobs = allJobs.filter(j => j.tenderId === tenderId);
+  }
+  // Return without full logs for list endpoint
+  res.json(allJobs.map(j => ({
+    id: j.id,
+    tenderId: j.tenderId,
+    step: j.step,
+    status: j.status,
+    startedAt: j.startedAt,
+    finishedAt: j.finishedAt,
+    error: j.error,
+    logLines: j.logs.length,
+  })));
+});
+
+// GET /api/jobs/:jobId - get job status + logs
+app.get('/api/jobs/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  // Support ?since=N to only return new log lines
+  const since = parseInt(String(req.query.since || '0')) || 0;
+  res.json({
+    id: job.id,
+    tenderId: job.tenderId,
+    step: job.step,
+    status: job.status,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error,
+    logs: job.logs.slice(since),
+    totalLogLines: job.logs.length,
+  });
+});
+
+// POST /api/tenders/:id/run/:step - enqueue a pipeline step
 const stepFiles: Record<string, string> = {
   extract: 'extract-tender.ts',
   analyze: 'analyze-tender.ts',
@@ -512,9 +674,8 @@ const stepFiles: Record<string, string> = {
 
 app.post('/api/tenders/:id/run/:step', async (req, res) => {
   const { id, step } = req.params;
-  const scriptFile = stepFiles[step];
 
-  if (!scriptFile) {
+  if (!stepFiles[step]) {
     return res.status(400).json({ error: `Unknown step: ${step}` });
   }
 
@@ -523,6 +684,13 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     await stat(join(INPUT_DIR, id));
   } catch {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
+  }
+
+  // Check if this step is already running/queued for this tender
+  for (const job of jobs.values()) {
+    if (job.tenderId === id && job.step === step && (job.status === 'running' || job.status === 'queued')) {
+      return res.json({ jobId: job.id, status: job.status, message: 'Step already in progress' });
+    }
   }
 
   // Gate: require confirmed prices before document generation
@@ -553,23 +721,23 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     }
   }
 
-  try {
-    console.log(`Running ${step} for tender ${id}...`);
-    // Match and generate steps can take longer for multi-item tenders
-    const stepTimeout = (step === 'match' || step === 'generate') ? 600000 : 300000;
-    execSync(
-      `node --import tsx "${join(SCRIPTS_DIR, scriptFile)}" --tender-id=${id}`,
-      { cwd: join(ROOT, 'scripts'), timeout: stepTimeout }
-    );
-    const status = await getPipelineStatus(id);
-    res.json({ success: true, ...status });
-  } catch (err) {
-    const status = await getPipelineStatus(id);
-    res.status(500).json({
-      error: `Step "${step}" failed: ${String(err)}`,
-      ...status,
-    });
-  }
+  // Create job and enqueue
+  const jobId = randomUUID().slice(0, 8);
+  const job: Job = {
+    id: jobId,
+    tenderId: id,
+    step,
+    status: 'queued',
+    logs: [],
+    startedAt: new Date().toISOString(),
+  };
+  jobs.set(jobId, job);
+  jobQueue.push(jobId);
+  cleanupJobs();
+  processQueue();
+
+  console.log(`Job ${jobId} queued: ${step} for ${id}`);
+  res.json({ jobId, status: job.status });
 });
 
 // Static file serving for production (React build)

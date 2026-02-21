@@ -18,6 +18,18 @@ export interface PipelineSteps {
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';
 export type StepName = keyof PipelineSteps;
 
+export interface JobStatus {
+  id: string;
+  tenderId: string;
+  step: string;
+  status: 'queued' | 'running' | 'done' | 'error';
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  logs: string[];
+  totalLogLines: number;
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`);
   if (!res.ok) {
@@ -68,7 +80,8 @@ export async function getValidation(id: string) {
   return fetchJson<Record<string, unknown>>(`/tenders/${id}/validation`);
 }
 
-export async function runStep(id: string, step: StepName) {
+/** Start a pipeline step — returns jobId for polling */
+export async function runStep(id: string, step: StepName): Promise<{ jobId: string; status: string }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/run/${step}`, {
     method: 'POST',
   });
@@ -77,6 +90,12 @@ export async function runStep(id: string, step: StepName) {
     throw new Error(err.error || `Step ${step} failed`);
   }
   return res.json();
+}
+
+/** Poll job status (with optional log offset for incremental logs) */
+export async function getJobStatus(jobId: string, since?: number): Promise<JobStatus> {
+  const params = since ? `?since=${since}` : '';
+  return fetchJson(`/jobs/${jobId}${params}`);
 }
 
 export interface PriceOverrideData {
