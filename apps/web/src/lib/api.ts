@@ -1,5 +1,24 @@
 const API_BASE = '/api';
 
+const TOKEN_KEY = 'vz_api_token';
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setAuthToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export interface TenderSummary {
   id: string;
   inputFiles: string[];
@@ -31,7 +50,9 @@ export interface JobStatus {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`);
+  const res = await fetch(`${API_BASE}${url}`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -51,7 +72,7 @@ export async function uploadFiles(files: File[], tenderId?: string): Promise<Ten
     ? `${API_BASE}/tenders/${tenderId}/upload`
     : `${API_BASE}/tenders/upload`;
 
-  const res = await fetch(url, { method: 'POST', body: formData });
+  const res = await fetch(url, { method: 'POST', body: formData, headers: authHeaders() });
   if (!res.ok) throw new Error('Upload failed');
   return res.json();
 }
@@ -84,6 +105,7 @@ export async function getValidation(id: string) {
 export async function runStep(id: string, step: StepName): Promise<{ jobId: string; status: string }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/run/${step}`, {
     method: 'POST',
+    headers: authHeaders(),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -111,7 +133,7 @@ export interface PriceOverrideData {
 export async function updatePriceOverride(id: string, data: PriceOverrideData): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -126,7 +148,7 @@ export async function updateItemPriceOverride(
 ): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/${itemIndex}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -137,7 +159,7 @@ export async function updateItemPriceOverride(
 }
 
 export async function deleteTender(id: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'Failed to delete tender');
@@ -146,7 +168,9 @@ export async function deleteTender(id: string): Promise<{ success: boolean }> {
 }
 
 export function getDocumentDownloadUrl(id: string, filename: string): string {
-  return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
+  const token = getAuthToken();
+  const base = `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
 // Attachments (qualification documents)
@@ -157,17 +181,19 @@ export async function getAttachments(id: string): Promise<string[]> {
 export async function uploadAttachments(id: string, files: File[]): Promise<{ uploaded: string[]; attachments: string[] }> {
   const formData = new FormData();
   files.forEach((f) => formData.append('files', f));
-  const res = await fetch(`${API_BASE}/tenders/${id}/attachments`, { method: 'POST', body: formData });
+  const res = await fetch(`${API_BASE}/tenders/${id}/attachments`, { method: 'POST', body: formData, headers: authHeaders() });
   if (!res.ok) throw new Error('Upload failed');
   return res.json();
 }
 
 export async function deleteAttachment(id: string, filename: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) throw new Error('Delete failed');
   return res.json();
 }
 
 export function getAttachmentDownloadUrl(id: string, filename: string): string {
-  return `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
+  const token = getAuthToken();
+  const base = `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }

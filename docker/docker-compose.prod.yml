@@ -9,6 +9,7 @@ services:
       - API_TOKEN=${API_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6}
+      - GOTENBERG_URL=http://gotenberg:3000
     volumes:
       - vz-input:/app/input
       - vz-output:/app/output
@@ -31,11 +32,25 @@ services:
       - traefik.http.services.vz.loadbalancer.server.port=3001
     networks:
       - root_default
+    depends_on:
+      gotenberg:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: gotenberg
+    restart: always
+    expose:
+      - "3000"
+    networks:
+      - root_default
+    environment:
+      - GOTENBERG_API_TIMEOUT=120s
 
 volumes:
   vz-input:

@@ -1,6 +1,6 @@
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
@@ -14,8 +14,10 @@ import {
   type DiscoveredTemplate,
 } from './lib/template-engine.js';
 import { fillExcelWithAI } from './lib/xls-filler.js';
+import { fillSoupisWithPrices } from './fill-soupis.js';
+import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
-import type { TenderAnalysis, ProductMatch, ProductCandidate } from './lib/types.js';
+import type { TenderAnalysis, ProductMatch, ProductCandidate, ExtractedText } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -263,6 +265,72 @@ async function main() {
     } catch (err) {
       console.log(`    Error filling template: ${err}`);
     }
+  }
+
+  // 4D: Fill soupis XLSX files with matched prices
+  if (isMultiProduct && productMatch.polozky_match) {
+    const extractedTextPath = join(outputDir, 'extracted-text.json');
+    if (existsSync(extractedTextPath)) {
+      const extractedText: ExtractedText = JSON.parse(await readFile(extractedTextPath, 'utf-8'));
+      const soupisFiles = extractedText.documents.filter(d => d.isSoupis);
+
+      if (soupisFiles.length > 0) {
+        console.log(`\n4D: Filling soupis XLSX with prices (${soupisFiles.length} file(s))...`);
+
+        for (const soupisDoc of soupisFiles) {
+          const soupisPath = join(inputDir, soupisDoc.filename);
+          if (!existsSync(soupisPath)) {
+            console.log(`  Skipping ${soupisDoc.filename} — file not found in input`);
+            continue;
+          }
+
+          const safeName = sanitizeFilename(soupisDoc.filename);
+          const outputName = `soupis_filled_${safeName}.xlsx`;
+          const outputFilePath = join(outputDir, outputName);
+
+          try {
+            const result = await fillSoupisWithPrices(
+              soupisPath,
+              productMatch.polozky_match,
+              outputFilePath,
+            );
+
+            // Save mapping audit log
+            await writeFile(
+              join(outputDir, `soupis_mapping_${safeName}.json`),
+              JSON.stringify(result, null, 2),
+              'utf-8',
+            );
+          } catch (err) {
+            console.log(`  Error filling soupis ${soupisDoc.filename}: ${err}`);
+          }
+        }
+      }
+    }
+  }
+
+  // 4E: Convert DOCX to PDF (if Gotenberg is configured)
+  if (isGotenbergConfigured()) {
+    console.log('\n4E: Converting DOCX to PDF...');
+    const outputFiles = await readdir(outputDir);
+    const docxFiles = outputFiles.filter(f => f.endsWith('.docx'));
+
+    for (const docxFile of docxFiles) {
+      const docxPath = join(outputDir, docxFile);
+      const pdfName = docxFile.replace(/\.docx$/, '.pdf');
+      try {
+        const start = Date.now();
+        const pdfBuffer = await convertToPdf(docxPath);
+        if (pdfBuffer) {
+          await writeFile(join(outputDir, pdfName), pdfBuffer);
+          console.log(`  ${pdfName} (${(Date.now() - start)}ms)`);
+        }
+      } catch (err) {
+        console.log(`  Error converting ${docxFile}: ${err}`);
+      }
+    }
+  } else {
+    console.log('\n4E: PDF conversion skipped (GOTENBERG_URL not set)');
   }
 
   console.log(`\nGeneration complete!`);

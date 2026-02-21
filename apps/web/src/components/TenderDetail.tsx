@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getTenderStatus, type PipelineSteps } from '../lib/api';
 import PipelineStatus from './PipelineStatus';
@@ -40,13 +40,13 @@ export default function TenderDetail({ tenderId }: TenderDetailProps) {
     validate: 'pending',
   };
 
-  const handleStepComplete = () => {
+  const handleStepComplete = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['analysis', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['documents', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['validation', tenderId] });
-  };
+  }, [queryClient, tenderId]);
 
   return (
     <div className="space-y-6">

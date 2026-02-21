@@ -15,13 +15,20 @@ interface DocumentListProps {
 }
 
 const DOC_LABELS: Record<string, string> = {
-  'technicky_navrh.docx': 'Technicky navrh',
-  'cenova_nabidka.docx': 'Cenova nabidka',
-  'kryci_list.docx': 'Kryci list',
-  'cestne_prohlaseni.docx': 'Cestne prohlaseni',
-  'seznam_poddodavatelu.docx': 'Seznam poddodavatelu',
-  'kupni_smlouva.docx': 'Kupni smlouva',
-  'technicka_specifikace.docx': 'Technicka specifikace',
+  'technicky_navrh.docx': 'Technický návrh',
+  'technicky_navrh.pdf': 'Technický návrh (PDF)',
+  'cenova_nabidka.docx': 'Cenová nabídka',
+  'cenova_nabidka.pdf': 'Cenová nabídka (PDF)',
+  'kryci_list.docx': 'Krycí list',
+  'kryci_list.pdf': 'Krycí list (PDF)',
+  'cestne_prohlaseni.docx': 'Čestné prohlášení',
+  'cestne_prohlaseni.pdf': 'Čestné prohlášení (PDF)',
+  'seznam_poddodavatelu.docx': 'Seznam poddodavatelů',
+  'seznam_poddodavatelu.pdf': 'Seznam poddodavatelů (PDF)',
+  'kupni_smlouva.docx': 'Kupní smlouva',
+  'kupni_smlouva.pdf': 'Kupní smlouva (PDF)',
+  'technicka_specifikace.docx': 'Technická specifikace',
+  'technicka_specifikace.pdf': 'Technická specifikace (PDF)',
 };
 
 export default function DocumentList({ tenderId }: DocumentListProps) {
@@ -63,15 +70,15 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     }
   }, [tenderId, queryClient]);
 
-  if (isLoading) return <div className="py-8 text-center text-gray-500">Nacitam dokumenty...</div>;
-  if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatim nejsou k dispozici. Spustte krok "Dokumenty".</div>;
+  if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
+  if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok „Dokumenty".</div>;
 
   return (
     <div className="space-y-6">
       {/* Generated documents */}
       {documents && documents.length > 0 && (
         <div>
-          <h3 className="mb-3 text-sm font-semibold text-gray-700 uppercase tracking-wide">Vygenerovane dokumenty</h3>
+          <h3 className="mb-3 text-sm font-semibold text-gray-700 uppercase tracking-wide">Vygenerované dokumenty</h3>
           <div className="space-y-2">
             {documents.map((filename) => (
               <a
@@ -97,10 +104,10 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
       {/* Qualification documents (attachments) */}
       <div>
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Kvalifikacni doklady</h3>
+          <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Kvalifikační doklady</h3>
           <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition-colors">
             <Upload className="h-4 w-4" />
-            {uploading ? 'Nahravam...' : 'Nahrat prilohu'}
+            {uploading ? 'Nahrávám...' : 'Nahrát přílohu'}
             <input
               ref={fileInputRef}
               type="file"
@@ -116,8 +123,8 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
         {(!attachments || attachments.length === 0) ? (
           <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-500">
             <Paperclip className="mx-auto mb-2 h-8 w-8 text-gray-300" />
-            <p>Zadne kvalifikacni doklady.</p>
-            <p className="mt-1 text-xs">Nahrajte vypis z OR, zivnostensky list, reference, partnerstvi vyrobce apod.</p>
+            <p>Žádné kvalifikační doklady.</p>
+            <p className="mt-1 text-xs">Nahrajte výpis z OR, živnostenský list, reference, partnerství výrobce apod.</p>
           </div>
         ) : (
           <div className="space-y-2">

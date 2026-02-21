@@ -59,6 +59,8 @@ if (API_TOKEN) {
     if (req.method === 'GET') return next();
     const auth = req.headers.authorization;
     if (auth === `Bearer ${API_TOKEN}`) return next();
+    // Support ?token= query param (for download links in <a href>)
+    if (req.query.token === API_TOKEN) return next();
     // Allow same-origin browser requests (frontend on same server)
     try {
       const origin = req.headers.origin || req.headers.referer;
