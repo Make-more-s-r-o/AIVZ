@@ -7,6 +7,7 @@ export const ExtractedDocumentSchema = z.object({
   text: z.string(),
   pageCount: z.number().optional(),
   isTemplate: z.boolean().default(false),
+  isSoupis: z.boolean().default(false),
 });
 
 export const ExtractedTextSchema = z.object({

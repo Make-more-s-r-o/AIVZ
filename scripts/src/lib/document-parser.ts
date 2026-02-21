@@ -14,7 +14,14 @@ const TEMPLATE_PATTERNS = [
   'cestne prohlaseni',
   'cestneho prohlaseni',
   'seznam poddodavatel',
+];
+
+// Soupis files - contain item lists that need parsing, not template filling
+const SOUPIS_PATTERNS = [
   'soupis vybaveni',
+  'soupis polozek',
+  'soupis dodavek',
+  'cenova nabidka',  // some tenders use "cenová nabídka" as soupis
 ];
 
 // Normalize for matching: lowercase, underscores→spaces, strip diacritics
@@ -29,6 +36,11 @@ function normalizeForMatching(str: string): string {
 function isTemplate(filename: string): boolean {
   const normalized = normalizeForMatching(filename);
   return TEMPLATE_PATTERNS.some((pattern) => normalized.includes(pattern));
+}
+
+function isSoupis(filename: string): boolean {
+  const normalized = normalizeForMatching(filename);
+  return SOUPIS_PATTERNS.some((pattern) => normalized.includes(pattern));
 }
 
 export async function parsePdf(filePath: string): Promise<string> {
@@ -94,6 +106,7 @@ export async function extractDocuments(
         type: 'pdf',
         text,
         isTemplate: isTemplate(file),
+        isSoupis: isSoupis(file),
       });
     } else if (ext === '.docx') {
       console.log(`  Parsing DOCX: ${file}`);
@@ -103,6 +116,7 @@ export async function extractDocuments(
         type: 'docx',
         text,
         isTemplate: isTemplate(file),
+        isSoupis: isSoupis(file),
       });
     } else if (ext === '.xls' || ext === '.xlsx') {
       console.log(`  Parsing Excel: ${file}`);
@@ -113,6 +127,7 @@ export async function extractDocuments(
           type: ext.slice(1) as 'xls' | 'xlsx',
           text,
           isTemplate: isTemplate(file),
+          isSoupis: isSoupis(file),
         });
       } catch (err) {
         console.log(`  Warning: Failed to parse Excel file ${file}: ${err}`);
@@ -134,6 +149,7 @@ export async function extractDocuments(
               type: 'docx',
               text,
               isTemplate: isTemplate(file),
+              isSoupis: isSoupis(file),
             });
           }
         } catch (err) {

@@ -5,6 +5,7 @@ import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { TenderAnalysisSchema, type ExtractedText } from './lib/types.js';
 import { ANALYZE_TENDER_SYSTEM, buildAnalyzeUserMessage } from './prompts/analyze-tender.js';
+import { parseSoupis } from './parse-soupis.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -17,6 +18,7 @@ async function main() {
   console.log(`\n=== Step 2: AI Analysis ===`);
   console.log(`Tender ID: ${tenderId}`);
 
+  const inputDir = join(ROOT, 'input', tenderId);
   const outputDir = join(ROOT, 'output', tenderId);
   await mkdir(outputDir, { recursive: true });
 
@@ -26,9 +28,9 @@ async function main() {
     await readFile(extractedPath, 'utf-8')
   );
 
-  // Combine non-template documents for analysis
+  // Combine non-template, non-soupis documents for analysis
   const analysisText = extracted.documents
-    .filter((d) => !d.isTemplate)
+    .filter((d) => !d.isTemplate && !d.isSoupis)
     .map((d) => `=== ${d.filename} ===\n${d.text}`)
     .join('\n\n');
 
@@ -52,6 +54,51 @@ async function main() {
   const analysis = TenderAnalysisSchema.parse(parsed);
 
   await logCost(tenderId, 'analyze', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
+
+  // Check for soupis files and merge their items
+  const soupisDocs = extracted.documents.filter(d => d.isSoupis);
+  if (soupisDocs.length > 0) {
+    console.log(`\nFound ${soupisDocs.length} soupis file(s) — parsing items...`);
+
+    let soupisItemCount = 0;
+    const soupisPolozky: typeof analysis.polozky = [];
+
+    for (const doc of soupisDocs) {
+      const ext = doc.filename.toLowerCase().split('.').pop();
+      if (ext !== 'xlsx' && ext !== 'xls') {
+        console.log(`  Skipping non-Excel soupis: ${doc.filename}`);
+        continue;
+      }
+
+      try {
+        const filePath = join(inputDir, doc.filename);
+        const soupisResult = await parseSoupis(filePath);
+
+        for (const item of soupisResult.polozky) {
+          soupisPolozky.push({
+            nazev: item.nazev,
+            mnozstvi: item.mnozstvi,
+            jednotka: item.jednotka || 'ks',
+            specifikace: [
+              item.specifikace,
+              item.kategorie ? `Kategorie: ${item.kategorie}` : '',
+              item.umisteni ? `Umístění: ${item.umisteni}` : '',
+            ].filter(Boolean).join('. '),
+          });
+          soupisItemCount++;
+        }
+      } catch (err) {
+        console.log(`  Warning: Failed to parse soupis ${doc.filename}: ${err}`);
+      }
+    }
+
+    if (soupisPolozky.length > 0) {
+      // Replace abstract part-level items with concrete soupis items
+      const aiItemCount = analysis.polozky.length;
+      console.log(`  Replacing ${aiItemCount} AI items with ${soupisPolozky.length} soupis items`);
+      analysis.polozky = soupisPolozky;
+    }
+  }
 
   const outputPath = join(outputDir, 'analysis.json');
   await writeFile(outputPath, JSON.stringify(analysis, null, 2), 'utf-8');
