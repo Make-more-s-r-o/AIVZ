@@ -1,7 +1,9 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
+import { logCost } from './lib/cost-tracker.js';
 import {
   fillTemplateWithAI,
   discoverTemplates,
@@ -9,6 +11,7 @@ import {
   generateCenovaNabidkaMulti,
   generateTechnickyNavrh,
   type MultiProductItem,
+  type DiscoveredTemplate,
 } from './lib/template-engine.js';
 import { fillExcelWithAI } from './lib/xls-filler.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
@@ -151,6 +154,7 @@ async function main() {
     { maxTokens: isMultiProduct ? 12288 : 8192, temperature: 0.3 }
   );
   totalCostCZK += technicalResult.costCZK;
+  await logCost(tenderId, 'generate-technical-proposal', technicalResult.modelId, technicalResult.inputTokens, technicalResult.outputTokens, technicalResult.costCZK);
 
   // 4B: Generate documents
   console.log('\n4B: Generating DOCX documents...');
@@ -181,7 +185,22 @@ async function main() {
   // 3. Template-based documents
   console.log('\n4C: Discovering and filling templates...');
   const templates = await discoverTemplates(inputDir);
-  console.log(`  Found ${templates.length} template(s): ${templates.map((t) => t.type).join(', ')}`);
+  console.log(`  Found ${templates.length} tender template(s): ${templates.map((t) => t.type).join(', ') || 'none'}`);
+
+  // Add fallback templates from templates/ for missing types (zero AI cost — uses docxtemplater)
+  const FALLBACK_TYPES: DiscoveredTemplate['type'][] = ['kryci_list', 'cestne_prohlaseni', 'seznam_poddodavatelu'];
+  const foundTypes = new Set(templates.map((t) => t.type));
+  const globalTemplatesDir = join(ROOT, 'templates');
+  for (const fallbackType of FALLBACK_TYPES) {
+    if (!foundTypes.has(fallbackType)) {
+      const fallbackPath = join(globalTemplatesDir, `${fallbackType}.docx`);
+      if (existsSync(fallbackPath)) {
+        templates.push({ path: fallbackPath, filename: `${fallbackType}.docx`, type: fallbackType });
+        console.log(`  Added global fallback: ${fallbackType}.docx`);
+      }
+    }
+  }
+  console.log(`  Total templates to fill: ${templates.length}`);
 
   const OUTPUT_NAMES: Record<string, string> = {
     kryci_list: 'kryci_list',
@@ -210,6 +229,9 @@ async function main() {
         const result = await fillExcelWithAI(template.path, company, tenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
+        if (result.costCZK > 0) {
+          await logCost(tenderId, `generate-template-${outputName}`, 'excel-ai', 0, 0, result.costCZK);
+        }
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace(ext, '_replacements.json');
@@ -224,6 +246,9 @@ async function main() {
         const result = await fillTemplateWithAI(template.path, company, tenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
+        if (result.costCZK > 0) {
+          await logCost(tenderId, `generate-template-${outputName}`, 'docx-ai', 0, 0, result.costCZK);
+        }
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace('.docx', '_replacements.json');

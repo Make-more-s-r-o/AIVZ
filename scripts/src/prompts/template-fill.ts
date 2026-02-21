@@ -1,27 +1,34 @@
-export const TEMPLATE_FILL_SYSTEM = `Jsi expert na vyplňování formulářů pro české veřejné zakázky. Dostaneš textový obsah DOCX šablony a data, která máš doplnit. Tvým úkolem je identifikovat VŠECHNA místa v šabloně, kde se má vyplnit informace.
+export const TEMPLATE_FILL_SYSTEM = `Jsi expert na vyplňování formulářů pro české veřejné zakázky. Dostaneš textový obsah DOCX šablony a data, která máš doplnit. Tvým úkolem je identifikovat VŠECHNA místa v šabloně, kde se má vyplnit informace, a vrátit přesné JSON náhrady.
 
-Hledej tyto vzory:
-- "doplní účastník" / "doplní uchazeč" / "vyplní účastník" / "vyplní uchazeč"
-- "[doplnit]" / "[vyplnit]" / "[účastník vyplní]"
-- "___" (podtržítka jako prázdné pole)
-- "......" (tečky jako prázdné pole)
-- Prázdné buňky tabulky za popiskem (např. "IČO:" následované prázdným místem)
-- Jakýkoli jiný text, který evidentně slouží jako placeholder pro data dodavatele
+ROZPOZNÁVEJ TYTO VZORY PLACEHOLDERŮ:
+1. "doplní účastník" / "doplní uchazeč" / "vyplní účastník" / "vyplní uchazeč"
+2. "[doplnit]" / "[vyplnit]" / "[účastník vyplní]" / "[DOPLNIT]"
+3. "___" nebo "______" (podtržítka 3+ jako prázdné pole)
+4. "......" nebo "……" (tečky 4+ nebo … jako prázdné pole)
+5. Prázdné buňky tabulky za popiskem: "IČO:" nebo "IČO: " (hodnota chybí)
+6. Vzory jako "Název: [text]" kde [text] je zjevně placeholder
+7. Datum ve formátu "DD.MM.YYYY" — pokud vidíš "XX.XX.XXXX" nebo "__.__.__", nahraď
 
-Pro každý nalezený placeholder vrať:
-- "original": přesný text, který se má nahradit (MUSÍ přesně odpovídat textu v šabloně!)
-- "replacement": hodnota, kterou se má nahradit
+TRICKY VZORY (příklady z praxe):
+- "Obchodní firma (jméno): doplní účastník" → nahradit celý text "doplní účastník" za "Make more s.r.o."
+- "IČ dodavatele: " (hodnota chybí) → přidat IČO za dvojtečku: "IČ dodavatele: 07023987"
+- "podpisem oprávněné osoby uchazeče" → nemění se, není to placeholder
+- "Razítko a podpis" → je placeholder pro podpis, nahraď jménem jednatele
+- "V ........ dne ........" → nahradit "V Praha dne DD.MM.YYYY"
+- "V … dne …" → nahradit "V Praha dne DD.MM.YYYY"
 
-DŮLEŽITÁ PRAVIDLA:
-1. Original text MUSÍ být přesná kopie z šablony — žádné úpravy, žádné zkracování
-2. Pokud najdeš víc výskytů stejného placeholder textu, uveď každý zvlášť s odpovídajícím nahrazením
-3. Vyplň VŠECHNO, co dokážeš z poskytnutých dat (firma, ceny, datum, zakázka)
-4. Pokud pro nějaké pole nemáš data, nahraď placeholder textem "N/A"
-5. Datum vždy ve formátu "DD.MM.YYYY"
-6. Ceny ve formátu "XXX XXX,XX Kč" (s mezerou jako oddělovačem tisíců)
-7. Neměň žádný jiný text v šabloně — jen placeholdery
+PRAVIDLA:
+1. "original" MUSÍ být přesný text z šablony (copy-paste přesnost) — nezměněný, nezkrácený
+2. Pro obecné placeholdery jako "doplní účastník" zahrň CELÝ kontext (5-10 slov před i za), aby byl unikátní. Příklad: místo "doplní účastník" piš "Obchodní firma: doplní účastník" a nahraď "Obchodní firma: Make more s.r.o."
+3. Pokud se stejný placeholder opakuje vícekrát, uveď každý výskyt zvlášť s unikátním kontextem
+4. Vyplň VŠE, co dokážeš z poskytnutých dat
+5. Pro neznámá pole použij "N/A"
+6. Datum VŽDY ve formátu "DD.MM.YYYY"
+7. Ceny VŽDY ve formátu "1 234 567,00 Kč" (mezera jako oddělovač tisíců, čárka pro desetinné)
+8. Neměň jiný text šablony — pouze placeholdery
+9. Pokud vidíš "doplní účastník" nebo podobné na víc řádcích u různých polí, nahraď každý výskyt správnou hodnotou pro dané pole
 
-Odpověz POUZE validním JSON polem:
+Odpověz POUZE validním JSON polem (bez markdown, bez komentářů):
 [
   {"original": "přesný text placeholderu", "replacement": "hodnota"},
   ...
@@ -49,13 +56,19 @@ export function buildTemplateFillUserMessage(
     produkt_popis?: string;
   }
 ): string {
+  // Filter out internal/meta keys from company data
+  const filteredCompany = Object.entries(companyData)
+    .filter(([k]) => !k.startsWith('_') && k !== 'obory' && k !== 'keyword_filters')
+    .map(([k, v]) => `- ${k}: ${v}`)
+    .join('\n');
+
   return `ŠABLONA: ${templateName}
 ---
 ${templateText}
 ---
 
 DATA FIRMY (uchazeč/dodavatel):
-${Object.entries(companyData).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
+${filteredCompany}
 
 DATA ZAKÁZKY:
 - Název zakázky: ${tenderData.nazev_zakazky}
@@ -72,5 +85,5 @@ ${tenderData.lhuta_nabidek ? `- Lhůta pro podání nabídek: ${tenderData.lhuta
 ${tenderData.produkt_nazev ? `- Nabízený produkt: ${tenderData.produkt_nazev}` : ''}
 ${tenderData.produkt_popis ? `- Popis produktu: ${tenderData.produkt_popis}` : ''}
 
-Identifikuj VŠECHNY placeholdery v šabloně a vrať JSON pole s nahrazeními.`;
+INSTRUKCE: Identifikuj VŠECHNY placeholdery v šabloně. Nezapomeň na opakující se "doplní účastník" vzory — každý výskyt musí být v JSON zvlášť s unikátním kontextem. Vrať JSON pole.`;
 }

@@ -10,5 +10,44 @@
   "rejstrik": "C 293255 vedená u Městského soudu v Praze",
   "jednajici_osoba": "Daniel Jirotka",
   "telefon": "737061492",
-  "email": "dan.jirotka@makemore.cz"
+  "email": "dan.jirotka@makemore.cz",
+  "_comment": "obory: sektory, ve kterých firma podniká (IT, AV). keyword_filters: klíčová slova pro Haiku pre-kategorizaci.",
+  "obory": ["IT", "AV"],
+  "keyword_filters": {
+    "IT": [
+      "notebook", "laptop", "nb ", "nb typ", "ultrabook",
+      "desktop", "pc ", "počítač", "workstation", "thin client",
+      "server", "nas ", "storage", "rack",
+      "monitor", "display", "obrazovka",
+      "tablet", "dokovací stanice", "dock",
+      "tiskárna", "multifunkce", "skener", "scanner",
+      "switch", "router", "firewall", "access point", "wifi",
+      "ups", "záložní zdroj",
+      "kamera ip", "ip kamera", "nvr", "dvr",
+      "software", "licence", "os ", "windows",
+      "3d tiskárna", "3d printer"
+    ],
+    "AV": [
+      "projektor", "interaktivní tabule", "smartboard",
+      "plátno", "projekční",
+      "videokonference", "webkamera", "webcam",
+      "mikrofon", "reproduktor", "sluchátka",
+      "zesilovač", "mixer", "audio",
+      "led panel", "display panel", "digital signage"
+    ],
+    "kancelarsky": [
+      "papír", "papir", "a4", "a3",
+      "toner", "cartridge", "náplň", "inkoust",
+      "složka", "šanon", "pořadač",
+      "pero", "tužka", "fix",
+      "obálka", "obálky"
+    ],
+    "nabytek": [
+      "stůl", "stoly", "pracovní stůl",
+      "židle", "křeslo", "sedačka",
+      "skříň", "skříňka", "kontejner",
+      "regál", "police",
+      "recepce", "nábytek"
+    ]
+  }
 }

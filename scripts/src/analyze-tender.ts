@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
+import { logCost } from './lib/cost-tracker.js';
 import { TenderAnalysisSchema, type ExtractedText } from './lib/types.js';
 import { ANALYZE_TENDER_SYSTEM, buildAnalyzeUserMessage } from './prompts/analyze-tender.js';
 
@@ -37,7 +38,7 @@ async function main() {
   const result = await callClaude(
     ANALYZE_TENDER_SYSTEM,
     buildAnalyzeUserMessage(analysisText),
-    { maxTokens: 8192, temperature: 0.1 }
+    { maxTokens: 16384, temperature: 0.1 }
   );
 
   // Parse and validate JSON response
@@ -49,6 +50,8 @@ async function main() {
 
   const parsed = JSON.parse(jsonStr);
   const analysis = TenderAnalysisSchema.parse(parsed);
+
+  await logCost(tenderId, 'analyze', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
 
   const outputPath = join(outputDir, 'analysis.json');
   await writeFile(outputPath, JSON.stringify(analysis, null, 2), 'utf-8');

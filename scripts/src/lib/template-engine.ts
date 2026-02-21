@@ -214,6 +214,141 @@ function buildFlexibleXmlRegex(text: string): RegExp {
   return new RegExp(pattern, 'g');
 }
 
+/**
+ * Find longest common prefix of two strings.
+ */
+function longestCommonPrefix(a: string, b: string): string {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return a.slice(0, i);
+}
+
+/**
+ * Find longest common suffix of two strings.
+ */
+function longestCommonSuffix(a: string, b: string): string {
+  let i = 0;
+  while (i < a.length && i < b.length && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
+  return a.slice(a.length - i);
+}
+
+/**
+ * Normalize <w:rPr> inner content for comparison.
+ * Strips elements that don't affect visual formatting (language hints, spell check, etc.).
+ */
+function normalizeRPr(rPr: string): string {
+  return rPr
+    // Language hints — don't affect rendering
+    .replace(/<w:lang[^/]*\/>/g, '')
+    // Spell/grammar check markers
+    .replace(/<w:rPrChange[^>]*>[\s\S]*?<\/w:rPrChange>/g, '')
+    // No-spell-check hint
+    .replace(/<w:noProof\/>/g, '')
+    // Revision tracking artifacts
+    .replace(/<w:rsid[A-Za-z]*="[^"]*"\/>/g, '')
+    // Same-value redundant font hints (often Word adds these even when default font is set)
+    .replace(/<w:rFonts\s+w:ascii="Calibri"\s+w:hAnsi="Calibri"\/>/g, '')
+    .replace(/<w:rFonts\s+w:eastAsia="[^"]*"\/>/g, '')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Merge adjacent <w:r> runs with the same formatting within each <w:p> paragraph.
+ * Word often splits text across multiple runs (due to spell-check, revision tracking,
+ * or editing history), making placeholder text like "doplní účastník" impossible
+ * to find via simple indexOf(). This function consolidates those split runs.
+ */
+function mergeRunsInParagraphs(xml: string): string {
+  return xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (para) => {
+    interface Segment {
+      type: 'run' | 'other';
+      content: string;
+      rPr: string;
+      rPrRaw: string;
+      text: string;
+    }
+
+    const segments: Segment[] = [];
+    const runRegex = /<w:r\b[^>]*>([\s\S]*?)<\/w:r>/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = runRegex.exec(para)) !== null) {
+      if (match.index > lastIndex) {
+        segments.push({
+          type: 'other',
+          content: para.slice(lastIndex, match.index),
+          rPr: '', rPrRaw: '', text: '',
+        });
+      }
+
+      const runBody = match[1];
+      const rPrMatch = runBody.match(/<w:rPr>([\s\S]*?)<\/w:rPr>/);
+      const rPrRaw = rPrMatch ? rPrMatch[1] : '';
+      const rPr = normalizeRPr(rPrRaw);
+      const textMatch = runBody.match(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/);
+      const text = textMatch ? textMatch[1] : '';
+      // Only merge pure text runs — skip tabs, breaks, images, fields, etc.
+      const isTextOnly = !/<w:(tab|br|cr|sym|drawing|pict|fldChar|instrText|lastRenderedPageBreak)\b/.test(runBody);
+
+      if (isTextOnly && text) {
+        segments.push({ type: 'run', content: match[0], rPr, rPrRaw, text });
+      } else {
+        segments.push({ type: 'other', content: match[0], rPr: '', rPrRaw: '', text: '' });
+      }
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < para.length) {
+      segments.push({
+        type: 'other',
+        content: para.slice(lastIndex),
+        rPr: '', rPrRaw: '', text: '',
+      });
+    }
+
+    // Need at least 2 runs to merge
+    if (segments.filter(s => s.type === 'run').length < 2) return para;
+
+    // Pattern for ignorable content between runs (proofErr, bookmarks, whitespace)
+    const IGNORABLE_RE = /^(<w:proofErr[^>]*\/?>|<w:bookmarkStart[^>]*\/?>|<w:bookmarkEnd[^>]*\/?>|\s)*$/;
+
+    const merged: Segment[] = [];
+    for (const seg of segments) {
+      if (seg.type === 'run' && merged.length > 0) {
+        const prev = merged[merged.length - 1];
+
+        // Case 1: directly adjacent runs with same formatting
+        if (prev.type === 'run' && prev.rPr === seg.rPr) {
+          prev.text += seg.text;
+          const rPrTag = prev.rPrRaw ? `<w:rPr>${prev.rPrRaw}</w:rPr>` : '';
+          prev.content = `<w:r>${rPrTag}<w:t xml:space="preserve">${prev.text}</w:t></w:r>`;
+          continue;
+        }
+
+        // Case 2: separated by ignorable content (proofErr, bookmarks, whitespace)
+        if (prev.type === 'other' && merged.length >= 2) {
+          const prevRun = merged[merged.length - 2];
+          if (prevRun.type === 'run' && prevRun.rPr === seg.rPr && IGNORABLE_RE.test(prev.content.trim())) {
+            prevRun.text += seg.text;
+            const rPrTag = prevRun.rPrRaw ? `<w:rPr>${prevRun.rPrRaw}</w:rPr>` : '';
+            prevRun.content = `<w:r>${rPrTag}<w:t xml:space="preserve">${prevRun.text}</w:t></w:r>`;
+            merged.pop(); // Remove the ignorable segment
+            continue;
+          }
+        }
+      }
+
+      merged.push({ ...seg });
+    }
+
+    return merged.map(s => s.content).join('');
+  });
+}
+
 // --- DOCX highlighting helpers ---
 
 // Remaining placeholder patterns that signal "needs manual input"
@@ -378,10 +513,18 @@ export async function fillTemplateWithAI(
     replacements = [];
   }
 
+  // Merge split runs in paragraphs so placeholder text is contiguous
+  const mergedXml = mergeRunsInParagraphs(xml);
+  const mergeStats = xml.length - mergedXml.length;
+  if (mergeStats > 0) {
+    console.log(`    Run merging: consolidated XML (${mergeStats} chars removed)`);
+  }
+
   // Apply replacements in XML — one at a time (important when multiple
   // placeholders have the same text, e.g. "doplní účastník" appearing 10x)
-  let modifiedXml = xml;
+  let modifiedXml = mergedXml;
   let replacementCount = 0;
+  const appliedReplacementsList: Array<{ replacement: string }> = [];
 
   for (const { original, replacement } of replacements) {
     // First try: replace the FIRST occurrence in XML text
@@ -389,26 +532,124 @@ export async function fillTemplateWithAI(
     if (idx !== -1) {
       modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + original.length);
       replacementCount++;
+      appliedReplacementsList.push({ replacement });
       continue;
     }
 
     // Second try: flexible regex for text split across XML runs
-    const flexRegex = buildFlexibleXmlRegex(original);
-    const match = flexRegex.exec(modifiedXml);
-    if (match) {
-      modifiedXml = modifiedXml.slice(0, match.index) + replacement + modifiedXml.slice(match.index + match[0].length);
-      replacementCount++;
-      continue;
+    // (only for short originals — long patterns cause regex backtracking)
+    if (original.length <= 80) {
+      const flexRegex = buildFlexibleXmlRegex(original);
+      const match = flexRegex.exec(modifiedXml);
+      if (match) {
+        modifiedXml = modifiedXml.slice(0, match.index) + replacement + modifiedXml.slice(match.index + match[0].length);
+        replacementCount++;
+        appliedReplacementsList.push({ replacement });
+        continue;
+      }
+    }
+
+    // Third try: proximity-based replacement
+    // When original includes context (e.g. "Název:\ndoplní účastník"),
+    // extract just the placeholder part and find it near the context anchor.
+    const commonPre = longestCommonPrefix(original, replacement);
+    const remainOrig = original.slice(commonPre.length);
+    const remainRepl = replacement.slice(commonPre.length);
+    const commonSuf = longestCommonSuffix(remainOrig, remainRepl);
+    const oldPart = remainOrig.slice(0, remainOrig.length - commonSuf.length);
+    const newPart = remainRepl.slice(0, remainRepl.length - commonSuf.length);
+
+    if (oldPart.length >= 3 && oldPart !== original) {
+      // Get context anchor from common prefix (last 3 words, no newlines)
+      const anchorWords = commonPre.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
+      const anchorText = anchorWords.slice(-3).join(' ');
+
+      let searchFrom = 0;
+      let anchorFound = false;
+      if (anchorText.length >= 3) {
+        // Try full anchor first, then progressively shorter
+        for (let wordCount = Math.min(3, anchorWords.length); wordCount >= 1; wordCount--) {
+          const tryAnchor = anchorWords.slice(-wordCount).join(' ');
+          const anchorIdx = modifiedXml.indexOf(tryAnchor, searchFrom);
+          if (anchorIdx !== -1) {
+            searchFrom = anchorIdx;
+            anchorFound = true;
+            break;
+          }
+        }
+      }
+
+      // Find oldPart near context (or from beginning if no anchor)
+      const maxDist = anchorFound ? 5000 : modifiedXml.length;
+      const phIdx = modifiedXml.indexOf(oldPart, searchFrom);
+      if (phIdx !== -1 && phIdx - searchFrom < maxDist) {
+        modifiedXml = modifiedXml.slice(0, phIdx) + newPart + modifiedXml.slice(phIdx + oldPart.length);
+        replacementCount++;
+        appliedReplacementsList.push({ replacement: newPart });
+        continue;
+      }
+
+      // Try flexible regex for oldPart split across runs
+      if (oldPart.length <= 80) {
+        const flexRegex = buildFlexibleXmlRegex(oldPart);
+        flexRegex.lastIndex = searchFrom;
+        const fMatch = flexRegex.exec(modifiedXml);
+        if (fMatch && fMatch.index - searchFrom < maxDist) {
+          modifiedXml = modifiedXml.slice(0, fMatch.index) + newPart + modifiedXml.slice(fMatch.index + fMatch[0].length);
+          replacementCount++;
+          appliedReplacementsList.push({ replacement: newPart });
+          continue;
+        }
+      }
     }
 
     console.log(`    Warning: Could not find placeholder "${original.slice(0, 50)}..." in XML`);
   }
 
+  // Second-pass retry: if >2 unfilled placeholders remain, try again with explicit prompt
+  let totalCostCZK = result.costCZK;
+  const remainingUnfilled = UNFILLED_PATTERNS.filter(p => modifiedXml.includes(p));
+  if (remainingUnfilled.length > 2) {
+    console.log(`    Second-pass retry: ${remainingUnfilled.length} unfilled placeholders remain`);
+    const plainText2 = stripXmlTags(modifiedXml);
+    const retryResult = await callClaude(
+      TEMPLATE_FILL_SYSTEM,
+      buildTemplateFillUserMessage(plainText2, `${templateName} (second pass)`, companyData, tenderData),
+      { maxTokens: 4096, temperature: 0.0 }
+    );
+    totalCostCZK += retryResult.costCZK;
+
+    let retryReplacements: TemplateReplacement[] = [];
+    try {
+      let jsonStr2 = retryResult.content.trim();
+      const cb2 = jsonStr2.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (cb2) jsonStr2 = cb2[1].trim();
+      if (!jsonStr2.startsWith('[')) {
+        const bs = jsonStr2.indexOf('['), be = jsonStr2.lastIndexOf(']');
+        if (bs !== -1 && be > bs) jsonStr2 = jsonStr2.slice(bs, be + 1);
+      }
+      retryReplacements = JSON.parse(jsonStr2);
+    } catch {
+      console.log(`    Second-pass JSON parse failed — skipping`);
+    }
+
+    let retryApplied = 0;
+    for (const { original, replacement } of retryReplacements) {
+      const idx = modifiedXml.indexOf(original);
+      if (idx !== -1) {
+        modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + original.length);
+        replacementCount++;
+        retryApplied++;
+        appliedReplacementsList.push({ replacement });
+      }
+    }
+    console.log(`    Second-pass: applied ${retryApplied}/${retryReplacements.length} additional replacements`);
+  }
+
   // Apply color highlighting:
   // - Orange (#FFE0B2) for AI-filled values → user should review
   // - Red (#FFCCCC) for remaining unfilled placeholders → user must fill
-  const appliedReplacements = replacements.slice(0, replacementCount);
-  modifiedXml = applyHighlighting(modifiedXml, appliedReplacements);
+  modifiedXml = applyHighlighting(modifiedXml, appliedReplacementsList);
 
   // Save modified XML back to ZIP
   zip.file('word/document.xml', modifiedXml);
@@ -416,7 +657,7 @@ export async function fillTemplateWithAI(
 
   console.log(`    AI replacements: ${replacementCount}/${replacements.length} applied (highlighted)`);
 
-  return { buffer: buf, replacements, costCZK: result.costCZK };
+  return { buffer: buf, replacements, costCZK: totalCostCZK };
 }
 
 // --- Template discovery ---

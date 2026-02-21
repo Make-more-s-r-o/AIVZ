@@ -8,17 +8,49 @@ const client = new Anthropic({
   timeout: 10 * 60 * 1000, // 10 minutes for large multi-item requests
 });
 
-interface AICallResult {
+export interface AICallResult {
   content: string;
   inputTokens: number;
   outputTokens: number;
   costCZK: number;
+  modelId: string;
 }
 
-// Claude Sonnet 4.6 pricing: $3/M input, $15/M output
-// At ~24 CZK/USD
-const PRICE_INPUT_PER_TOKEN = (3 / 1_000_000) * 24;
-const PRICE_OUTPUT_PER_TOKEN = (15 / 1_000_000) * 24;
+// Friendly name → actual model ID
+const MODEL_IDS: Record<string, string> = {
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5-20251001',
+  opus: 'claude-opus-4-6',
+};
+
+// Pricing: USD per token → CZK per token (at ~24 CZK/USD)
+const USD_TO_CZK = 24;
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'claude-sonnet-4-6': {
+    input: (3 / 1_000_000) * USD_TO_CZK,
+    output: (15 / 1_000_000) * USD_TO_CZK,
+  },
+  'claude-haiku-4-5-20251001': {
+    input: (0.25 / 1_000_000) * USD_TO_CZK,
+    output: (1.25 / 1_000_000) * USD_TO_CZK,
+  },
+  'claude-opus-4-6': {
+    input: (15 / 1_000_000) * USD_TO_CZK,
+    output: (75 / 1_000_000) * USD_TO_CZK,
+  },
+};
+
+// Fallback pricing if model not in table (use Sonnet rates)
+const DEFAULT_PRICING = MODEL_PRICING['claude-sonnet-4-6'];
+
+export function resolveModelId(model?: string): string {
+  if (!model) return process.env.AI_MODEL || 'claude-sonnet-4-6';
+  return MODEL_IDS[model] ?? model;
+}
+
+export function getModelPricing(modelId: string) {
+  return MODEL_PRICING[modelId] ?? DEFAULT_PRICING;
+}
 
 export async function callClaude(
   systemPrompt: string,
@@ -27,16 +59,21 @@ export async function callClaude(
     maxTokens?: number;
     temperature?: number;
     retries?: number;
-  } = {}
+    /** 'sonnet' | 'haiku' | 'opus' | explicit model ID. Defaults to AI_MODEL env or sonnet. */
+    model?: string;
+  } = {},
 ): Promise<AICallResult> {
-  const { maxTokens = 8192, temperature = 0.2, retries = 2 } = options;
+  const { maxTokens = 8192, temperature = 0.2, retries = 4, model: modelOption } = options;
+
+  const modelId = resolveModelId(modelOption);
+  const pricing = getModelPricing(modelId);
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await client.messages.create({
-        model: process.env.AI_MODEL || 'claude-sonnet-4-6',
+        model: modelId,
         max_tokens: maxTokens,
         temperature,
         system: systemPrompt,
@@ -50,19 +87,25 @@ export async function callClaude(
 
       const inputTokens = response.usage.input_tokens;
       const outputTokens = response.usage.output_tokens;
-      const costCZK =
-        inputTokens * PRICE_INPUT_PER_TOKEN +
-        outputTokens * PRICE_OUTPUT_PER_TOKEN;
+      const costCZK = inputTokens * pricing.input + outputTokens * pricing.output;
 
+      const modelLabel = modelOption || modelId;
       console.log(
-        `  AI call: ${inputTokens} in / ${outputTokens} out tokens, cost: ${costCZK.toFixed(2)} CZK`
+        `  AI call [${modelLabel}]: ${inputTokens} in / ${outputTokens} out tokens, cost: ${costCZK.toFixed(2)} CZK`,
       );
 
-      return { content, inputTokens, outputTokens, costCZK };
+      return { content, inputTokens, outputTokens, costCZK, modelId };
     } catch (error) {
       lastError = error as Error;
+      // Don't retry non-retryable errors (credit exhausted, invalid API key, etc.)
+      const status = (error as any)?.status;
+      const shouldRetry = (error as any)?.headers?.['x-should-retry'];
+      const isNonRetryable = status === 400 || status === 401 || shouldRetry === 'false';
+      if (isNonRetryable) {
+        throw error;
+      }
       if (attempt < retries) {
-        const delay = Math.pow(2, attempt) * 1000;
+        const delay = Math.min(Math.pow(2, attempt) * 2000, 30000);
         console.log(`  Retry ${attempt + 1}/${retries} in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }

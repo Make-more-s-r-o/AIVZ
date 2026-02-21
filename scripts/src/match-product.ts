@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
+import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis, type ProductCandidate } from './lib/types.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 
@@ -59,6 +60,95 @@ function categorizeItem(item: { nazev: string; specifikace: string }): ItemCateg
   return 'produkt';
 }
 
+// ---- Haiku sector pre-classification ----
+
+const HAIKU_SECTOR_SYSTEM = `Klasifikuj každou IT/AV položku do sektoru. Odpověz POUZE JSON polem.
+Sektory: IT, AV, kancelarsky, nabytek, ostatni
+- IT: počítače, servery, monitory, tiskárny, síťové prvky, tablety, software, UPS, kamery IP, 3D tiskárny
+- AV: projektory, plátna, interaktivní tabule, audio systémy, videokonference
+- kancelarsky: papír, tonery, cartridge, kancelářské potřeby
+- nabytek: stoly, židle, skříně, regály, recepce
+- ostatni: vše ostatní`;
+
+async function haikuClassifyItems(
+  items: Array<{ nazev: string; index: number }>,
+  tenderId: string,
+): Promise<Map<number, string>> {
+  const prompt = `Klasifikuj tyto položky:\n${items.map(i => `${i.index}. ${i.nazev}`).join('\n')}\n\nOdpověz JSON: [{"index": 0, "sektor": "IT"}, ...]`;
+
+  const result = await callClaude(HAIKU_SECTOR_SYSTEM, prompt, {
+    maxTokens: 1024,
+    temperature: 0,
+    model: 'haiku',
+  });
+
+  await logCost(tenderId, 'match-haiku-classify', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
+
+  const sectorMap = new Map<number, string>();
+  try {
+    let json = result.content.trim();
+    if (json.startsWith('```')) json = json.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    const parsed: Array<{ index: number; sektor: string }> = JSON.parse(json);
+    for (const entry of parsed) sectorMap.set(entry.index, entry.sektor);
+  } catch (err) {
+    console.log(`  Haiku classification parse failed: ${err} — using all items`);
+  }
+  return sectorMap;
+}
+
+// ---- Requirements deduplication per batch ----
+
+/**
+ * For a batch of items, filter technical requirements to only those
+ * likely relevant to the items in the batch. Reduces input tokens.
+ * Falls back to all requirements if insufficient matches found.
+ */
+function filterRelevantRequirements(
+  items: MatchableItem[],
+  allRequirements: TenderAnalysis['technicke_pozadavky'],
+  minRequirements = 5,
+): TenderAnalysis['technicke_pozadavky'] {
+  if (!allRequirements || allRequirements.length === 0) return allRequirements;
+  if (allRequirements.length <= minRequirements) return allRequirements;
+
+  // Build combined keyword set from item names and specs
+  const itemText = items
+    .map(i => `${i.nazev} ${i.specifikace}`.toLowerCase())
+    .join(' ');
+
+  // Category-to-requirement-keyword mapping
+  const CATEGORY_REQ_KEYWORDS: Record<string, string[]> = {
+    notebook: ['ram', 'procesor', 'cpu', 'ssd', 'hdd', 'baterie', 'displej', 'grafik', 'wifi', 'bluetooth', 'usb', 'hmotnost', 'rozlišení', 'operační systém', 'os'],
+    server: ['ram', 'cpu', 'procesor', 'hdd', 'ssd', 'raid', 'síť', 'psu', 'napájení', 'rack', 'ecc'],
+    monitor: ['rozlišení', 'velikost', 'uhd', '4k', 'hdmi', 'displayport', 'jas', 'kontrast', 'odezva', 'panel'],
+    projektor: ['lumen', 'rozlišení', 'kontrast', 'životnost', 'hdmi', 'bezdrát', 'throw'],
+    tiskarna: ['a3', 'a4', 'barevn', 'duplex', 'síť', 'wifi', 'tisk', 'sken', 'kopír', 'dpi', 'rychlost'],
+    switch: ['port', 'gigabit', 'poe', 'managed', 'sfp', 'vlan'],
+  };
+
+  // Find relevant keywords based on item names
+  const relevantKeywords = new Set<string>();
+  for (const [category, keywords] of Object.entries(CATEGORY_REQ_KEYWORDS)) {
+    if (itemText.includes(category)) {
+      for (const kw of keywords) relevantKeywords.add(kw);
+    }
+  }
+
+  // If we have category keywords, filter requirements
+  if (relevantKeywords.size > 0) {
+    const filtered = allRequirements.filter(req => {
+      const reqText = `${req.parametr} ${req.pozadovana_hodnota}`.toLowerCase();
+      return Array.from(relevantKeywords).some(kw => reqText.includes(kw));
+    });
+    // Only use filtered set if it has enough requirements
+    if (filtered.length >= minRequirements) {
+      return filtered;
+    }
+  }
+
+  return allRequirements;
+}
+
 function enrichWithFallbackUrls(candidate: ProductCandidate): void {
   if (!candidate.reference_urls?.length) {
     const q = encodeURIComponent(`${candidate.vyrobce} ${candidate.model}`);
@@ -84,11 +174,17 @@ async function main() {
   const outputDir = join(ROOT, 'output', tenderId);
   await mkdir(outputDir, { recursive: true });
 
-  // Read analysis
+  // Read analysis and company config
   const analysisPath = join(outputDir, 'analysis.json');
   const analysis: TenderAnalysis = JSON.parse(
     await readFile(analysisPath, 'utf-8')
   );
+
+  const company = JSON.parse(
+    await readFile(join(ROOT, 'config', 'company.json'), 'utf-8')
+  );
+  const companyObory: string[] = company.obory || [];
+  const companyKeywordFilters: Record<string, string[]> = company.keyword_filters || {};
 
   const requirements = analysis.technicke_pozadavky;
 
@@ -109,7 +205,54 @@ async function main() {
   console.log(`  Services (fixed price): ${services.length} — ${services.map(i => i.nazev).join(', ') || 'none'}`);
 
   // Build MatchableItem list for products + accessories (both need AI matching)
-  const matchableItems = [...products, ...accessories];
+  let matchableItems = [...products, ...accessories];
+
+  // ---- Phase 3+4: Haiku pre-classification + company sector filter ----
+  // For large tenders (20+ items), use Haiku to classify items by sector and skip
+  // items outside the company's areas of expertise (obory).
+  const HAIKU_THRESHOLD = 20;
+  if (matchableItems.length >= HAIKU_THRESHOLD && companyObory.length > 0) {
+    console.log(`\n  Running Haiku sector pre-classification (${matchableItems.length} items, threshold ${HAIKU_THRESHOLD})...`);
+    const toClassify = matchableItems.map((item, idx) => ({ nazev: item.nazev, index: idx }));
+    const sectorMap = await haikuClassifyItems(toClassify, tenderId);
+
+    if (sectorMap.size > 0) {
+      // Build accepted sector set from company obory (case-insensitive)
+      const acceptedSectors = new Set(companyObory.map(s => s.toLowerCase()));
+
+      const skipped: string[] = [];
+      matchableItems = matchableItems.filter((item, idx) => {
+        const sector = (sectorMap.get(idx) || 'ostatni').toLowerCase();
+        const accepted = acceptedSectors.has(sector) || sector === 'it'; // always accept IT
+        if (!accepted) skipped.push(`${item.nazev} [${sector}]`);
+        return accepted;
+      });
+
+      if (skipped.length > 0) {
+        console.log(`  Skipped ${skipped.length} items outside company sectors (${companyObory.join(', ')}):`);
+        for (const s of skipped) console.log(`    - ${s}`);
+      }
+      console.log(`  Items after sector filter: ${matchableItems.length}`);
+    }
+  } else if (matchableItems.length > 0 && companyObory.length > 0) {
+    // For smaller tenders, do local keyword-based filtering (no AI cost)
+    const acceptedKeywords = companyObory.flatMap(obor => companyKeywordFilters[obor] || []);
+    if (acceptedKeywords.length > 0) {
+      const skipped: string[] = [];
+      const filtered = matchableItems.filter(item => {
+        const name = item.nazev.toLowerCase();
+        const isMatch = acceptedKeywords.some(kw => name.includes(kw.toLowerCase()));
+        if (!isMatch) skipped.push(item.nazev);
+        return isMatch;
+      });
+      // Only apply filter if it doesn't remove everything
+      if (filtered.length > 0 && skipped.length > 0) {
+        console.log(`  Local keyword filter: skipped ${skipped.length} items: ${skipped.join(', ')}`);
+        matchableItems = filtered;
+      }
+    }
+  }
+
   const items: MatchableItem[] = matchableItems.map(item => ({
     nazev: item.nazev,
     mnozstvi: item.mnozstvi,
@@ -131,93 +274,105 @@ async function main() {
 
   let polozkyMatch: any[] = [];
 
-  // Step 1: Match products + accessories via AI
+  // Step 1: Match products + accessories via AI (in batches of BATCH_SIZE)
+  const BATCH_SIZE = 15;
   if (items.length > 0) {
+    const totalBatches = Math.ceil(items.length / BATCH_SIZE);
     console.log(`\nMatching ${items.length} product/accessory item(s) with ${requirements.length} technical requirements...`);
+    if (totalBatches > 1) console.log(`  Splitting into ${totalBatches} batches of max ${BATCH_SIZE} items`);
 
-    // Scale tokens: base + items × candidates × requirements
-    // 6 items × 3 candidates × 30 requirements can easily hit 40k+ tokens
-    const reqCount = items[0]?.technicke_pozadavky?.length || 10;
-    const maxTokens = Math.min(65536, 8192 + items.length * candidateCount * Math.max(reqCount * 80, 2000));
+    let totalCost = 0;
 
-    const result = await callClaude(
-      PRODUCT_MATCH_SYSTEM,
-      buildProductMatchUserMessage(
-        items,
-        analysis.zakazka.nazev,
-        analysis.zakazka.predmet,
-        analysis.zakazka.predpokladana_hodnota,
-        candidateCount,
-      ),
-      { maxTokens, temperature: 0.3 }
-    );
+    for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+      const batchItems = items.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
+      if (totalBatches > 1) console.log(`\n  Batch ${batchIdx + 1}/${totalBatches}: ${batchItems.length} items`);
 
-    let jsonStr = result.content.trim();
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    }
+      // Phase 6: Deduplicate requirements — only send requirements relevant to this batch
+      const batchRelevantReqs = filterRelevantRequirements(batchItems, requirements);
+      if (batchRelevantReqs.length < requirements.length) {
+        console.log(`    Req dedup: ${requirements.length} → ${batchRelevantReqs.length} requirements`);
+      }
+      const batchItemsWithReqs = batchItems.map(item => ({ ...item, technicke_pozadavky: batchRelevantReqs }));
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(jsonStr);
-    } catch (parseErr) {
-      // Try to recover truncated JSON by finding the last complete polozky_match entry
-      console.log(`  Warning: JSON parse failed, attempting recovery...`);
-      const lastComplete = jsonStr.lastIndexOf('"oduvodneni_vyberu"');
-      if (lastComplete > 0) {
-        // Find the end of that value string and close the array/object
-        const afterOduvodneni = jsonStr.indexOf('\n', lastComplete);
-        if (afterOduvodneni > 0) {
-          const truncated = jsonStr.substring(0, afterOduvodneni).replace(/,\s*$/, '');
-          // Count unclosed brackets and close them
-          const opens = (truncated.match(/[\[{]/g) || []).length;
-          const closes = (truncated.match(/[\]}]/g) || []).length;
-          const closers = ']}'.repeat(Math.max(0, opens - closes));
-          const fixed = truncated + closers;
-          try {
-            parsed = JSON.parse(fixed);
-            console.log(`  Recovery successful — parsed ${parsed.polozky_match?.length || 0} items`);
-          } catch {
-            throw parseErr; // Recovery failed, throw original
+      const reqCount = batchRelevantReqs.length || 10;
+      const maxTokens = Math.min(65536, 8192 + batchItems.length * candidateCount * Math.max(reqCount * 80, 2000));
+
+      const result = await callClaude(
+        PRODUCT_MATCH_SYSTEM,
+        buildProductMatchUserMessage(
+          batchItemsWithReqs,
+          analysis.zakazka.nazev,
+          analysis.zakazka.predmet,
+          analysis.zakazka.predpokladana_hodnota,
+          candidateCount,
+        ),
+        { maxTokens, temperature: 0.3 }
+      );
+
+      await logCost(tenderId, `match-batch-${batchIdx + 1}`, result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
+      totalCost += result.costCZK;
+
+      let jsonStr = result.content.trim();
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch (parseErr) {
+        // Try to recover truncated JSON by finding the last complete polozky_match entry
+        console.log(`  Warning: JSON parse failed, attempting recovery...`);
+        const lastComplete = jsonStr.lastIndexOf('"oduvodneni_vyberu"');
+        if (lastComplete > 0) {
+          const afterOduvodneni = jsonStr.indexOf('\n', lastComplete);
+          if (afterOduvodneni > 0) {
+            const truncated = jsonStr.substring(0, afterOduvodneni).replace(/,\s*$/, '');
+            const opens = (truncated.match(/[\[{]/g) || []).length;
+            const closes = (truncated.match(/[\]}]/g) || []).length;
+            const closers = ']}'.repeat(Math.max(0, opens - closes));
+            const fixed = truncated + closers;
+            try {
+              parsed = JSON.parse(fixed);
+              console.log(`  Recovery successful — parsed ${parsed.polozky_match?.length || 0} items`);
+            } catch {
+              throw parseErr;
+            }
+          } else {
+            throw parseErr;
           }
         } else {
           throw parseErr;
         }
-      } else {
-        throw parseErr;
       }
-    }
 
-    // Enrich candidates with fallback URLs
-    if (parsed.kandidati) {
-      for (const candidate of parsed.kandidati) {
-        enrichWithFallbackUrls(candidate);
+      // Enrich and collect results from this batch
+      if (parsed.kandidati) {
+        for (const candidate of parsed.kandidati) enrichWithFallbackUrls(candidate);
+        polozkyMatch.push({
+          polozka_nazev: batchItems[0].nazev,
+          polozka_index: batchIdx * BATCH_SIZE,
+          mnozstvi: batchItems[0].mnozstvi || 1,
+          jednotka: batchItems[0].jednotka,
+          typ: batchItems[0].typ || 'produkt',
+          kandidati: parsed.kandidati,
+          vybrany_index: parsed.vybrany_index,
+          oduvodneni_vyberu: parsed.oduvodneni_vyberu,
+        });
       }
-      // Convert legacy single-product to polozky_match format
-      polozkyMatch.push({
-        polozka_nazev: items[0].nazev,
-        polozka_index: 0,
-        mnozstvi: items[0].mnozstvi || 1,
-        jednotka: items[0].jednotka,
-        typ: items[0].typ || 'produkt',
-        kandidati: parsed.kandidati,
-        vybrany_index: parsed.vybrany_index,
-        oduvodneni_vyberu: parsed.oduvodneni_vyberu,
-      });
-    }
-    if (parsed.polozky_match) {
-      for (const pm of parsed.polozky_match) {
-        for (const candidate of pm.kandidati) {
-          enrichWithFallbackUrls(candidate);
+      if (parsed.polozky_match) {
+        for (const pm of parsed.polozky_match) {
+          for (const candidate of pm.kandidati) enrichWithFallbackUrls(candidate);
+          // Map batch-local index to global index
+          const localIdx = pm.polozka_index;
+          pm.typ = batchItems[localIdx]?.typ || 'produkt';
+          pm.polozka_index = batchIdx * BATCH_SIZE + localIdx;
         }
-        // Attach category type
-        const matchableIdx = pm.polozka_index;
-        pm.typ = items[matchableIdx]?.typ || 'produkt';
+        polozkyMatch.push(...parsed.polozky_match);
       }
-      polozkyMatch.push(...parsed.polozky_match);
     }
 
-    console.log(`  AI cost: ${result.costCZK.toFixed(2)} CZK`);
+    console.log(`  Total AI cost: ${totalCost.toFixed(2)} CZK`);
   }
 
   // Step 2: Price services via AI (simple pricing, no candidates)
@@ -272,11 +427,29 @@ async function main() {
       });
     }
 
+    await logCost(tenderId, 'match-services', serviceResult.modelId, serviceResult.inputTokens, serviceResult.outputTokens, serviceResult.costCZK);
     console.log(`  AI cost: ${serviceResult.costCZK.toFixed(2)} CZK`);
   }
 
   // Renumber polozka_index sequentially
   polozkyMatch.forEach((pm, idx) => { pm.polozka_index = idx; });
+
+  // Auto-confirm prices using AI-recommended candidate (can be overridden later in UI)
+  for (const pm of polozkyMatch) {
+    const selected = pm.kandidati?.[pm.vybrany_index];
+    if (selected && !pm.cenova_uprava) {
+      const bez = selected.cena_bez_dph || 0;
+      pm.cenova_uprava = {
+        nakupni_cena_bez_dph: bez,
+        nakupni_cena_s_dph: Math.round(bez * 1.21 * 100) / 100,
+        marze_procent: 0,
+        nabidkova_cena_bez_dph: bez,
+        nabidkova_cena_s_dph: Math.round(bez * 1.21 * 100) / 100,
+        potvrzeno: true,
+        poznamka: 'Automaticky potvrzeno — cena z AI doporučení. Zkontrolujte před podáním.',
+      };
+    }
+  }
 
   // Build final ProductMatch object — always use polozky_match format now
   const productMatch = ProductMatchSchema.parse({

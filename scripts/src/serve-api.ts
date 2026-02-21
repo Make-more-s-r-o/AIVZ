@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { readFile, readdir, mkdir, stat, writeFile, rm } from 'fs/promises';
+import { getCostSummary } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
 import { existsSync, createWriteStream } from 'fs';
 import { execSync } from 'child_process';
@@ -273,6 +274,16 @@ app.delete('/api/tenders/:id', async (req, res) => {
     await rm(inputPath, { recursive: true, force: true });
     await rm(outputPath, { recursive: true, force: true });
     res.json({ success: true, deleted: id });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/cost - AI cost summary
+app.get('/api/tenders/:id/cost', async (req, res) => {
+  try {
+    const summary = await getCostSummary(req.params.id);
+    res.json(summary);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
