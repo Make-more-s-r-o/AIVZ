@@ -28,7 +28,8 @@ services:
       - traefik.http.middlewares.vz.headers.contentTypeNosniff=true
       - traefik.http.middlewares.vz.headers.forceSTSHeader=true
       - traefik.http.middlewares.vz.headers.STSIncludeSubdomains=true
-      - traefik.http.routers.vz.middlewares=vz@docker
+      - traefik.http.middlewares.vz-body.buffering.maxRequestBodyBytes=52428800
+      - traefik.http.routers.vz.middlewares=vz@docker,vz-body@docker
       - traefik.http.services.vz.loadbalancer.server.port=3001
     networks:
       - root_default
