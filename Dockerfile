@@ -33,6 +33,9 @@ RUN mkdir -p input output config config-defaults
 # Copy default company config to a non-volume path (volumes override /app/config)
 COPY config/ config-defaults/
 
+# Copy fallback templates (kryci list, cestne prohlaseni, seznam poddodavatelu)
+COPY templates/ templates/
+
 # Entrypoint seeds defaults into volumes on first run
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh

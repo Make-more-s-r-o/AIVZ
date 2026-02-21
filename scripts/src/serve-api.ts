@@ -30,6 +30,25 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Security: path traversal protection ---
+function isSafePath(value: string): boolean {
+  return !value.includes('..') && !value.includes('/') && !value.includes('\\') && !value.includes('\0');
+}
+
+// Middleware: validate :id and :filename params to prevent path traversal
+app.param('id', (req, res, next, value) => {
+  if (!isSafePath(value)) {
+    return res.status(400).json({ error: 'Invalid tender ID' });
+  }
+  next();
+});
+app.param('filename', (req, res, next, value) => {
+  if (!isSafePath(decodeURIComponent(value))) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  next();
+});
+
 // Bearer token auth middleware (only active when API_TOKEN is set)
 // GET requests are public (frontend reads), POST/PUT/DELETE require Bearer token or same-origin
 const API_TOKEN = process.env.API_TOKEN;
@@ -41,8 +60,13 @@ if (API_TOKEN) {
     const auth = req.headers.authorization;
     if (auth === `Bearer ${API_TOKEN}`) return next();
     // Allow same-origin browser requests (frontend on same server)
-    const origin = req.headers.origin || req.headers.referer;
-    if (origin && req.hostname && origin.includes(req.hostname)) return next();
+    try {
+      const origin = req.headers.origin || req.headers.referer;
+      if (origin) {
+        const originHost = new URL(origin).hostname;
+        if (originHost === req.hostname) return next();
+      }
+    } catch {}
     res.status(401).json({ error: 'Unauthorized' });
   });
 }
@@ -120,27 +144,25 @@ function processQueue() {
     job.logs.push(...lines);
   });
 
-  child.on('close', (code) => {
+  let finished = false;
+  const finishJob = (status: 'done' | 'error', error?: string) => {
+    if (finished) return; // Guard against double-fire (error + close)
+    finished = true;
     clearTimeout(timeout);
-    if (code === 0) {
-      job.status = 'done';
-    } else {
-      job.status = 'error';
-      job.error = `Process exited with code ${code}`;
-    }
+    job.status = status;
+    if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
     currentJob = null;
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     processQueue();
+  };
+
+  child.on('close', (code) => {
+    finishJob(code === 0 ? 'done' : 'error', code !== 0 ? `Process exited with code ${code}` : undefined);
   });
 
   child.on('error', (err) => {
-    clearTimeout(timeout);
-    job.status = 'error';
-    job.error = String(err);
-    job.finishedAt = new Date().toISOString();
-    currentJob = null;
-    processQueue();
+    finishJob('error', String(err));
   });
 
   console.log(`Job ${job.id} started: ${job.step} for ${job.tenderId}`);
@@ -314,6 +336,11 @@ app.post('/api/tenders/upload-url', async (req, res) => {
       return res.status(400).json({ error: 'Provide "urls" array with document URLs' });
     }
 
+    // Validate tenderId if custom
+    if (customId && !isSafePath(customId)) {
+      return res.status(400).json({ error: 'Invalid tenderId' });
+    }
+
     const allowedExts = ['.pdf', '.docx', '.doc', '.xls', '.xlsx'];
     const tenderId = customId || `tender-${Date.now()}`;
     const dir = join(INPUT_DIR, tenderId);
@@ -324,6 +351,21 @@ app.post('/api/tenders/upload-url', async (req, res) => {
 
     for (const url of urls) {
       try {
+        // SSRF protection: block private/internal URLs
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          errors.push(`${url}: only http/https allowed`);
+          continue;
+        }
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1'
+          || host.startsWith('10.') || host.startsWith('192.168.')
+          || host.startsWith('169.254.') || host.endsWith('.local')
+          || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+          errors.push(`${url}: private/internal URLs not allowed`);
+          continue;
+        }
+
         const response = await fetch(url);
         if (!response.ok) {
           errors.push(`${url}: HTTP ${response.status}`);
@@ -339,6 +381,8 @@ app.post('/api/tenders/upload-url', async (req, res) => {
         } else {
           filename = decodeURIComponent(basename(new URL(url).pathname));
         }
+        // Sanitize filename — strip path components
+        filename = basename(filename).replace(/[^\w.\-\u00C0-\u024F ]/g, '_');
 
         // Ensure valid extension
         const ext = extname(filename).toLowerCase();
