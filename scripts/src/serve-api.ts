@@ -508,7 +508,7 @@ app.get('/api/tenders/:id/documents', async (req, res) => {
   try {
     const outputDir = join(OUTPUT_DIR, req.params.id);
     const files = await readdir(outputDir);
-    const docFiles = files.filter((f) => f.endsWith('.docx') || f.endsWith('.xlsx'));
+    const docFiles = files.filter((f) => f.endsWith('.docx') || f.endsWith('.xlsx') || f.endsWith('.pdf'));
     res.json(docFiles);
   } catch {
     res.status(404).json({ error: 'No documents found — run generate step first' });
