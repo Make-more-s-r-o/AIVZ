@@ -786,6 +786,26 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   res.json({ jobId, status: job.status });
 });
 
+// POST /api/tenders/:id/output — upload a file to output directory (for syncing between environments)
+app.post('/api/tenders/:id/output', express.json({ limit: '50mb' }), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { filename, content } = req.body;
+    if (!filename || !content) {
+      return res.status(400).json({ error: 'Missing filename or content' });
+    }
+    // Sanitize filename
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const outputDir = join(OUTPUT_DIR, id);
+    await mkdir(outputDir, { recursive: true });
+    const buffer = Buffer.from(content, 'base64');
+    await writeFile(join(outputDir, safeName), buffer);
+    res.json({ success: true, filename: safeName, size: buffer.length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Static file serving for production (React build)
 const staticDir = join(ROOT, 'apps', 'web', 'dist');
 if (existsSync(staticDir)) {
