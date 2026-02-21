@@ -19,7 +19,7 @@ TRICKY VZORY (příklady z praxe):
 
 PRAVIDLA:
 1. "original" MUSÍ být přesný text z šablony (copy-paste přesnost) — nezměněný, nezkrácený
-2. Pro obecné placeholdery jako "doplní účastník" zahrň CELÝ kontext (5-10 slov před i za), aby byl unikátní. Příklad: místo "doplní účastník" piš "Obchodní firma: doplní účastník" a nahraď "Obchodní firma: Make more s.r.o."
+2. Pro obecné placeholdery jako "doplní účastník": zahrň kontextový řádek nebo záhlaví + placeholder. Příklad: "Obchodní firma: doplní účastník" → "Obchodní firma: Make more s.r.o."
 3. Pokud se stejný placeholder opakuje vícekrát, uveď každý výskyt zvlášť s unikátním kontextem
 4. Vyplň VŠE, co dokážeš z poskytnutých dat
 5. Pro neznámá pole použij "N/A"
@@ -27,6 +27,8 @@ PRAVIDLA:
 7. Ceny VŽDY ve formátu "1 234 567,00 Kč" (mezera jako oddělovač tisíců, čárka pro desetinné)
 8. Neměň jiný text šablony — pouze placeholdery
 9. Pokud vidíš "doplní účastník" nebo podobné na víc řádcích u různých polí, nahraď každý výskyt správnou hodnotou pro dané pole
+10. DŮLEŽITÉ: "original" nesmí obsahovat text, který NENÍ v šabloně. Kopíruj přesný text z šablony.
+11. Při nahrazování "______" (podtržítka) zahrň CELÝ řetězec podtržítek, ne jen část
 
 Odpověz POUZE validním JSON polem (bez markdown, bez komentářů):
 [

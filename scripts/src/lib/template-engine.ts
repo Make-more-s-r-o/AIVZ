@@ -329,10 +329,20 @@ function mergeRunsInParagraphs(xml: string): string {
           continue;
         }
 
-        // Case 2: separated by ignorable content (proofErr, bookmarks, whitespace)
+        // Case 2: directly adjacent runs with DIFFERENT formatting — merge text for
+        // placeholder detection (keep first run's formatting). This handles cases where
+        // Word splits "doplní účastník" across bold/normal runs.
+        if (prev.type === 'run' && prev.rPr !== seg.rPr) {
+          prev.text += seg.text;
+          const rPrTag = prev.rPrRaw ? `<w:rPr>${prev.rPrRaw}</w:rPr>` : '';
+          prev.content = `<w:r>${rPrTag}<w:t xml:space="preserve">${prev.text}</w:t></w:r>`;
+          continue;
+        }
+
+        // Case 3: separated by ignorable content (proofErr, bookmarks, whitespace)
         if (prev.type === 'other' && merged.length >= 2) {
           const prevRun = merged[merged.length - 2];
-          if (prevRun.type === 'run' && prevRun.rPr === seg.rPr && IGNORABLE_RE.test(prev.content.trim())) {
+          if (prevRun.type === 'run' && IGNORABLE_RE.test(prev.content.trim())) {
             prevRun.text += seg.text;
             const rPrTag = prevRun.rPrRaw ? `<w:rPr>${prevRun.rPrRaw}</w:rPr>` : '';
             prevRun.content = `<w:r>${rPrTag}<w:t xml:space="preserve">${prevRun.text}</w:t></w:r>`;
@@ -528,7 +538,7 @@ export async function fillTemplateWithAI(
 
   for (const { original, replacement } of replacements) {
     // First try: replace the FIRST occurrence in XML text
-    const idx = modifiedXml.indexOf(original);
+    let idx = modifiedXml.indexOf(original);
     if (idx !== -1) {
       modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + original.length);
       replacementCount++;
@@ -536,9 +546,25 @@ export async function fillTemplateWithAI(
       continue;
     }
 
+    // Try with XML entity encoding: original may have plain chars, XML has entities
+    const xmlEncoded = original
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+    if (xmlEncoded !== original) {
+      idx = modifiedXml.indexOf(xmlEncoded);
+      if (idx !== -1) {
+        modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + xmlEncoded.length);
+        replacementCount++;
+        appliedReplacementsList.push({ replacement });
+        continue;
+      }
+    }
+
     // Second try: flexible regex for text split across XML runs
-    // (only for short originals — long patterns cause regex backtracking)
-    if (original.length <= 80) {
+    if (original.length <= 200) {
       const flexRegex = buildFlexibleXmlRegex(original);
       const match = flexRegex.exec(modifiedXml);
       if (match) {
@@ -590,7 +616,7 @@ export async function fillTemplateWithAI(
       }
 
       // Try flexible regex for oldPart split across runs
-      if (oldPart.length <= 80) {
+      if (oldPart.length <= 200) {
         const flexRegex = buildFlexibleXmlRegex(oldPart);
         flexRegex.lastIndex = searchFrom;
         const fMatch = flexRegex.exec(modifiedXml);
