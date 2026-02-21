@@ -134,7 +134,39 @@ Odpověz ve formátu:
     jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
   }
 
-  const parsed = JSON.parse(jsonStr);
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (e) {
+    // Try to recover truncated JSON
+    console.log(`  Warning: JSON parse failed, attempting recovery...`);
+    // Find last complete "checks" array entry
+    const lastBrace = jsonStr.lastIndexOf('}');
+    if (lastBrace > 0) {
+      // Try closing arrays/objects
+      let recovered = jsonStr.substring(0, lastBrace + 1);
+      // Close checks array if open
+      if (recovered.includes('"checks"') && !recovered.match(/\]\s*,?\s*"kriticke_problemy"/)) {
+        recovered += ']';
+      }
+      // Add missing fields and close
+      if (!recovered.includes('"kriticke_problemy"')) {
+        recovered += ', "kriticke_problemy": [], "doporuceni": []}';
+      } else if (!recovered.includes('"doporuceni"')) {
+        const lastBracket = recovered.lastIndexOf(']');
+        recovered = recovered.substring(0, lastBracket + 1) + ', "doporuceni": []}';
+      }
+      try {
+        parsed = JSON.parse(recovered);
+        console.log(`  Recovery successful!`);
+      } catch {
+        // Last resort: extract what we can
+        throw new Error(`JSON recovery failed. First 500 chars: ${jsonStr.substring(0, 500)}`);
+      }
+    } else {
+      throw e;
+    }
+  }
   const report = ValidationReportSchema.parse({
     tenderId,
     validatedAt: new Date().toISOString(),

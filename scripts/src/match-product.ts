@@ -76,8 +76,10 @@ async function haikuClassifyItems(
 ): Promise<Map<number, string>> {
   const prompt = `Klasifikuj tyto položky:\n${items.map(i => `${i.index}. ${i.nazev}`).join('\n')}\n\nOdpověz JSON: [{"index": 0, "sektor": "IT"}, ...]`;
 
+  // ~10 tokens per item in response: {"index": N, "sektor": "xxx"},
+  const haikuMaxTokens = Math.min(Math.max(items.length * 12, 1024), 8192);
   const result = await callClaude(HAIKU_SECTOR_SYSTEM, prompt, {
-    maxTokens: 1024,
+    maxTokens: haikuMaxTokens,
     temperature: 0,
     model: 'haiku',
   });

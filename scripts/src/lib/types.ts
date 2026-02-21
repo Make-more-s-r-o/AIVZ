@@ -27,7 +27,15 @@ export const TenderAnalysisSchema = z.object({
       kontakt: z.string().optional().nullable(),
     }),
     predmet: z.string(),
-    predpokladana_hodnota: z.number().optional().nullable(),
+    predpokladana_hodnota: z.preprocess((val) => {
+      if (typeof val === 'number') return val;
+      if (val && typeof val === 'object') {
+        // Multi-part tenders: sum numeric values, ignore strings like "mena"
+        const nums = Object.values(val as Record<string, unknown>).filter(v => typeof v === 'number') as number[];
+        return nums.length > 0 ? nums.reduce((a, b) => a + b, 0) : null;
+      }
+      return null;
+    }, z.number().optional().nullable()),
     typ_zakazky: z.string(),
     typ_rizeni: z.string(),
   }),
