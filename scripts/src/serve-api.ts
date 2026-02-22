@@ -11,6 +11,11 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
 import { randomUUID } from 'crypto';
+import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
+import {
+  getAllUsers, getUserByEmail, getUserById, createUser,
+  verifyPassword, updatePassword, deleteUser, updateLastLogin, isFirstRun,
+} from './lib/user-store.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -49,29 +54,54 @@ app.param('filename', (req, res, next, value) => {
   next();
 });
 
-// Bearer token auth middleware (only active when API_TOKEN is set)
-// GET requests are public (frontend reads), POST/PUT/DELETE require Bearer token or same-origin
+// --- Auth middleware ---
+// Supports: JWT Bearer token (frontend users), static API_TOKEN (n8n/curl), same-origin (localhost dev)
 const API_TOKEN = process.env.API_TOKEN;
-if (API_TOKEN) {
-  app.use((req, res, next) => {
-    if (!req.path.startsWith('/api/')) return next();
-    if (req.path === '/api/health') return next();
-    if (req.method === 'GET') return next();
-    const auth = req.headers.authorization;
-    if (auth === `Bearer ${API_TOKEN}`) return next();
-    // Support ?token= query param (for download links in <a href>)
-    if (req.query.token === API_TOKEN) return next();
-    // Allow same-origin browser requests (frontend on same server)
-    try {
-      const origin = req.headers.origin || req.headers.referer;
-      if (origin) {
-        const originHost = new URL(origin).hostname;
-        if (originHost === req.hostname) return next();
-      }
-    } catch {}
-    res.status(401).json({ error: 'Unauthorized' });
-  });
-}
+
+// Public routes that never require auth
+const PUBLIC_PATHS = ['/api/health', '/api/auth/status', '/api/auth/login', '/api/auth/setup'];
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  if (PUBLIC_PATHS.includes(req.path)) return next();
+  if (req.method === 'GET') return next();
+
+  // 1. Check JWT Bearer token
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) {
+    const token = auth.slice(7);
+    // Try JWT first
+    const jwtPayload = verifyToken(token);
+    if (jwtPayload) {
+      (req as any).user = jwtPayload;
+      return next();
+    }
+    // Try static API_TOKEN
+    if (API_TOKEN && token === API_TOKEN) return next();
+  }
+
+  // 2. Support ?token= query param (for download links in <a href>)
+  if (req.query.token) {
+    const qToken = req.query.token as string;
+    const jwtPayload = verifyToken(qToken);
+    if (jwtPayload) {
+      (req as any).user = jwtPayload;
+      return next();
+    }
+    if (API_TOKEN && qToken === API_TOKEN) return next();
+  }
+
+  // 3. Allow same-origin browser requests (localhost dev without JWT_SECRET)
+  try {
+    const origin = req.headers.origin || req.headers.referer;
+    if (origin) {
+      const originHost = new URL(origin).hostname;
+      if (originHost === req.hostname) return next();
+    }
+  } catch {}
+
+  res.status(401).json({ error: 'Unauthorized' });
+});
 
 // --- Async Job Queue ---
 
@@ -261,6 +291,177 @@ async function getPipelineStatus(tenderId: string) {
 // GET /api/health - health check (no auth required)
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0' });
+});
+
+// --- Auth endpoints ---
+
+// Helper: require JWT auth for specific routes
+function requireJwt(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith('Bearer ')) {
+    const payload = verifyToken(auth.slice(7));
+    if (payload) {
+      (req as any).user = payload;
+      return next();
+    }
+  }
+  // Also check query token (for GET routes that need auth)
+  if (req.query.token) {
+    const payload = verifyToken(req.query.token as string);
+    if (payload) {
+      (req as any).user = payload;
+      return next();
+    }
+  }
+  res.status(401).json({ error: 'Unauthorized — JWT required' });
+}
+
+// GET /api/auth/status - check if setup is required
+app.get('/api/auth/status', async (_req, res) => {
+  try {
+    const setupRequired = await isFirstRun();
+    res.json({ setupRequired, jwtEnabled: isJwtEnabled() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/auth/setup - create first user (only works when no users exist)
+app.post('/api/auth/setup', async (req, res) => {
+  try {
+    const firstRun = await isFirstRun();
+    if (!firstRun) {
+      return res.status(403).json({ error: 'Setup already completed' });
+    }
+    const { email, name, password } = req.body;
+    if (!email || !name || !password) {
+      return res.status(400).json({ error: 'Email, name, and password are required' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    const user = await createUser(email, name, password);
+    if (isJwtEnabled()) {
+      const token = signToken(user);
+      await updateLastLogin(user.id);
+      return res.json({ token, user });
+    }
+    res.json({ user });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
+});
+
+// POST /api/auth/login - authenticate and get JWT
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    const user = await getUserByEmail(email);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    const valid = await verifyPassword(user, password);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    if (!isJwtEnabled()) {
+      return res.status(500).json({ error: 'JWT_SECRET not configured on server' });
+    }
+    const { passwordHash: _, ...safeUser } = user;
+    const token = signToken(safeUser);
+    await updateLastLogin(user.id);
+    res.json({ token, user: safeUser });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// GET /api/auth/me - get current user info
+app.get('/api/auth/me', requireJwt, async (req, res) => {
+  try {
+    const payload = (req as any).user;
+    const user = await getUserById(payload.sub);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const { passwordHash: _, ...safeUser } = user;
+    res.json(safeUser);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/auth/change-password - change own password
+app.post('/api/auth/change-password', requireJwt, async (req, res) => {
+  try {
+    const payload = (req as any).user;
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+    const user = await getUserById(payload.sub);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const valid = await verifyPassword(user, currentPassword);
+    if (!valid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    await updatePassword(user.id, newPassword);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// --- User management endpoints ---
+
+// GET /api/users - list all users
+app.get('/api/users', requireJwt, async (_req, res) => {
+  try {
+    const users = await getAllUsers();
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/users - create a new user
+app.post('/api/users', requireJwt, async (req, res) => {
+  try {
+    const { email, name, password } = req.body;
+    if (!email || !name || !password) {
+      return res.status(400).json({ error: 'Email, name, and password are required' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    const user = await createUser(email, name, password);
+    res.json(user);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
+});
+
+// DELETE /api/users/:userId - delete a user (self-deletion blocked)
+app.delete('/api/users/:userId', requireJwt, async (req, res) => {
+  try {
+    const payload = (req as any).user;
+    const { userId } = req.params;
+    if (payload.sub === userId) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    await deleteUser(userId as string);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
 });
 
 // GET /api/tenders - list all tenders

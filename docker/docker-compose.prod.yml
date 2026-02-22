@@ -7,6 +7,7 @@ services:
       - NODE_ENV=production
       - API_PORT=3001
       - API_TOKEN=${API_TOKEN}
+      - JWT_SECRET=${JWT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6}
       - GOTENBERG_URL=http://gotenberg:3000

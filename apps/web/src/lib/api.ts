@@ -1,22 +1,35 @@
+import { getJwt, clearAuth } from './auth';
+
 const API_BASE = '/api';
 
-const TOKEN_KEY = 'vz_api_token';
+// Legacy token key — kept for backward compatibility (dev without JWT_SECRET)
+const LEGACY_TOKEN_KEY = 'vz_api_token';
 
 export function getAuthToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(LEGACY_TOKEN_KEY);
 }
 
 export function setAuthToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(LEGACY_TOKEN_KEY, token);
 }
 
 export function clearAuthToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
 function authHeaders(): Record<string, string> {
-  const token = getAuthToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  // Prefer JWT, fallback to legacy static token
+  const jwt = getJwt();
+  if (jwt) return { Authorization: `Bearer ${jwt}` };
+  const legacy = getAuthToken();
+  return legacy ? { Authorization: `Bearer ${legacy}` } : {};
+}
+
+function getTokenParam(): string {
+  const jwt = getJwt();
+  if (jwt) return jwt;
+  const legacy = getAuthToken();
+  return legacy || '';
 }
 
 export interface TenderSummary {
@@ -53,6 +66,11 @@ async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     headers: authHeaders(),
   });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -73,6 +91,11 @@ export async function uploadFiles(files: File[], tenderId?: string): Promise<Ten
     : `${API_BASE}/tenders/upload`;
 
   const res = await fetch(url, { method: 'POST', body: formData, headers: authHeaders() });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
   if (!res.ok) throw new Error('Upload failed');
   return res.json();
 }
@@ -107,6 +130,11 @@ export async function runStep(id: string, step: StepName): Promise<{ jobId: stri
     method: 'POST',
     headers: authHeaders(),
   });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || `Step ${step} failed`);
@@ -168,7 +196,7 @@ export async function deleteTender(id: string): Promise<{ success: boolean }> {
 }
 
 export function getDocumentDownloadUrl(id: string, filename: string): string {
-  const token = getAuthToken();
+  const token = getTokenParam();
   const base = `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
@@ -193,7 +221,46 @@ export async function deleteAttachment(id: string, filename: string): Promise<{ 
 }
 
 export function getAttachmentDownloadUrl(id: string, filename: string): string {
-  const token = getAuthToken();
+  const token = getTokenParam();
   const base = `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+// --- User management API ---
+
+export interface SafeUser {
+  id: string;
+  email: string;
+  name: string;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export async function getUsers(): Promise<SafeUser[]> {
+  return fetchJson('/users');
+}
+
+export async function createNewUser(email: string, name: string, password: string): Promise<SafeUser> {
+  const res = await fetch(`${API_BASE}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ email, name, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to create user');
+  }
+  return res.json();
+}
+
+export async function deleteUserById(userId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/users/${userId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to delete user');
+  }
+  return res.json();
 }

@@ -58,6 +58,7 @@ jobs:
           COMPOSE_CONTENT=$(cat docker/docker-compose.prod.yml \
             | sed "s|\${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}|ghcr.io/make-more-s-r-o/aivz:latest|g" \
             | sed "s|\${API_TOKEN}|${{ secrets.VZ_API_TOKEN }}|g" \
+            | sed "s|\${JWT_SECRET}|${{ secrets.VZ_JWT_SECRET }}|g" \
             | sed "s|\${ANTHROPIC_API_KEY}|${{ secrets.ANTHROPIC_API_KEY }}|g" \
             | sed "s|\${AI_MODEL:-claude-sonnet-4-6}|claude-sonnet-4-6|g" \
             | sed "s|\${VZ_SUBDOMAIN:-vz}|vz|g" \

@@ -1,81 +1,59 @@
 import { useState, useEffect } from 'react';
 import TenderList from './components/TenderList';
 import TenderDetail from './components/TenderDetail';
-import { getAuthToken, setAuthToken, clearAuthToken } from './lib/api';
+import LoginForm from './components/LoginForm';
+import UserManagement from './components/UserManagement';
+import ChangePasswordForm from './components/ChangePasswordForm';
+import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
+import { getAuthToken } from './lib/api';
+
+type AppView = 'tenders' | 'users' | 'change-password';
 
 export default function App() {
   const [selectedTenderId, setSelectedTenderId] = useState<string | null>(null);
-  const [token, setToken] = useState<string | null>(getAuthToken());
-  const [tokenInput, setTokenInput] = useState('');
-  const [showTokenDialog, setShowTokenDialog] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(getStoredUser());
+  const [loggedIn, setLoggedIn] = useState(isAuthenticated() || !!getAuthToken());
+  const [view, setView] = useState<AppView>('tenders');
+  const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // Show token dialog if no token is set and we're likely on a remote server
+  // Close user menu on outside click
   useEffect(() => {
-    if (!token && window.location.hostname !== 'localhost') {
-      setShowTokenDialog(true);
-    }
-  }, [token]);
+    if (!showUserMenu) return;
+    const handler = () => setShowUserMenu(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [showUserMenu]);
 
-  const handleTokenSubmit = () => {
-    if (tokenInput.trim()) {
-      setAuthToken(tokenInput.trim());
-      setToken(tokenInput.trim());
-      setTokenInput('');
-      setShowTokenDialog(false);
-    }
+  const handleLogin = (loginUser: AuthUser) => {
+    setUser(loginUser);
+    setLoggedIn(true);
   };
 
   const handleLogout = () => {
-    clearAuthToken();
-    setToken(null);
-    setShowTokenDialog(true);
+    clearAuth();
+    setUser(null);
+    setLoggedIn(false);
+    setView('tenders');
+    setSelectedTenderId(null);
   };
+
+  // Not authenticated: show login form
+  // On localhost without JWT, allow skipping (legacy behavior via getAuthToken check)
+  if (!loggedIn && window.location.hostname !== 'localhost') {
+    return <LoginForm onLogin={handleLogin} />;
+  }
+  if (!loggedIn && !getAuthToken()) {
+    return <LoginForm onLogin={handleLogin} />;
+  }
 
   return (
     <div className="min-h-screen">
-      {/* Token dialog */}
-      {showTokenDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="mx-4 w-full max-w-sm rounded-lg bg-white p-6 shadow-xl">
-            <h2 className="mb-2 text-lg font-semibold">API Token</h2>
-            <p className="mb-4 text-sm text-gray-600">
-              Zadejte API token pro přístup k serveru.
-            </p>
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleTokenSubmit()}
-              placeholder="Bearer token..."
-              className="mb-3 w-full rounded border px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <button
-                onClick={handleTokenSubmit}
-                className="flex-1 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-              >
-                Uložit
-              </button>
-              {window.location.hostname === 'localhost' && (
-                <button
-                  onClick={() => setShowTokenDialog(false)}
-                  className="rounded border px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
-                >
-                  Přeskočit
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
       <header className="border-b bg-white px-6 py-4">
         <div className="mx-auto flex max-w-7xl items-center justify-between">
           <div className="flex items-center gap-3">
             <h1
               className="cursor-pointer text-xl font-bold text-gray-900"
-              onClick={() => setSelectedTenderId(null)}
+              onClick={() => { setSelectedTenderId(null); setView('tenders'); }}
             >
               VZ AI Tool
             </h1>
@@ -84,7 +62,7 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-4">
-            {selectedTenderId && (
+            {selectedTenderId && view === 'tenders' && (
               <button
                 onClick={() => setSelectedTenderId(null)}
                 className="text-sm text-gray-500 hover:text-gray-900"
@@ -92,20 +70,55 @@ export default function App() {
                 &larr; Zpět na seznam
               </button>
             )}
-            {token ? (
+            {view !== 'tenders' && (
+              <button
+                onClick={() => { setView('tenders'); setSelectedTenderId(null); }}
+                className="text-sm text-gray-500 hover:text-gray-900"
+              >
+                &larr; Zakázky
+              </button>
+            )}
+            {user ? (
+              <div className="relative">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowUserMenu(!showUserMenu); }}
+                  className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100"
+                >
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-xs font-medium text-blue-700">
+                    {user.name.charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden sm:inline">{user.name}</span>
+                </button>
+                {showUserMenu && (
+                  <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-white py-1 shadow-lg">
+                    <button
+                      onClick={() => { setView('users'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                    >
+                      Správa uživatelů
+                    </button>
+                    <button
+                      onClick={() => { setView('change-password'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                    >
+                      Změnit heslo
+                    </button>
+                    <hr className="my-1" />
+                    <button
+                      onClick={handleLogout}
+                      className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-gray-100"
+                    >
+                      Odhlásit se
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
               <button
                 onClick={handleLogout}
                 className="text-xs text-gray-400 hover:text-gray-600"
-                title="Odhlásit API token"
               >
                 Token: ***
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowTokenDialog(true)}
-                className="text-xs text-amber-600 hover:text-amber-800"
-              >
-                Nastavit token
               </button>
             )}
           </div>
@@ -113,10 +126,18 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8">
-        {selectedTenderId ? (
-          <TenderDetail tenderId={selectedTenderId} />
-        ) : (
-          <TenderList onSelect={setSelectedTenderId} />
+        {view === 'users' && user && (
+          <UserManagement currentUserId={user.id} />
+        )}
+        {view === 'change-password' && (
+          <ChangePasswordForm />
+        )}
+        {view === 'tenders' && (
+          selectedTenderId ? (
+            <TenderDetail tenderId={selectedTenderId} />
+          ) : (
+            <TenderList onSelect={setSelectedTenderId} />
+          )
         )}
       </main>
     </div>
