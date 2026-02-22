@@ -17,7 +17,7 @@ Pro každý produkt uveď:
 - Orientační cenu bez DPH a s DPH v CZK
 - Spolehlivost cenového odhadu (viz níže)
 - Zdroj cenového odhadu ("zdroj_ceny") — na čem je cena založená (katalogová cena výrobce, odhad z distribuce, apod.)
-- Referenční URL pro ověření ceny ("reference_urls") — vyhledávací odkazy na české e-shopy (alza.cz, czc.cz, heureka.cz)
+- Katalogové číslo ("katalogove_cislo") — přesné katalogové/objednací číslo výrobce (např. "BL-P001", "40B0S5N100", "DERA-180-W"). Důležité pro ověření produktu.
 - Dostupné dodavatele v ČR
 - Dostupnost (skladem / na objednávku / dodací lhůta)
 
@@ -44,11 +44,7 @@ DŮLEŽITÉ PRAVIDLA PRO CENY:
   - "nizka" = specializovaný/nový produkt, odhad může být nepřesný i 2x+
 - U každého produktu uveď "cena_komentar" — vysvětli, na čem je odhad založen
 - U každého produktu uveď "zdroj_ceny" — odkud pochází cenový odhad
-- U každého produktu uveď "reference_urls" — vyhledávací URL na české e-shopy pro ověření:
-  - https://www.alza.cz/search?q=VYROBCE+MODEL
-  - https://www.heureka.cz/?h%5Bfraze%5D=VYROBCE+MODEL
-  - https://www.czc.cz/hledat?q=VYROBCE+MODEL
-  POZOR: URL jsou orientační vyhledávací odkazy — uživatel ověří ručně.
+- U každého produktu uveď "katalogove_cislo" — přesné katalogové/objednací číslo výrobce (part number, SKU). Uživatel si produkt ověří vyhledáním tohoto čísla.
 - Pokud je v zadání uvedena předpokládaná hodnota zakázky, porovnej ji se svým odhadem:
   - Pokud se liší víc než 2x, explicitně to uveď v cena_komentar
   - NEHODNOŤ rozpočet jako "nerealistický" — spíš přiznej, že tvůj odhad může být nepřesný
@@ -99,7 +95,7 @@ Navrhni ${candidateCount} konkrétní produkty ve formátu:
       "cena_spolehlivost": "stredni",
       "cena_komentar": "Odhad na základě ..., může se lišit ±30%",
       "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
-      "reference_urls": ["https://www.alza.cz/search?q=...", "https://www.heureka.cz/?h%5Bfraze%5D=..."],
+      "katalogove_cislo": "ABC-12345",
       "dodavatele": ["dodavatel1", "dodavatel2"],
       "dostupnost": "skladem / 2-3 týdny"
     }
@@ -150,7 +146,7 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
           "cena_spolehlivost": "stredni",
           "cena_komentar": "Odhad na základě ...",
           "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
-          "reference_urls": ["https://www.alza.cz/search?q=...", "https://www.heureka.cz/?h%5Bfraze%5D=..."],
+          "katalogove_cislo": "ABC-12345",
           "dodavatele": ["dodavatel1", "dodavatel2"],
           "dostupnost": "skladem / 2-3 týdny"
         }

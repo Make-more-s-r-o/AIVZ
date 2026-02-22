@@ -100,6 +100,7 @@ export const ProductCandidateSchema = z.object({
   dodavatele: z.array(z.string()),
   dostupnost: z.string(),
   zdroj_ceny: z.string().optional(),
+  katalogove_cislo: z.string().optional(),
   reference_urls: z.array(z.string()).optional(),
 });
 

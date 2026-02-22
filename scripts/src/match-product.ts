@@ -3,7 +3,7 @@ import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
-import { ProductMatchSchema, type TenderAnalysis, type ProductCandidate } from './lib/types.js';
+import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
@@ -149,17 +149,6 @@ function filterRelevantRequirements(
   }
 
   return allRequirements;
-}
-
-function enrichWithFallbackUrls(candidate: ProductCandidate): void {
-  if (!candidate.reference_urls?.length) {
-    const q = encodeURIComponent(`${candidate.vyrobce} ${candidate.model}`);
-    candidate.reference_urls = [
-      `https://www.alza.cz/search?q=${q}`,
-      `https://www.heureka.cz/?h%5Bfraze%5D=${q}`,
-      `https://www.czc.cz/hledat?q=${q}`,
-    ];
-  }
 }
 
 async function main() {
@@ -350,7 +339,6 @@ async function main() {
 
       // Enrich and collect results from this batch
       if (parsed.kandidati) {
-        for (const candidate of parsed.kandidati) enrichWithFallbackUrls(candidate);
         polozkyMatch.push({
           polozka_nazev: batchItems[0].nazev,
           polozka_index: batchIdx * BATCH_SIZE,
@@ -364,7 +352,6 @@ async function main() {
       }
       if (parsed.polozky_match) {
         for (const pm of parsed.polozky_match) {
-          for (const candidate of pm.kandidati) enrichWithFallbackUrls(candidate);
           // Map batch-local index to global index
           const localIdx = pm.polozka_index;
           pm.typ = batchItems[localIdx]?.typ || 'produkt';
