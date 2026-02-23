@@ -2,6 +2,7 @@ import { readFile, writeFile, readdir, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
+import { logCost } from './lib/cost-tracker.js';
 import { ValidationReportSchema, type TenderAnalysis, type ProductMatch } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
@@ -192,6 +193,8 @@ Odpověz ve formátu:
     validatedAt: new Date().toISOString(),
     ...parsed,
   });
+
+  await logCost(tenderId, 'validate', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
 
   const outputPath = join(outputDir, 'validation-report.json');
   await writeFile(outputPath, JSON.stringify(report, null, 2), 'utf-8');

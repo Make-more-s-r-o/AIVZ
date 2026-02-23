@@ -7,8 +7,10 @@ import {
   uploadAttachments,
   deleteAttachment,
   getAttachmentDownloadUrl,
+  getDocumentsZipUrl,
+  getBundleZipUrl,
 } from '../lib/api';
-import { FileText, Download, Upload, Trash2, Paperclip } from 'lucide-react';
+import { FileText, Download, Upload, Trash2, Paperclip, Archive } from 'lucide-react';
 
 interface DocumentListProps {
   tenderId: string;
@@ -78,7 +80,29 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
       {/* Generated documents */}
       {documents && documents.length > 0 && (
         <div>
-          <h3 className="mb-3 text-sm font-semibold text-gray-700 uppercase tracking-wide">Vygenerované dokumenty</h3>
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Vygenerované dokumenty</h3>
+            <div className="flex gap-2">
+              <a
+                href={getDocumentsZipUrl(tenderId)}
+                download
+                className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                <Archive className="h-3.5 w-3.5" />
+                Stáhnout dokumenty
+              </a>
+              {attachments && attachments.length > 0 && (
+                <a
+                  href={getBundleZipUrl(tenderId)}
+                  download
+                  className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors"
+                >
+                  <Archive className="h-3.5 w-3.5" />
+                  Kompletní nabídka
+                </a>
+              )}
+            </div>
+          </div>
           <div className="space-y-2">
             {documents.map((filename) => (
               <a

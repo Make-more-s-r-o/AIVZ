@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, Loader2, AlertCircle, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../lib/cn';
-import { runStep, getJobStatus, type PipelineSteps, type StepName, type StepStatus } from '../lib/api';
+import { runStep, getJobStatus, getCost, type PipelineSteps, type StepName, type StepStatus, type CostSummary } from '../lib/api';
 
 const STEPS: { key: StepName; label: string }[] = [
   { key: 'extract', label: 'Extrakce' },
@@ -30,6 +31,15 @@ function StepIcon({ status }: { status: StepStatus }) {
   }
 }
 
+function getStepCost(stepKey: string, byStep: CostSummary['byStep']): number {
+  if (stepKey === 'extract') return 0;
+  if (stepKey === 'analyze' || stepKey === 'validate') return byStep[stepKey]?.costCZK || 0;
+  // For match/generate: sum all entries starting with that prefix
+  return Object.entries(byStep)
+    .filter(([k]) => k.startsWith(stepKey))
+    .reduce((s, [, v]) => s + v.costCZK, 0);
+}
+
 export default function PipelineStatus({ tenderId, steps, onStepComplete }: PipelineStatusProps) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<StepName | null>(null);
@@ -39,6 +49,12 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
   const [error, setError] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const logSeenRef = useRef(0);
+
+  const { data: costData } = useQuery({
+    queryKey: ['cost', tenderId],
+    queryFn: () => getCost(tenderId),
+    refetchInterval: 10000,
+  });
 
   // Poll job status when we have an active job
   useEffect(() => {
@@ -136,6 +152,12 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
               >
                 {step.label}
               </span>
+              {costData && (() => {
+                const cost = getStepCost(step.key, costData.byStep);
+                return cost > 0 ? (
+                  <span className="text-[9px] text-gray-400">{cost.toFixed(1)} Kč</span>
+                ) : null;
+              })()}
             </div>
             {i < STEPS.length - 1 && (
               <div
@@ -148,6 +170,13 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           </div>
         ))}
       </div>
+
+      {/* Total cost */}
+      {costData && costData.totalCZK > 0 && (
+        <div className="text-right text-xs text-gray-400">
+          Celkové AI náklady: {costData.totalCZK.toFixed(2)} Kč
+        </div>
+      )}
 
       {/* Error messages */}
       {error && (

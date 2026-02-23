@@ -53,9 +53,23 @@ async function main() {
   const productMatch: ProductMatch = JSON.parse(
     await readFile(join(outputDir, 'product-match.json'), 'utf-8')
   );
-  const company = JSON.parse(
-    await readFile(join(ROOT, 'config', 'company.json'), 'utf-8')
-  );
+  // Load company: prefer per-tender company from meta, fallback to legacy
+  let company: Record<string, unknown>;
+  try {
+    const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+    if (meta.company_id) {
+      company = JSON.parse(
+        await readFile(join(ROOT, 'config', 'companies', `${meta.company_id}.json`), 'utf-8')
+      );
+      console.log(`  Using company: ${company.nazev} (${meta.company_id})`);
+    } else {
+      throw new Error('no company_id in meta');
+    }
+  } catch {
+    company = JSON.parse(
+      await readFile(join(ROOT, 'config', 'company.json'), 'utf-8')
+    );
+  }
 
   let totalCostCZK = 0;
   const isMultiProduct = !!productMatch.polozky_match;

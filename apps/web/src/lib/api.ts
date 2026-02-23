@@ -34,6 +34,7 @@ function getTokenParam(): string {
 
 export interface TenderSummary {
   id: string;
+  name?: string;
   inputFiles: string[];
   tenderId: string;
   steps: PipelineSteps;
@@ -226,6 +227,56 @@ export function getAttachmentDownloadUrl(id: string, filename: string): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// --- Tender rename ---
+
+export async function renameTender(id: string, name: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/name`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to rename tender');
+  }
+  return res.json();
+}
+
+// --- AI Cost ---
+
+export interface CostSummary {
+  entries: Array<{
+    timestamp: string;
+    step: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    costCZK: number;
+  }>;
+  totalCZK: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  byStep: Record<string, { costCZK: number; inputTokens: number; outputTokens: number; calls: number }>;
+}
+
+export async function getCost(id: string): Promise<CostSummary> {
+  return fetchJson(`/tenders/${id}/cost`);
+}
+
+// --- ZIP downloads ---
+
+export function getDocumentsZipUrl(id: string): string {
+  const token = getTokenParam();
+  const base = `${API_BASE}/tenders/${id}/download/documents`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export function getBundleZipUrl(id: string): string {
+  const token = getTokenParam();
+  const base = `${API_BASE}/tenders/${id}/download/bundle`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
 // --- Parts (části zakázky) API ---
 
 export interface Cast {
@@ -293,6 +344,111 @@ export async function deleteUserById(userId: string): Promise<{ success: boolean
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'Failed to delete user');
+  }
+  return res.json();
+}
+
+// --- Company management API ---
+
+export interface CompanyData {
+  id: string;
+  nazev: string;
+  ico: string;
+  dic: string;
+  sidlo: string;
+  ucet?: string;
+  iban?: string;
+  bic?: string;
+  datova_schranka?: string;
+  rejstrik?: string;
+  jednajici_osoba: string;
+  telefon?: string;
+  email?: string;
+  obory?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getCompanies(): Promise<CompanyData[]> {
+  return fetchJson('/companies');
+}
+
+export async function getCompanyById(id: string): Promise<CompanyData> {
+  return fetchJson(`/companies/${id}`);
+}
+
+export async function createCompany(data: Partial<CompanyData>): Promise<CompanyData> {
+  const res = await fetch(`${API_BASE}/companies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to create company');
+  }
+  return res.json();
+}
+
+export async function updateCompanyApi(id: string, data: Partial<CompanyData>): Promise<CompanyData> {
+  const res = await fetch(`${API_BASE}/companies/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to update company');
+  }
+  return res.json();
+}
+
+export async function deleteCompanyApi(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/companies/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to delete company');
+  }
+  return res.json();
+}
+
+export async function getCompanyDocs(companyId: string): Promise<string[]> {
+  return fetchJson(`/companies/${companyId}/documents`);
+}
+
+export async function uploadCompanyDocs(companyId: string, files: File[]): Promise<{ uploaded: string[]; documents: string[] }> {
+  const formData = new FormData();
+  files.forEach(f => formData.append('files', f));
+  const res = await fetch(`${API_BASE}/companies/${companyId}/documents`, {
+    method: 'POST',
+    body: formData,
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error('Upload failed');
+  return res.json();
+}
+
+export async function deleteCompanyDoc(companyId: string, filename: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/companies/${companyId}/documents/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error('Delete failed');
+  return res.json();
+}
+
+export async function setTenderCompany(tenderId: string, companyId: string): Promise<{ success: boolean; copied_documents: string[] }> {
+  const res = await fetch(`${API_BASE}/tenders/${tenderId}/company`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ company_id: companyId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to set company');
   }
   return res.json();
 }

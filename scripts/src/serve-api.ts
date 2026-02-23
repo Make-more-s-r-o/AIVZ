@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import archiver from 'archiver';
 import { readFile, readdir, mkdir, stat, writeFile, rm } from 'fs/promises';
 import { getCostSummary } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
@@ -16,6 +17,12 @@ import {
   getAllUsers, getUserByEmail, getUserById, createUser,
   verifyPassword, updatePassword, deleteUser, updateLastLogin, isFirstRun,
 } from './lib/user-store.js';
+import {
+  migrateFromLegacy as migrateCompanies,
+  getAllCompanies, getCompany, createCompany, updateCompany, deleteCompany as deleteCompanyById,
+  getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
+  copyCompanyDocsToTender,
+} from './lib/company-store.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -475,8 +482,15 @@ app.get('/api/tenders', async (_req, res) => {
         .map(async (tenderId) => {
           const inputFiles = await readdir(join(INPUT_DIR, tenderId));
           const status = await getPipelineStatus(tenderId);
+          // Read tender display name from meta
+          let name: string | undefined;
+          try {
+            const meta = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'tender-meta.json'), 'utf-8'));
+            name = meta.name;
+          } catch {}
           return {
             id: tenderId,
+            name,
             inputFiles: inputFiles.filter((f) => !f.startsWith('.')),
             ...status,
           };
@@ -645,6 +659,27 @@ app.delete('/api/tenders/:id', async (req, res) => {
   }
 });
 
+// PUT /api/tenders/:id/name - rename tender
+app.put('/api/tenders/:id/name', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name || typeof name !== 'string') {
+    return res.status(400).json({ error: 'Name is required' });
+  }
+  try {
+    const metaPath = join(OUTPUT_DIR, id, 'tender-meta.json');
+    await mkdir(join(OUTPUT_DIR, id), { recursive: true });
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(await readFile(metaPath, 'utf-8')); } catch {}
+    meta.name = name.trim();
+    if (!meta.created_at) meta.created_at = new Date().toISOString();
+    await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    res.json({ success: true, name: meta.name });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // GET /api/tenders/:id/cost - AI cost summary
 app.get('/api/tenders/:id/cost', async (req, res) => {
   try {
@@ -724,6 +759,76 @@ app.get('/api/tenders/:id/documents/:filename', async (req, res) => {
     res.download(filePath);
   } catch {
     res.status(404).json({ error: 'Document not found' });
+  }
+});
+
+// GET /api/tenders/:id/download/documents - ZIP of generated docs (DOCX/XLSX/PDF)
+app.get('/api/tenders/:id/download/documents', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const files = await readdir(outputDir);
+    const docFiles = files.filter(f =>
+      f.endsWith('.docx') || f.endsWith('.xlsx') || f.endsWith('.pdf')
+    );
+    if (docFiles.length === 0) {
+      return res.status(404).json({ error: 'No documents found' });
+    }
+    // Get tender name for filename
+    let zipName = id;
+    try {
+      const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+      if (meta.name) zipName = meta.name.replace(/[^a-zA-Z0-9\u00C0-\u024F _-]/g, '').substring(0, 60);
+    } catch {}
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(zipName)}_dokumenty.zip"`);
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.pipe(res);
+    for (const f of docFiles) {
+      archive.file(join(outputDir, f), { name: f });
+    }
+    await archive.finalize();
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/download/bundle - ZIP of docs + prilohy attachments
+app.get('/api/tenders/:id/download/bundle', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const files = await readdir(outputDir);
+    const docFiles = files.filter(f =>
+      f.endsWith('.docx') || f.endsWith('.xlsx') || f.endsWith('.pdf')
+    );
+    // Get attachments
+    let attachmentFiles: string[] = [];
+    const prilohyDir = join(outputDir, 'prilohy');
+    try {
+      attachmentFiles = (await readdir(prilohyDir)).filter(f => !f.startsWith('.'));
+    } catch {}
+    if (docFiles.length === 0 && attachmentFiles.length === 0) {
+      return res.status(404).json({ error: 'No files to bundle' });
+    }
+    let zipName = id;
+    try {
+      const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+      if (meta.name) zipName = meta.name.replace(/[^a-zA-Z0-9\u00C0-\u024F _-]/g, '').substring(0, 60);
+    } catch {}
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(zipName)}_kompletni_nabidka.zip"`);
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.pipe(res);
+    for (const f of docFiles) {
+      archive.file(join(outputDir, f), { name: f });
+    }
+    for (const f of attachmentFiles) {
+      archive.file(join(prilohyDir, f), { name: `prilohy/${f}` });
+    }
+    await archive.finalize();
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: String(err) });
   }
 });
 
@@ -915,6 +1020,162 @@ app.get('/api/tenders/:id/attachments/:filename', async (req, res) => {
   }
 });
 
+// --- Company management API ---
+
+app.param('companyId', (req, res, next, value) => {
+  if (!isSafePath(value)) {
+    return res.status(400).json({ error: 'Invalid company ID' });
+  }
+  next();
+});
+
+// GET /api/companies - list all companies
+app.get('/api/companies', async (_req, res) => {
+  try {
+    const companies = await getAllCompanies();
+    res.json(companies);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/companies/:companyId - get company detail
+app.get('/api/companies/:companyId', async (req, res) => {
+  try {
+    const company = await getCompany(req.params.companyId);
+    if (!company) return res.status(404).json({ error: 'Company not found' });
+    res.json(company);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/companies - create company
+app.post('/api/companies', async (req, res) => {
+  try {
+    const { nazev, ico, dic, sidlo, jednajici_osoba, ...rest } = req.body;
+    if (!nazev || !ico || !sidlo || !jednajici_osoba) {
+      return res.status(400).json({ error: 'nazev, ico, sidlo, and jednajici_osoba are required' });
+    }
+    const company = await createCompany({ nazev, ico, dic: dic || '', sidlo, jednajici_osoba, ...rest });
+    res.json(company);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
+});
+
+// PUT /api/companies/:companyId - update company
+app.put('/api/companies/:companyId', async (req, res) => {
+  try {
+    const updated = await updateCompany(req.params.companyId, req.body);
+    if (!updated) return res.status(404).json({ error: 'Company not found' });
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
+});
+
+// DELETE /api/companies/:companyId - delete company
+app.delete('/api/companies/:companyId', async (req, res) => {
+  try {
+    const ok = await deleteCompanyById(req.params.companyId);
+    if (!ok) return res.status(404).json({ error: 'Company not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Company document upload
+const companyDocUpload = multer({
+  storage: multer.diskStorage({
+    destination: async (req, _file, cb) => {
+      const dir = getCompanyDocumentsDir(req.params.companyId);
+      await mkdir(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'));
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = extname(file.originalname).toLowerCase();
+    if (['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.jpg', '.jpeg', '.png'].includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF, DOCX, XLS/XLSX, and image files are allowed'));
+    }
+  },
+});
+
+// POST /api/companies/:companyId/documents - upload company docs
+app.post('/api/companies/:companyId/documents', companyDocUpload.array('files', 20), async (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+    const docs = await getCompanyDocuments(req.params.companyId);
+    res.json({ uploaded: files.map(f => f.filename), documents: docs });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/companies/:companyId/documents - list company docs
+app.get('/api/companies/:companyId/documents', async (req, res) => {
+  try {
+    const docs = await getCompanyDocuments(req.params.companyId);
+    res.json(docs);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /api/companies/:companyId/documents/:filename - delete company doc
+app.delete('/api/companies/:companyId/documents/:filename', async (req, res) => {
+  try {
+    await deleteCompanyDocument(req.params.companyId, req.params.filename);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/companies/:companyId/documents/:filename - download company doc
+app.get('/api/companies/:companyId/documents/:filename', async (req, res) => {
+  try {
+    const filePath = join(getCompanyDocumentsDir(req.params.companyId), req.params.filename);
+    await stat(filePath);
+    res.download(filePath);
+  } catch {
+    res.status(404).json({ error: 'Document not found' });
+  }
+});
+
+// PUT /api/tenders/:id/company - set company for tender → auto-copy docs
+app.put('/api/tenders/:id/company', async (req, res) => {
+  const { id } = req.params;
+  const { company_id } = req.body;
+  if (!company_id || typeof company_id !== 'string') {
+    return res.status(400).json({ error: 'company_id is required' });
+  }
+  try {
+    const metaPath = join(OUTPUT_DIR, id, 'tender-meta.json');
+    await mkdir(join(OUTPUT_DIR, id), { recursive: true });
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(await readFile(metaPath, 'utf-8')); } catch {}
+    meta.company_id = company_id;
+    if (!meta.created_at) meta.created_at = new Date().toISOString();
+    await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    // Copy company docs to prilohy
+    const copied = await copyCompanyDocsToTender(company_id, id);
+    res.json({ success: true, company_id, copied_documents: copied });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // --- Job Queue API ---
 
 // GET /api/jobs - list all jobs (optional ?tenderId= filter)
@@ -1062,6 +1323,9 @@ if (existsSync(staticDir)) {
   app.get('*', (_req, res) => res.sendFile(join(staticDir, 'index.html')));
   console.log(`Serving static files from: ${staticDir}`);
 }
+
+// Startup: migrate legacy company.json
+migrateCompanies().catch(err => console.error('Company migration error:', err));
 
 app.listen(PORT, () => {
   console.log(`\nVZ AI Tool API server running on http://localhost:${PORT}`);

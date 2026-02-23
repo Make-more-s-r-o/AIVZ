@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getTenderStatus, type PipelineSteps } from '../lib/api';
+import { getTenderStatus, getTenders, getCompanies, setTenderCompany, type PipelineSteps } from '../lib/api';
 import PipelineStatus from './PipelineStatus';
 import AnalysisView from './AnalysisView';
 import ProductMatchView from './ProductMatchView';
@@ -32,6 +32,14 @@ export default function TenderDetail({ tenderId }: TenderDetailProps) {
     refetchInterval: 3000,
   });
 
+  // Get tender name from cached tenders list
+  const { data: tenders } = useQuery({
+    queryKey: ['tenders'],
+    queryFn: getTenders,
+    staleTime: 30000,
+  });
+  const tenderName = tenders?.find(t => t.id === tenderId)?.name;
+
   const steps: PipelineSteps = data?.steps || {
     extract: 'pending',
     analyze: 'pending',
@@ -40,17 +48,54 @@ export default function TenderDetail({ tenderId }: TenderDetailProps) {
     validate: 'pending',
   };
 
+  // Companies for selector
+  const { data: companies } = useQuery({
+    queryKey: ['companies'],
+    queryFn: getCompanies,
+    staleTime: 60000,
+  });
+
+  const handleCompanyChange = useCallback(async (companyId: string) => {
+    try {
+      const result = await setTenderCompany(tenderId, companyId);
+      queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
+      if (result.copied_documents.length > 0) {
+        // Silently refresh — docs were copied
+      }
+    } catch (err) {
+      console.error('Failed to set company:', err);
+    }
+  }, [tenderId, queryClient]);
+
   const handleStepComplete = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['analysis', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['documents', tenderId] });
     queryClient.invalidateQueries({ queryKey: ['validation', tenderId] });
+    queryClient.invalidateQueries({ queryKey: ['tenders'] });
   }, [queryClient, tenderId]);
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-bold">{tenderId}</h2>
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-bold">{tenderName || tenderId}</h2>
+          {tenderName && <div className="text-xs text-gray-400">{tenderId}</div>}
+        </div>
+        {companies && companies.length > 0 && (
+          <select
+            onChange={(e) => e.target.value && handleCompanyChange(e.target.value)}
+            defaultValue=""
+            className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
+          >
+            <option value="" disabled>Firma...</option>
+            {companies.map(c => (
+              <option key={c.id} value={c.id}>{c.nazev}</option>
+            ))}
+          </select>
+        )}
+      </div>
 
       <div className="rounded-lg border bg-white p-6">
         <PipelineStatus

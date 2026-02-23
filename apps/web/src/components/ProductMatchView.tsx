@@ -262,9 +262,20 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
                   </span>
                 )}
                 <div className="text-right">
-                  <div className="text-sm font-semibold">
-                    {(pm.cenova_uprava?.nabidkova_cena_bez_dph ?? selectedProduct?.cena_bez_dph)?.toLocaleString('cs-CZ')} Kč
-                  </div>
+                  {pm.mnozstvi && pm.mnozstvi > 1 ? (
+                    <>
+                      <div className="text-sm font-semibold">
+                        {((pm.cenova_uprava?.nabidkova_cena_bez_dph ?? selectedProduct?.cena_bez_dph ?? 0) * pm.mnozstvi).toLocaleString('cs-CZ')} Kč
+                      </div>
+                      <div className="text-[10px] text-gray-400">
+                        {(pm.cenova_uprava?.nabidkova_cena_bez_dph ?? selectedProduct?.cena_bez_dph)?.toLocaleString('cs-CZ')}/{pm.jednotka || 'ks'} × {pm.mnozstvi}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm font-semibold">
+                      {(pm.cenova_uprava?.nabidkova_cena_bez_dph ?? selectedProduct?.cena_bez_dph)?.toLocaleString('cs-CZ')} Kč
+                    </div>
+                  )}
                 </div>
               </div>
             </button>
@@ -295,6 +306,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
                     budget={budget ? Math.round(budget / polozky.length) : undefined}
                     onConfirm={(data) => handleItemConfirm(idx, data)}
                     label={`Cenová kalkulace: ${pm.polozka_nazev}`}
+                    mnozstvi={pm.mnozstvi}
+                    jednotka={pm.jednotka}
                   />
                 )}
               </div>

@@ -68,9 +68,14 @@ export default function TenderList({ onSelect }: TenderListProps) {
                   className="rounded-lg border bg-white p-4 text-left transition-shadow hover:shadow-md"
                 >
                   <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-5 w-5 text-blue-500" />
-                      <span className="font-medium">{tender.id}</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileText className="h-5 w-5 shrink-0 text-blue-500" />
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{tender.name || tender.id}</div>
+                        {tender.name && (
+                          <div className="text-[10px] text-gray-400 truncate">{tender.id}</div>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {completed === 5 ? (

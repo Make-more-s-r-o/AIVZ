@@ -15,6 +15,8 @@ interface ItemPriceCalculatorProps {
   budget?: number;
   onConfirm: (data: PriceOverrideData) => Promise<void>;
   label?: string;
+  mnozstvi?: number;
+  jednotka?: string;
 }
 
 export default function ItemPriceCalculator({
@@ -23,6 +25,8 @@ export default function ItemPriceCalculator({
   budget,
   onConfirm,
   label,
+  mnozstvi,
+  jednotka,
 }: ItemPriceCalculatorProps) {
   const [nakupniCena, setNakupniCena] = useState<number>(0);
   const [marzeProcent, setMarzeProcent] = useState<number>(0);
@@ -190,6 +194,18 @@ export default function ItemPriceCalculator({
           />
         </div>
       </div>
+
+      {/* Line total for qty > 1 */}
+      {mnozstvi && mnozstvi > 1 && (
+        <div className="mb-3 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2">
+          <div className="text-xs font-semibold text-indigo-900">
+            Celkem za {mnozstvi} {jednotka || 'ks'}:{' '}
+            {(nabidkovaCenaBezDph * mnozstvi).toLocaleString('cs-CZ')} Kč bez DPH
+            {' / '}
+            {(nabidkovaCenaSdph * mnozstvi).toLocaleString('cs-CZ')} Kč s DPH
+          </div>
+        </div>
+      )}
 
       {/* Budget warning */}
       {budget !== undefined && budget > 0 && nabidkovaCenaBezDph > budget && (

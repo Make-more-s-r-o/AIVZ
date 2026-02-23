@@ -4,10 +4,11 @@ import TenderDetail from './components/TenderDetail';
 import LoginForm from './components/LoginForm';
 import UserManagement from './components/UserManagement';
 import ChangePasswordForm from './components/ChangePasswordForm';
+import CompanySettings from './components/CompanySettings';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
-type AppView = 'tenders' | 'users' | 'change-password';
+type AppView = 'tenders' | 'users' | 'change-password' | 'companies';
 
 export default function App() {
   const [selectedTenderId, setSelectedTenderId] = useState<string | null>(null);
@@ -92,6 +93,12 @@ export default function App() {
                 {showUserMenu && (
                   <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-white py-1 shadow-lg">
                     <button
+                      onClick={() => { setView('companies'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                    >
+                      Správa firem
+                    </button>
+                    <button
                       onClick={() => { setView('users'); setShowUserMenu(false); setSelectedTenderId(null); }}
                       className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                     >
@@ -126,6 +133,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8">
+        {view === 'companies' && <CompanySettings />}
         {view === 'users' && user && (
           <UserManagement currentUserId={user.id} />
         )}

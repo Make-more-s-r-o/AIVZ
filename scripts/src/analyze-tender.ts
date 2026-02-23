@@ -117,6 +117,14 @@ async function main() {
   const outputPath = join(outputDir, 'analysis.json');
   await writeFile(outputPath, JSON.stringify(analysis, null, 2), 'utf-8');
 
+  // Write/update tender-meta.json with display name from analysis
+  const metaPath = join(outputDir, 'tender-meta.json');
+  let meta: Record<string, unknown> = {};
+  try { meta = JSON.parse(await readFile(metaPath, 'utf-8')); } catch {}
+  meta.name = analysis.zakazka.nazev;
+  if (!meta.created_at) meta.created_at = new Date().toISOString();
+  await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+
   console.log(`\nAnalysis complete:`);
   console.log(`  Tender: ${analysis.zakazka.nazev}`);
   console.log(`  Type: ${analysis.zakazka.typ_zakazky}`);
