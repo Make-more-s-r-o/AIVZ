@@ -727,6 +727,54 @@ app.get('/api/tenders/:id/documents/:filename', async (req, res) => {
   }
 });
 
+// GET /api/tenders/:id/parts - get parts and selection
+app.get('/api/tenders/:id/parts', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Read casti from analysis.json
+    let casti: any[] = [];
+    try {
+      const analysis = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8'));
+      casti = analysis.casti || [];
+    } catch {}
+
+    // Read selected parts from parts-selection.json
+    let selected_parts: string[] = [];
+    try {
+      const sel = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'parts-selection.json'), 'utf-8'));
+      selected_parts = sel.selected_parts || [];
+    } catch {
+      // Default: all parts selected
+      selected_parts = casti.map((c: any) => c.id);
+    }
+
+    res.json({ casti, selected_parts });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/tenders/:id/parts - save parts selection
+app.put('/api/tenders/:id/parts', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { selected_parts } = req.body;
+    if (!Array.isArray(selected_parts)) {
+      return res.status(400).json({ error: 'selected_parts must be an array' });
+    }
+    const outputDir = join(OUTPUT_DIR, id);
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(
+      join(outputDir, 'parts-selection.json'),
+      JSON.stringify({ selected_parts, updated_at: new Date().toISOString() }, null, 2),
+      'utf-8',
+    );
+    res.json({ success: true, selected_parts });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // GET /api/tenders/:id/validation
 app.get('/api/tenders/:id/validation', async (req, res) => {
   try {

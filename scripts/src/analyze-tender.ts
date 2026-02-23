@@ -3,9 +3,9 @@ import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
-import { TenderAnalysisSchema, type ExtractedText } from './lib/types.js';
+import { TenderAnalysisSchema, type ExtractedText, type Cast } from './lib/types.js';
 import { ANALYZE_TENDER_SYSTEM, buildAnalyzeUserMessage } from './prompts/analyze-tender.js';
-import { parseSoupis } from './parse-soupis.js';
+import { parseSoupis, type SoupisResult } from './parse-soupis.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -60,8 +60,8 @@ async function main() {
   if (soupisDocs.length > 0) {
     console.log(`\nFound ${soupisDocs.length} soupis file(s) — parsing items...`);
 
-    let soupisItemCount = 0;
     const soupisPolozky: typeof analysis.polozky = [];
+    const parsedSoupis: SoupisResult[] = [];
 
     for (const doc of soupisDocs) {
       const ext = doc.filename.toLowerCase().split('.').pop();
@@ -73,6 +73,7 @@ async function main() {
       try {
         const filePath = join(inputDir, doc.filename);
         const soupisResult = await parseSoupis(filePath);
+        parsedSoupis.push(soupisResult);
 
         for (const item of soupisResult.polozky) {
           soupisPolozky.push({
@@ -84,8 +85,8 @@ async function main() {
               item.kategorie ? `Kategorie: ${item.kategorie}` : '',
               item.umisteni ? `Umístění: ${item.umisteni}` : '',
             ].filter(Boolean).join('. '),
+            cast_id: soupisResult.cast_id,
           });
-          soupisItemCount++;
         }
       } catch (err) {
         console.log(`  Warning: Failed to parse soupis ${doc.filename}: ${err}`);
@@ -98,6 +99,19 @@ async function main() {
       console.log(`  Replacing ${aiItemCount} AI items with ${soupisPolozky.length} soupis items`);
       analysis.polozky = soupisPolozky;
     }
+
+    // Build casti[] from parsed soupis files (only if multiple parts detected)
+    const partsWithIds = parsedSoupis.filter(s => s.cast_id);
+    if (partsWithIds.length > 1) {
+      const casti: Cast[] = partsWithIds.map(s => ({
+        id: s.cast_id!,
+        nazev: `Část ${s.cast_id}`,
+        pocet_polozek: s.polozky.length,
+        soupis_filename: s.filename,
+      }));
+      analysis.casti = casti;
+      console.log(`  Multi-part tender detected: ${casti.length} parts (${casti.map(c => c.id).join(', ')})`);
+    }
   }
 
   const outputPath = join(outputDir, 'analysis.json');
@@ -109,6 +123,9 @@ async function main() {
   console.log(`  Qualification criteria: ${analysis.kvalifikace.length}`);
   console.log(`  Evaluation criteria: ${analysis.hodnotici_kriteria.length}`);
   console.log(`  Items: ${analysis.polozky.length}`);
+  if (analysis.casti.length > 0) {
+    console.log(`  Parts: ${analysis.casti.length} (${analysis.casti.map(c => `${c.id}: ${c.pocet_polozek} items`).join(', ')})`);
+  }
   console.log(`  Technical requirements: ${analysis.technicke_pozadavky.length}`);
   console.log(`  Risks: ${analysis.rizika.length}`);
   console.log(`  Decision: ${analysis.doporuceni.rozhodnuti}`);

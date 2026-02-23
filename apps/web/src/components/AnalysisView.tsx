@@ -1,5 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
-import { getAnalysis } from '../lib/api';
+import { useState, useEffect, useCallback } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getAnalysis, getParts, saveParts, type Cast } from '../lib/api';
 import { cn } from '../lib/cn';
 
 interface AnalysisViewProps {
@@ -18,8 +19,15 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
 
   const analysis = data as any;
 
+  const casti = analysis.casti as Cast[] | undefined;
+  const showParts = casti && casti.length > 1;
+
   return (
     <div className="space-y-6">
+      {showParts && (
+        <PartsSelector tenderId={tenderId} casti={casti!} />
+      )}
+
       {analysis.doporuceni && (
         <div className={cn(
           'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold',
@@ -160,6 +168,103 @@ function InfoRow({ label, value }: { label: string; value?: string | null }) {
     <div className="flex gap-2 py-1 text-sm">
       <span className="w-40 shrink-0 font-medium text-gray-500">{label}</span>
       <span>{value}</span>
+    </div>
+  );
+}
+
+function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] }) {
+  const queryClient = useQueryClient();
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(casti.map(c => c.id)));
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  const { data: partsData } = useQuery({
+    queryKey: ['parts', tenderId],
+    queryFn: () => getParts(tenderId),
+  });
+
+  useEffect(() => {
+    if (partsData?.selected_parts) {
+      setSelected(new Set(partsData.selected_parts));
+    }
+  }, [partsData]);
+
+  const toggle = useCallback((id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setDirty(true);
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    try {
+      await saveParts(tenderId, [...selected]);
+      setDirty(false);
+      queryClient.invalidateQueries({ queryKey: ['parts', tenderId] });
+    } catch (err) {
+      console.error('Failed to save parts:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [tenderId, selected, queryClient]);
+
+  return (
+    <div className="rounded-lg border bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-900">Části zakázky</h3>
+        <button
+          onClick={handleSave}
+          disabled={saving || !dirty}
+          className={cn(
+            'rounded px-3 py-1.5 text-xs font-medium transition-colors',
+            dirty
+              ? 'bg-blue-600 text-white hover:bg-blue-700'
+              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+          )}
+        >
+          {saving ? 'Ukládám...' : 'Uložit výběr'}
+        </button>
+      </div>
+      <div className="space-y-2">
+        {casti.map(cast => (
+          <label
+            key={cast.id}
+            className={cn(
+              'flex items-center justify-between rounded-md border px-3 py-2.5 cursor-pointer transition-colors',
+              selected.has(cast.id)
+                ? 'border-blue-300 bg-blue-50'
+                : 'border-gray-200 bg-gray-50 opacity-60'
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={selected.has(cast.id)}
+                onChange={() => toggle(cast.id)}
+                className="h-4 w-4 rounded border-gray-300 text-blue-600"
+              />
+              <div>
+                <div className="text-sm font-medium">{cast.nazev}</div>
+                <div className="text-xs text-gray-500">
+                  {cast.pocet_polozek} {cast.pocet_polozek === 1 ? 'položka' : cast.pocet_polozek < 5 ? 'položky' : 'položek'}
+                </div>
+              </div>
+            </div>
+            {cast.predpokladana_hodnota && (
+              <div className="text-sm font-semibold text-gray-700">
+                {cast.predpokladana_hodnota.toLocaleString('cs-CZ')} Kč
+              </div>
+            )}
+          </label>
+        ))}
+      </div>
+      {selected.size === 0 && (
+        <p className="mt-2 text-xs text-red-600">Vyberte alespoň jednu část.</p>
+      )}
     </div>
   );
 }

@@ -67,10 +67,30 @@ async function main() {
     console.log(`Found ${attachments.length} qualification attachments: ${attachments.join(', ')}`);
   }
 
+  // Read parts selection for filtering
+  let selectedPartIds: Set<string> | null = null;
+  const hasParts = analysis.casti && analysis.casti.length > 1;
+  if (hasParts) {
+    try {
+      const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
+      selectedPartIds = new Set(sel.selected_parts || []);
+    } catch {
+      selectedPartIds = new Set(analysis.casti.map((c: any) => c.id));
+    }
+  }
+
   // Resolve selected products for both single and multi-product paths
   let productsSection: string;
   if (productMatch.polozky_match) {
-    productsSection = productMatch.polozky_match.map((pm) => {
+    // Filter by selected parts
+    let filteredMatch = productMatch.polozky_match;
+    if (selectedPartIds) {
+      filteredMatch = filteredMatch.filter(pm => {
+        const castId = (pm as any).cast_id;
+        return !castId || selectedPartIds!.has(castId);
+      });
+    }
+    productsSection = filteredMatch.map((pm) => {
       const product = pm.kandidati[pm.vybrany_index];
       return `Položka: ${pm.polozka_nazev}
 Nabízený produkt: ${product.vyrobce} ${product.model}

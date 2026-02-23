@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { PolozkaMatch } from './lib/types.js';
+import { extractCastIdFromFilename } from './parse-soupis.js';
 
 export interface SoupisFillResult {
   filename: string;
@@ -107,11 +108,23 @@ export async function fillSoupisWithPrices(
 
   console.log(`  Soupis fill: header row ${headerRow}, name col ${nazevCol}, price col ${unitPriceCol}${totalPriceCol ? `, total col ${totalPriceCol}` : ''}`);
 
-  // Build index map from polozky_match
+  // Detect part ID from filename and filter polozky_match to this part's items
+  const soupisCastId = extractCastIdFromFilename(filename);
+  let partItems = polozkyMatch;
+  if (soupisCastId) {
+    const filtered = polozkyMatch.filter(pm => (pm as any).cast_id === soupisCastId);
+    if (filtered.length > 0) {
+      partItems = filtered;
+      console.log(`  Soupis part filter: Část ${soupisCastId} → ${filtered.length}/${polozkyMatch.length} items`);
+    }
+  }
+
+  // Build index map from filtered part items using part-local index (0-based within part)
   const indexMap = new Map<number, PolozkaMatch>();
   const nameMap = new Map<string, PolozkaMatch>();
-  for (const pm of polozkyMatch) {
-    indexMap.set(pm.polozka_index, pm);
+  for (let i = 0; i < partItems.length; i++) {
+    const pm = partItems[i];
+    indexMap.set(i, pm);  // part-local index
     nameMap.set(normalizeForMatching(pm.polozka_nazev), pm);
   }
 

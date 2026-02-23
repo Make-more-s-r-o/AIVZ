@@ -17,6 +17,7 @@ import { fillExcelWithAI } from './lib/xls-filler.js';
 import { fillSoupisWithPrices } from './fill-soupis.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
+import { extractCastIdFromFilename } from './parse-soupis.js';
 import type { TenderAnalysis, ProductMatch, ProductCandidate, ExtractedText } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
@@ -59,6 +60,20 @@ async function main() {
   let totalCostCZK = 0;
   const isMultiProduct = !!productMatch.polozky_match;
 
+  // Read parts selection for multi-part tenders
+  let selectedPartIds: Set<string> | null = null;
+  const hasParts = analysis.casti && analysis.casti.length > 1;
+  if (hasParts) {
+    try {
+      const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
+      selectedPartIds = new Set(sel.selected_parts || []);
+      console.log(`  Parts selection: ${[...selectedPartIds].join(', ')}`);
+    } catch {
+      selectedPartIds = new Set(analysis.casti.map((c: any) => c.id));
+      console.log(`  No parts selection — using all parts`);
+    }
+  }
+
   // Resolve products and prices for both paths
   let selectedProducts: Array<{
     polozka: string;
@@ -69,13 +84,22 @@ async function main() {
   }>;
 
   if (isMultiProduct) {
-    const itemTypes = productMatch.polozky_match!.reduce((acc, pm) => {
+    // Filter by selected parts
+    let filteredMatch = productMatch.polozky_match!;
+    if (selectedPartIds) {
+      filteredMatch = filteredMatch.filter(pm => {
+        const castId = (pm as any).cast_id;
+        return !castId || selectedPartIds!.has(castId);
+      });
+      console.log(`  Part filter: ${filteredMatch.length}/${productMatch.polozky_match!.length} items from selected parts`);
+    }
+    const itemTypes = filteredMatch.reduce((acc, pm) => {
       const t = (pm as any).typ || 'produkt';
       acc[t] = (acc[t] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
-    console.log(`  Multi-product mode: ${productMatch.polozky_match!.length} items (${Object.entries(itemTypes).map(([k,v]) => `${v} ${k}`).join(', ')})`);
-    selectedProducts = productMatch.polozky_match!.map(pm => {
+    console.log(`  Multi-product mode: ${filteredMatch.length} items (${Object.entries(itemTypes).map(([k,v]) => `${v} ${k}`).join(', ')})`);
+    selectedProducts = filteredMatch.map(pm => {
       const product = pm.kandidati[pm.vybrany_index];
       const override = pm.cenova_uprava;
       return {
@@ -272,7 +296,15 @@ async function main() {
     const extractedTextPath = join(outputDir, 'extracted-text.json');
     if (existsSync(extractedTextPath)) {
       const extractedText: ExtractedText = JSON.parse(await readFile(extractedTextPath, 'utf-8'));
-      const soupisFiles = extractedText.documents.filter(d => d.isSoupis);
+      let soupisFiles = extractedText.documents.filter(d => d.isSoupis);
+
+      // Filter soupis files to selected parts only
+      if (selectedPartIds) {
+        soupisFiles = soupisFiles.filter(doc => {
+          const castId = extractCastIdFromFilename(doc.filename);
+          return !castId || selectedPartIds!.has(castId);
+        });
+      }
 
       if (soupisFiles.length > 0) {
         console.log(`\n4D: Filling soupis XLSX with prices (${soupisFiles.length} file(s))...`);

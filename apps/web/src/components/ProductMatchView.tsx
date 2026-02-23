@@ -34,6 +34,7 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
   const budget = analysis?.zakazka?.predpokladana_hodnota as number | undefined;
 
   const isMultiItem = !!match?.polozky_match;
+  const casti = analysis?.casti as Array<{ id: string; nazev: string; pocet_polozek: number }> | undefined;
 
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám produkty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Produkty zatím nejsou k dispozici. Spusťte krok "Produkty".</div>;
@@ -46,6 +47,7 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
         tenderId={tenderId}
         budget={budget}
         queryClient={queryClient}
+        casti={casti}
       />
     );
   }
@@ -102,7 +104,7 @@ function SingleItemView({ match, tenderId, budget, queryClient }: any) {
 }
 
 // --- Multi-item (polozky_match) view ---
-function MultiItemView({ match, tenderId, budget, queryClient }: any) {
+function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
   const [expandedItems, setExpandedItems] = useState<Set<number>>(() => new Set([0]));
 
   const toggleItem = (index: number) => {
@@ -133,6 +135,34 @@ function MultiItemView({ match, tenderId, budget, queryClient }: any) {
 
   const allConfirmed = polozky.every((pm: any) => pm.cenova_uprava?.potvrzeno);
   const confirmedCount = polozky.filter((pm: any) => pm.cenova_uprava?.potvrzeno).length;
+
+  // Group items by part if multi-part
+  const castiArray = casti as Array<{ id: string; nazev: string; pocet_polozek: number }> | undefined;
+  const hasPartGroups = castiArray && castiArray.length > 1 && polozky.some((pm: any) => pm.cast_id);
+  const castiMap = new Map(castiArray?.map(c => [c.id, c]) || []);
+
+  // Build grouped structure: [{castId, castName, items: [{pm, globalIdx}]}]
+  let groups: Array<{ castId: string | null; castName: string | null; items: Array<{ pm: any; globalIdx: number }> }>;
+  if (hasPartGroups) {
+    const groupMap = new Map<string, Array<{ pm: any; globalIdx: number }>>();
+    const order: string[] = [];
+    for (let idx = 0; idx < polozky.length; idx++) {
+      const pm = polozky[idx];
+      const key = pm.cast_id || '__none__';
+      if (!groupMap.has(key)) {
+        groupMap.set(key, []);
+        order.push(key);
+      }
+      groupMap.get(key)!.push({ pm, globalIdx: idx });
+    }
+    groups = order.map(key => ({
+      castId: key === '__none__' ? null : key,
+      castName: key === '__none__' ? null : (castiMap.get(key)?.nazev || `Část ${key}`),
+      items: groupMap.get(key)!,
+    }));
+  } else {
+    groups = [{ castId: null, castName: null, items: polozky.map((pm: any, idx: number) => ({ pm, globalIdx: idx })) }];
+  }
 
   return (
     <div className="space-y-4">
@@ -172,8 +202,20 @@ function MultiItemView({ match, tenderId, budget, queryClient }: any) {
         </div>
       )}
 
-      {/* Accordion items */}
-      {polozky.map((pm: any, idx: number) => {
+      {/* Grouped accordion items */}
+      {groups.map((group, gi) => (
+        <div key={gi} className="space-y-2">
+          {group.castName && (
+            <div className="flex items-center gap-2 border-b border-gray-200 pb-1 pt-2">
+              <span className="rounded bg-indigo-100 px-2 py-0.5 text-xs font-semibold text-indigo-800">
+                {group.castName}
+              </span>
+              <span className="text-xs text-gray-500">
+                ({group.items.length} {group.items.length === 1 ? 'položka' : group.items.length < 5 ? 'položky' : 'položek'})
+              </span>
+            </div>
+          )}
+      {group.items.map(({ pm, globalIdx: idx }) => {
         const isExpanded = expandedItems.has(idx);
         const selectedProduct = pm.kandidati[pm.vybrany_index];
         const isItemConfirmed = pm.cenova_uprava?.potvrzeno;
@@ -260,6 +302,8 @@ function MultiItemView({ match, tenderId, budget, queryClient }: any) {
           </div>
         );
       })}
+        </div>
+      ))}
     </div>
   );
 }

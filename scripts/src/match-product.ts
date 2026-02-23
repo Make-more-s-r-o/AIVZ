@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
@@ -179,18 +180,47 @@ async function main() {
 
   const requirements = analysis.technicke_pozadavky;
 
-  // Categorize ALL items from analysis
-  const categorized = analysis.polozky.map((item, idx) => ({
+  // Read parts selection if multi-part tender
+  let selectedParts: string[] | null = null;
+  const hasParts = analysis.casti && analysis.casti.length > 1;
+  if (hasParts) {
+    const partsSelPath = join(outputDir, 'parts-selection.json');
+    if (existsSync(partsSelPath)) {
+      try {
+        const partsSelection = JSON.parse(await readFile(partsSelPath, 'utf-8'));
+        selectedParts = partsSelection.selected_parts || null;
+        console.log(`  Parts selection: ${selectedParts?.join(', ') || 'all'}`);
+      } catch {}
+    }
+    if (!selectedParts) {
+      selectedParts = analysis.casti.map((c: any) => c.id);
+      console.log(`  No parts selection — using all parts: ${selectedParts!.join(', ')}`);
+    }
+  }
+
+  // Filter polozky by selected parts
+  let filteredPolozky = analysis.polozky;
+  if (selectedParts) {
+    const selectedSet = new Set(selectedParts);
+    filteredPolozky = analysis.polozky.filter(p => !p.cast_id || selectedSet.has(p.cast_id));
+    if (filteredPolozky.length < analysis.polozky.length) {
+      console.log(`  Filtered to ${filteredPolozky.length}/${analysis.polozky.length} items from selected parts`);
+    }
+  }
+
+  // Categorize ALL items from filtered polozky
+  const categorized = filteredPolozky.map((item, idx) => ({
     ...item,
     originalIndex: idx,
     category: categorizeItem(item),
+    cast_id: item.cast_id,
   }));
 
   const products = categorized.filter(i => i.category === 'produkt');
   const accessories = categorized.filter(i => i.category === 'prislusenstvi');
   const services = categorized.filter(i => i.category === 'sluzba');
 
-  console.log(`\nItems from analysis: ${analysis.polozky.length} total`);
+  console.log(`\nItems${hasParts ? ' (after part filter)' : ''}: ${filteredPolozky.length} total`);
   console.log(`  Products (AI matching): ${products.length} — ${products.map(i => i.nazev).join(', ') || 'none'}`);
   console.log(`  Accessories (simple matching): ${accessories.length} — ${accessories.map(i => i.nazev).join(', ') || 'none'}`);
   console.log(`  Services (fixed price): ${services.length} — ${services.map(i => i.nazev).join(', ') || 'none'}`);
@@ -339,12 +369,14 @@ async function main() {
 
       // Enrich and collect results from this batch
       if (parsed.kandidati) {
+        const srcItem = matchableItems[batchIdx * BATCH_SIZE];
         polozkyMatch.push({
           polozka_nazev: batchItems[0].nazev,
           polozka_index: batchIdx * BATCH_SIZE,
           mnozstvi: batchItems[0].mnozstvi || 1,
           jednotka: batchItems[0].jednotka,
           typ: batchItems[0].typ || 'produkt',
+          cast_id: srcItem?.cast_id,
           kandidati: parsed.kandidati,
           vybrany_index: parsed.vybrany_index,
           oduvodneni_vyberu: parsed.oduvodneni_vyberu,
@@ -354,7 +386,9 @@ async function main() {
         for (const pm of parsed.polozky_match) {
           // Map batch-local index to global index
           const localIdx = pm.polozka_index;
+          const srcItem = matchableItems[batchIdx * BATCH_SIZE + localIdx];
           pm.typ = batchItems[localIdx]?.typ || 'produkt';
+          pm.cast_id = srcItem?.cast_id;
           pm.polozka_index = batchIdx * BATCH_SIZE + localIdx;
         }
         polozkyMatch.push(...parsed.polozky_match);
@@ -391,13 +425,15 @@ async function main() {
     const serviceParsed = JSON.parse(jsonStr);
     const serviceItems = serviceParsed.sluzby || [];
 
-    for (const svc of serviceItems) {
+    for (let si = 0; si < serviceItems.length; si++) {
+      const svc = serviceItems[si];
       polozkyMatch.push({
         polozka_nazev: svc.nazev,
         polozka_index: polozkyMatch.length,
         mnozstvi: svc.mnozstvi || 1,
         jednotka: svc.jednotka,
         typ: 'sluzba',
+        cast_id: services[si]?.cast_id,
         kandidati: [{
           vyrobce: '-',
           model: svc.nazev,

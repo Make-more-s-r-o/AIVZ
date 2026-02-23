@@ -14,6 +14,25 @@ export interface SoupisResult {
   filename: string;
   sheetName: string;
   polozky: SoupisItem[];
+  cast_id?: string;  // detected part ID from filename (e.g. "A", "B", "1")
+}
+
+/**
+ * Extract part ID (cast_id) from a filename.
+ * Detects patterns like: Část A, Část B, Cast_1, Part 1, Los 1
+ */
+export function extractCastIdFromFilename(filename: string): string | undefined {
+  const normalized = filename.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  // Czech "Část A", "Cast B", "cast_C"
+  const czMatch = normalized.match(/[Cc]ast[\s_]*([A-Za-z0-9]+)/i);
+  if (czMatch) return czMatch[1].toUpperCase();
+  // English "Part 1", "Part A"
+  const enMatch = normalized.match(/Part[\s_]*(\d+|[A-Za-z])\b/i);
+  if (enMatch) return enMatch[1].toUpperCase();
+  // "Los 1", "Los A"
+  const losMatch = normalized.match(/Los[\s_]*(\d+|[A-Za-z])\b/i);
+  if (losMatch) return losMatch[1].toUpperCase();
+  return undefined;
 }
 
 // Common header patterns for auto-detection (Czech tender soupis files)
@@ -148,11 +167,13 @@ export async function parseSoupis(filePath: string): Promise<SoupisResult> {
   }
 
   const filename = filePath.split('/').pop() || filePath;
-  console.log(`  Soupis parsed: ${filename} → ${polozky.length} items (sheet: ${sheet.name})`);
+  const cast_id = extractCastIdFromFilename(filename);
+  console.log(`  Soupis parsed: ${filename} → ${polozky.length} items (sheet: ${sheet.name})${cast_id ? ` [Část ${cast_id}]` : ''}`);
 
   return {
     filename,
     sheetName: sheet.name,
     polozky,
+    cast_id,
   };
 }

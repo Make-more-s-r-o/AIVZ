@@ -226,6 +226,38 @@ export function getAttachmentDownloadUrl(id: string, filename: string): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// --- Parts (části zakázky) API ---
+
+export interface Cast {
+  id: string;
+  nazev: string;
+  predpokladana_hodnota?: number;
+  pocet_polozek: number;
+  soupis_filename?: string;
+}
+
+export interface PartsData {
+  casti: Cast[];
+  selected_parts: string[];
+}
+
+export async function getParts(id: string): Promise<PartsData> {
+  return fetchJson(`/tenders/${id}/parts`);
+}
+
+export async function saveParts(id: string, selected: string[]): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/parts`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ selected_parts: selected }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to save parts selection');
+  }
+  return res.json();
+}
+
 // --- User management API ---
 
 export interface SafeUser {

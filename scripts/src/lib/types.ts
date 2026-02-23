@@ -17,6 +17,15 @@ export const ExtractedTextSchema = z.object({
   totalCharacters: z.number(),
 });
 
+// Part (část) definition for multi-part tenders
+export const CastSchema = z.object({
+  id: z.string(),                    // "A", "B", "C" or "1", "2", "3"
+  nazev: z.string(),                 // "Část A - nábytek"
+  predpokladana_hodnota: z.number().optional(),
+  pocet_polozek: z.number(),
+  soupis_filename: z.string().optional(), // source soupis file
+});
+
 // AI Analysis output
 export const TenderAnalysisSchema = z.object({
   zakazka: z.object({
@@ -57,11 +66,13 @@ export const TenderAnalysisSchema = z.object({
     doba_plneni_do: z.string().optional().nullable(),
     prohlidka_mista: z.string().optional().nullable(),
   }),
+  casti: z.array(CastSchema).optional().default([]),  // empty = single-part tender
   polozky: z.array(z.object({
     nazev: z.string(),
     mnozstvi: z.number().optional().nullable(),
     jednotka: z.string().optional().nullable(),
     specifikace: z.string(),
+    cast_id: z.string().optional(),  // references CastSchema.id
   })),
   technicke_pozadavky: z.array(z.object({
     parametr: z.string(),
@@ -121,6 +132,7 @@ export const PolozkaMatchSchema = z.object({
   jednotka: z.string().optional(),
   specifikace: z.string().optional(),
   typ: z.enum(['produkt', 'prislusenstvi', 'sluzba']).default('produkt'),
+  cast_id: z.string().optional(),    // references CastSchema.id
   kandidati: z.array(ProductCandidateSchema),
   vybrany_index: z.number(),
   oduvodneni_vyberu: z.string(),
@@ -177,6 +189,7 @@ export const PipelineStatusSchema = z.object({
 });
 
 // Infer types
+export type Cast = z.infer<typeof CastSchema>;
 export type ExtractedDocument = z.infer<typeof ExtractedDocumentSchema>;
 export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
 export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
