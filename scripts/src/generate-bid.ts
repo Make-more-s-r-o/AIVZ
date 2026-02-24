@@ -355,24 +355,24 @@ async function main() {
     }
   }
 
-  // 4E: Convert DOCX to PDF (if Gotenberg is configured)
+  // 4E: Convert DOCX/XLSX to PDF (if Gotenberg is configured)
   if (isGotenbergConfigured()) {
-    console.log('\n4E: Converting DOCX to PDF...');
+    console.log('\n4E: Converting DOCX/XLSX to PDF...');
     const outputFiles = await readdir(outputDir);
-    const docxFiles = outputFiles.filter(f => f.endsWith('.docx'));
+    const convertibleFiles = outputFiles.filter(f => f.endsWith('.docx') || f.endsWith('.xlsx'));
 
-    for (const docxFile of docxFiles) {
-      const docxPath = join(outputDir, docxFile);
-      const pdfName = docxFile.replace(/\.docx$/, '.pdf');
+    for (const file of convertibleFiles) {
+      const filePath = join(outputDir, file);
+      const pdfName = file.replace(/\.(docx|xlsx)$/, '.pdf');
       try {
         const start = Date.now();
-        const pdfBuffer = await convertToPdf(docxPath);
+        const pdfBuffer = await convertToPdf(filePath);
         if (pdfBuffer) {
           await writeFile(join(outputDir, pdfName), pdfBuffer);
           console.log(`  ${pdfName} (${(Date.now() - start)}ms)`);
         }
       } catch (err) {
-        console.log(`  Error converting ${docxFile}: ${err}`);
+        console.log(`  Error converting ${file}: ${err}`);
       }
     }
   } else {

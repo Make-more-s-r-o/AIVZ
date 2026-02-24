@@ -11,6 +11,7 @@ import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
 import {
@@ -296,8 +297,21 @@ async function getPipelineStatus(tenderId: string) {
 }
 
 // GET /api/health - health check (no auth required)
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0' });
+app.get('/api/health', async (_req, res) => {
+  let gotenberg: 'ok' | 'unreachable' | 'not_configured' = 'not_configured';
+  if (isGotenbergConfigured()) {
+    try {
+      const gotenbergUrl = (process.env.GOTENBERG_URL || '').replace(/\/$/, '');
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const healthRes = await fetch(`${gotenbergUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      gotenberg = healthRes.ok ? 'ok' : 'unreachable';
+    } catch {
+      gotenberg = 'unreachable';
+    }
+  }
+  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0', gotenberg });
 });
 
 // --- Auth endpoints ---
@@ -694,7 +708,15 @@ app.get('/api/tenders/:id/cost', async (req, res) => {
 app.get('/api/tenders/:id/status', async (req, res) => {
   try {
     const status = await getPipelineStatus(req.params.id);
-    res.json(status);
+    let pdfAvailable = false;
+    try {
+      const outputDir = join(OUTPUT_DIR, req.params.id);
+      const files = await readdir(outputDir);
+      pdfAvailable = files.some(f => f.endsWith('.pdf'));
+    } catch {
+      // output dir may not exist yet
+    }
+    res.json({ ...status, pdfAvailable });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -759,6 +781,33 @@ app.get('/api/tenders/:id/documents/:filename', async (req, res) => {
     res.download(filePath);
   } catch {
     res.status(404).json({ error: 'Document not found' });
+  }
+});
+
+// POST /api/tenders/:id/documents/:filename/convert-pdf
+app.post('/api/tenders/:id/documents/:filename/convert-pdf', async (req, res) => {
+  try {
+    if (!isGotenbergConfigured()) {
+      return res.status(503).json({ error: 'Gotenberg is not configured (GOTENBERG_URL not set)' });
+    }
+    const { id, filename } = req.params;
+    const decodedFilename = decodeURIComponent(filename);
+    if (!decodedFilename.endsWith('.docx') && !decodedFilename.endsWith('.xlsx')) {
+      return res.status(400).json({ error: 'Only .docx and .xlsx files can be converted to PDF' });
+    }
+    const docxPath = join(OUTPUT_DIR, id, decodedFilename);
+    if (!existsSync(docxPath)) {
+      return res.status(404).json({ error: `File not found: ${decodedFilename}` });
+    }
+    const pdfBuffer = await convertToPdf(docxPath);
+    if (!pdfBuffer) {
+      return res.status(500).json({ error: 'PDF conversion returned empty result' });
+    }
+    const pdfFilename = decodedFilename.replace(/\.(docx|xlsx)$/, '.pdf');
+    await writeFile(join(OUTPUT_DIR, id, pdfFilename), pdfBuffer);
+    res.json({ success: true, pdfFilename });
+  } catch (err) {
+    res.status(500).json({ error: `PDF conversion failed: ${err instanceof Error ? err.message : String(err)}` });
   }
 });
 
