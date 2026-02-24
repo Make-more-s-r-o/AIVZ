@@ -779,7 +779,35 @@ function parseAIReplacements(content: string): TemplateReplacement[] {
       jsonStr = jsonStr.slice(bracketStart, bracketEnd + 1);
     }
   }
-  return JSON.parse(jsonStr);
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    // Attempt repair: fix common AI JSON issues
+    // 1. Remove control characters inside strings (newlines, tabs)
+    const repaired = jsonStr
+      .replace(/(?<=:\s*"[^"]*)\n/g, '\\n')   // unescaped newlines inside strings
+      .replace(/(?<=:\s*"[^"]*)\t/g, '\\t')   // unescaped tabs
+      .replace(/,\s*([}\]])/g, '$1');          // trailing commas
+    try {
+      return JSON.parse(repaired);
+    } catch {
+      // 2. Try extracting individual objects with regex
+      const items: TemplateReplacement[] = [];
+      const objRegex = /\{\s*"original"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"replacement"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+      let m: RegExpExecArray | null;
+      while ((m = objRegex.exec(jsonStr)) !== null) {
+        items.push({
+          original: m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'),
+          replacement: m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n'),
+        });
+      }
+      if (items.length > 0) {
+        console.log(`    JSON repair: extracted ${items.length} replacements via regex`);
+        return items;
+      }
+      throw new Error('Cannot parse AI response as JSON');
+    }
+  }
 }
 
 /**
