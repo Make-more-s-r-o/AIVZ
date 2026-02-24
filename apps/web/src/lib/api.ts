@@ -1,4 +1,5 @@
 import { getJwt, clearAuth } from './auth';
+import type { TenderAnalysis, ProductMatch, ValidationReport } from '../types/tender';
 
 const API_BASE = '/api';
 
@@ -110,11 +111,11 @@ export async function getExtractedText(id: string) {
 }
 
 export async function getAnalysis(id: string) {
-  return fetchJson<Record<string, unknown>>(`/tenders/${id}/analysis`);
+  return fetchJson<TenderAnalysis>(`/tenders/${id}/analysis`);
 }
 
 export async function getProductMatch(id: string) {
-  return fetchJson<Record<string, unknown>>(`/tenders/${id}/product-match`);
+  return fetchJson<ProductMatch>(`/tenders/${id}/product-match`);
 }
 
 export async function getDocuments(id: string): Promise<string[]> {
@@ -122,7 +123,7 @@ export async function getDocuments(id: string): Promise<string[]> {
 }
 
 export async function getValidation(id: string) {
-  return fetchJson<Record<string, unknown>>(`/tenders/${id}/validation`);
+  return fetchJson<ValidationReport>(`/tenders/${id}/validation`);
 }
 
 /** Start a pipeline step — returns jobId for polling */

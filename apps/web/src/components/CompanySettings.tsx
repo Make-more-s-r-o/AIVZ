@@ -18,8 +18,8 @@ export default function CompanySettings() {
       const data = await getCompanies();
       setCompanies(data);
       setError('');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Neznámá chyba');
     } finally {
       setLoading(false);
     }
@@ -33,8 +33,8 @@ export default function CompanySettings() {
       await deleteCompanyApi(id);
       if (editId === id) setEditId(null);
       await load();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Neznámá chyba');
     }
   };
 
@@ -117,8 +117,8 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
         await createCompany(form);
       }
       await onSave();
-    } catch (err: any) {
-      setFormError(err.message);
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'Neznámá chyba');
     } finally {
       setSaving(false);
     }
@@ -239,13 +239,17 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
 function CompanyDocuments({ companyId }: { companyId: string }) {
   const [docs, setDocs] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [docError, setDocError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const loadDocs = useCallback(async () => {
     try {
       const d = await getCompanyDocs(companyId);
       setDocs(d);
-    } catch {}
+      setDocError(null);
+    } catch (err) {
+      console.error('Failed to load docs:', err);
+    }
   }, [companyId]);
 
   useEffect(() => { loadDocs(); }, [loadDocs]);
@@ -254,23 +258,34 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     setUploading(true);
+    setDocError(null);
     try {
       await uploadCompanyDocs(companyId, Array.from(files));
       await loadDocs();
-    } catch {}
+    } catch (err) {
+      console.error('Upload failed:', err);
+      setDocError('Nahrání souboru se nezdařilo.');
+    }
     setUploading(false);
     if (fileRef.current) fileRef.current.value = '';
   };
 
   const handleDelete = async (filename: string) => {
+    if (!window.confirm('Opravdu smazat tento dokument?')) return;
     try {
       await deleteCompanyDoc(companyId, filename);
       await loadDocs();
-    } catch {}
+    } catch (err) {
+      console.error('Delete failed:', err);
+      setDocError('Smazání souboru se nezdařilo.');
+    }
   };
 
   return (
     <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-3">
+      {docError && (
+        <div className="mb-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{docError}</div>
+      )}
       <div className="mb-2 flex items-center justify-between">
         <h4 className="text-xs font-semibold text-gray-600 uppercase">Výchozí kvalifikační doklady</h4>
         <label className="flex cursor-pointer items-center gap-1.5 rounded border border-dashed border-gray-300 px-2 py-1 text-xs text-gray-600 hover:border-blue-400 hover:text-blue-600">

@@ -49,11 +49,13 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
   const [error, setError] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const logSeenRef = useRef(0);
+  const onStepCompleteRef = useRef(onStepComplete);
+  onStepCompleteRef.current = onStepComplete;
 
   const { data: costData } = useQuery({
     queryKey: ['cost', tenderId],
     queryFn: () => getCost(tenderId),
-    refetchInterval: 10000,
+    refetchInterval: activeJobId ? 10000 : false,
   });
 
   // Poll job status when we have an active job
@@ -74,13 +76,13 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           setActiveJobId(null);
           setActiveStep(null);
           setJobError(null);
-          onStepComplete();
+          onStepCompleteRef.current();
         } else if (job.status === 'error') {
           clearInterval(interval);
           setActiveJobId(null);
           setActiveStep(null);
           setJobError(job.error || 'Unknown error');
-          onStepComplete();
+          onStepCompleteRef.current();
         }
       } catch {
         // Network error — keep polling
@@ -88,7 +90,7 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [activeJobId, onStepComplete]);
+  }, [activeJobId]);
 
   // Auto-scroll logs
   useEffect(() => {

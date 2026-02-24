@@ -1,5 +1,6 @@
 import { cn } from '../lib/cn';
 import { Check, X, AlertTriangle, ExternalLink } from 'lucide-react';
+import type { ProductCandidate } from '../types/tender';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
   vysoka: { label: 'Vysoká', color: 'bg-green-100 text-green-800' },
@@ -8,12 +9,12 @@ const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 interface ProductCandidateCardProps {
-  product: any;
+  product: ProductCandidate;
   isSelected: boolean;
 }
 
 export default function ProductCandidateCard({ product, isSelected }: ProductCandidateCardProps) {
-  const confidence = CONFIDENCE_LABELS[product.cena_spolehlivost as string] ?? { label: 'Nízká', color: 'bg-red-100 text-red-800' };
+  const confidence = CONFIDENCE_LABELS[product.cena_spolehlivost] ?? { label: 'Nizka', color: 'bg-red-100 text-red-800' };
 
   return (
     <div
@@ -91,7 +92,7 @@ export default function ProductCandidateCard({ product, isSelected }: ProductCan
         <div className="mt-3 border-t pt-3">
           <div className="text-xs font-medium text-gray-500">Shoda s požadavky</div>
           <div className="mt-1 space-y-1">
-            {product.shoda_s_pozadavky.map((s: any, j: number) => (
+            {product.shoda_s_pozadavky.map((s, j: number) => (
               <div key={j} className="flex items-start gap-1 text-xs">
                 {s.splneno ? (
                   <Check className="mt-0.5 h-3 w-3 shrink-0 text-green-500" />

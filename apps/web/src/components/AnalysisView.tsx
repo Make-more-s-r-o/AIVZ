@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getAnalysis, getParts, saveParts, type Cast } from '../lib/api';
 import { cn } from '../lib/cn';
+import type { TenderAnalysis } from '../types/tender';
 
 interface AnalysisViewProps {
   tenderId: string;
@@ -17,7 +18,7 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
   if (error) return <div className="py-8 text-center text-gray-500">Analýza zatím není k dispozici. Spusťte krok "AI analýza".</div>;
   if (!data) return null;
 
-  const analysis = data as any;
+  const analysis = data as TenderAnalysis;
 
   const casti = analysis.casti as Cast[] | undefined;
   const showParts = casti && casti.length > 1;
@@ -66,7 +67,7 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
       {analysis.hodnotici_kriteria?.length > 0 && (
         <Section title="Hodnotící kritéria">
           <div className="space-y-2">
-            {analysis.hodnotici_kriteria.map((k: any, i: number) => (
+            {analysis.hodnotici_kriteria.map((k, i: number) => (
               <div key={i} className="flex items-center gap-3">
                 <div className="flex h-8 w-16 items-center justify-center rounded bg-blue-100 text-sm font-bold text-blue-800">
                   {k.vaha_procent}%
@@ -93,7 +94,7 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
                 </tr>
               </thead>
               <tbody>
-                {analysis.technicke_pozadavky.map((r: any, i: number) => (
+                {analysis.technicke_pozadavky.map((r, i: number) => (
                   <tr key={i} className="border-b last:border-0">
                     <td className="py-2">{r.parametr}</td>
                     <td className="py-2">{r.pozadovana_hodnota} {r.jednotka || ''}</td>
@@ -115,7 +116,7 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
 
       {analysis.kvalifikace?.length > 0 && (
         <Section title="Kvalifikační požadavky">
-          {analysis.kvalifikace.map((k: any, i: number) => (
+          {analysis.kvalifikace.map((k, i: number) => (
             <div key={i} className="flex items-start gap-2 py-1">
               <span className={cn(
                 'mt-0.5 rounded px-2 py-0.5 text-xs font-medium',
@@ -131,7 +132,7 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
 
       {analysis.rizika?.length > 0 && (
         <Section title="Rizika">
-          {analysis.rizika.map((r: any, i: number) => (
+          {analysis.rizika.map((r, i: number) => (
             <div key={i} className="rounded border p-3">
               <div className="flex items-center gap-2">
                 <span className={cn(
@@ -177,6 +178,7 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
   const [selected, setSelected] = useState<Set<string>>(() => new Set(casti.map(c => c.id)));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const { data: partsData } = useQuery({
     queryKey: ['parts', tenderId],
@@ -201,12 +203,14 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
 
   const handleSave = useCallback(async () => {
     setSaving(true);
+    setSaveError(null);
     try {
       await saveParts(tenderId, [...selected]);
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['parts', tenderId] });
     } catch (err) {
       console.error('Failed to save parts:', err);
+      setSaveError('Uložení výběru se nezdařilo.');
     } finally {
       setSaving(false);
     }
@@ -262,6 +266,9 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
           </label>
         ))}
       </div>
+      {saveError && (
+        <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{saveError}</div>
+      )}
       {selected.size === 0 && (
         <p className="mt-2 text-xs text-red-600">Vyberte alespoň jednu část.</p>
       )}

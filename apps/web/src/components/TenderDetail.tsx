@@ -29,7 +29,10 @@ export default function TenderDetail({ tenderId }: TenderDetailProps) {
   const { data } = useQuery({
     queryKey: ['tender-status', tenderId],
     queryFn: () => getTenderStatus(tenderId),
-    refetchInterval: 3000,
+    refetchInterval: (query) => {
+      const s = query.state.data?.steps;
+      return s && Object.values(s).some(v => v === 'running') ? 3000 : false;
+    },
   });
 
   // Get tender name from cached tenders list

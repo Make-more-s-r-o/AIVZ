@@ -37,6 +37,7 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const { data: documents, isLoading, error } = useQuery({
     queryKey: ['documents', tenderId],
@@ -52,11 +53,13 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     setUploading(true);
+    setActionError(null);
     try {
       await uploadAttachments(tenderId, Array.from(files));
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
     } catch (err) {
       console.error('Upload failed:', err);
+      setActionError('Nahrání přílohy se nezdařilo.');
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -64,11 +67,14 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
   }, [tenderId, queryClient]);
 
   const handleDelete = useCallback(async (filename: string) => {
+    if (!window.confirm('Opravdu smazat tuto přílohu?')) return;
+    setActionError(null);
     try {
       await deleteAttachment(tenderId, filename);
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
     } catch (err) {
       console.error('Delete failed:', err);
+      setActionError('Smazání přílohy se nezdařilo.');
     }
   }, [tenderId, queryClient]);
 
@@ -77,6 +83,9 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
 
   return (
     <div className="space-y-6">
+      {actionError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{actionError}</div>
+      )}
       {/* Generated documents */}
       {documents && documents.length > 0 && (
         <div>

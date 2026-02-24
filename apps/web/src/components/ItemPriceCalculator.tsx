@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { cn } from '../lib/cn';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import type { PriceOverrideData } from '../lib/api';
+import type { ProductCandidate, PriceOverride } from '../types/tender';
+import { getErrorMessage } from '../types/tender';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
   vysoka: { label: 'Vysoká', color: 'bg-green-100 text-green-800' },
@@ -10,8 +12,8 @@ const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 interface ItemPriceCalculatorProps {
-  selectedProduct: any;
-  existingOverride: any;
+  selectedProduct: ProductCandidate;
+  existingOverride?: PriceOverride;
   budget?: number;
   onConfirm: (data: PriceOverrideData) => Promise<void>;
   label?: string;
@@ -65,8 +67,8 @@ export default function ItemPriceCalculator({
         poznamka: poznamka || undefined,
       });
       setIsConfirmed(true);
-    } catch (err: any) {
-      setSaveError(err.message || 'Nepodařilo se uložit ceny');
+    } catch (err: unknown) {
+      setSaveError(getErrorMessage(err));
     } finally {
       setIsSaving(false);
     }
@@ -97,7 +99,7 @@ export default function ItemPriceCalculator({
             {selectedProduct.cena_bez_dph?.toLocaleString('cs-CZ')} Kč bez DPH
           </div>
           {selectedProduct.cena_spolehlivost && (() => {
-            const conf = CONFIDENCE_LABELS[selectedProduct.cena_spolehlivost as string] ?? { label: 'Nízká', color: 'bg-red-100 text-red-800' };
+            const conf = CONFIDENCE_LABELS[selectedProduct.cena_spolehlivost] ?? { label: 'Nizka', color: 'bg-red-100 text-red-800' };
             return (
               <span className={cn(
                 'mt-0.5 inline-block rounded px-1 py-0.5 text-[9px] font-medium',
@@ -164,7 +166,7 @@ export default function ItemPriceCalculator({
             }}
             className="mt-1 w-full"
             min={0}
-            max={50}
+            max={100}
             step={1}
           />
         </div>

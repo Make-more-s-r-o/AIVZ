@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getValidation } from '../lib/api';
 import { cn } from '../lib/cn';
 import { CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import type { ValidationReport as ValidationReportType, ValidationCheck } from '../types/tender';
 
 interface ValidationReportProps {
   tenderId: string;
@@ -17,7 +18,7 @@ export default function ValidationReport({ tenderId }: ValidationReportProps) {
   if (error) return <div className="py-8 text-center text-gray-500">Validace zatím není k dispozici. Spusťte krok "Validace".</div>;
   if (!data) return null;
 
-  const report = data as any;
+  const report = data as ValidationReportType;
 
   return (
     <div className="space-y-6">
@@ -56,7 +57,7 @@ export default function ValidationReport({ tenderId }: ValidationReportProps) {
         <div className="rounded-lg border bg-white p-4">
           <h3 className="mb-3 text-sm font-semibold">Kontroly</h3>
           <div className="space-y-2">
-            {report.checks.map((check: any, i: number) => (
+            {report.checks.map((check: ValidationCheck, i: number) => (
               <div key={i} className="flex items-start gap-2">
                 {check.status === 'pass' && <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-500" />}
                 {check.status === 'fail' && <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />}

@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import {
   getProductMatch,
   getAnalysis,
@@ -11,6 +11,7 @@ import { cn } from '../lib/cn';
 import { ChevronDown, ChevronRight, Package, Wrench, Mouse } from 'lucide-react';
 import ProductCandidateCard from './ProductCandidateCard';
 import ItemPriceCalculator from './ItemPriceCalculator';
+import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate } from '../types/tender';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -29,12 +30,12 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
     queryFn: () => getAnalysis(tenderId),
   });
 
-  const match = data as any;
-  const analysis = analysisData as any;
-  const budget = analysis?.zakazka?.predpokladana_hodnota as number | undefined;
+  const match = data as ProductMatch;
+  const analysis = analysisData as TenderAnalysis | undefined;
+  const budget = analysis?.zakazka?.predpokladana_hodnota ?? undefined;
 
   const isMultiItem = !!match?.polozky_match;
-  const casti = analysis?.casti as Array<{ id: string; nazev: string; pocet_polozek: number }> | undefined;
+  const casti = analysis?.casti;
 
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám produkty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Produkty zatím nejsou k dispozici. Spusťte krok "Produkty".</div>;
@@ -63,8 +64,15 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
 }
 
 // --- Single item (legacy) view ---
-function SingleItemView({ match, tenderId, budget, queryClient }: any) {
-  const selectedProduct = match?.kandidati?.[match?.vybrany_index];
+interface SingleItemViewProps {
+  match: ProductMatch;
+  tenderId: string;
+  budget?: number;
+  queryClient: QueryClient;
+}
+
+function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemViewProps) {
+  const selectedProduct = match?.kandidati?.[match?.vybrany_index ?? 0];
   const existingOverride = match?.cenova_uprava;
 
   const handleConfirm = useCallback(async (priceData: PriceOverrideData) => {
@@ -81,7 +89,7 @@ function SingleItemView({ match, tenderId, budget, queryClient }: any) {
       )}
 
       <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-        {match.kandidati?.map((product: any, i: number) => (
+        {match.kandidati?.map((product: ProductCandidate, i: number) => (
           <ProductCandidateCard
             key={i}
             product={product}
@@ -104,7 +112,15 @@ function SingleItemView({ match, tenderId, budget, queryClient }: any) {
 }
 
 // --- Multi-item (polozky_match) view ---
-function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
+interface MultiItemViewProps {
+  match: ProductMatch;
+  tenderId: string;
+  budget?: number;
+  queryClient: QueryClient;
+  casti?: TenderAnalysis['casti'];
+}
+
+function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiItemViewProps) {
   const [expandedItems, setExpandedItems] = useState<Set<number>>(() => new Set([0]));
 
   const toggleItem = (index: number) => {
@@ -121,33 +137,32 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
     queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
   }, [tenderId, queryClient]);
 
-  const polozky = match.polozky_match as any[];
+  const polozky = match.polozky_match!;
 
   // Total confirmed price
-  const totalBezDph = polozky.reduce((sum: number, pm: any) => {
-    const product = pm.kandidati[pm.vybrany_index];
+  const totalBezDph = polozky.reduce((sum: number, pm: PolozkaMatch) => {
+    const product = pm.kandidati[pm.vybrany_index] as ProductCandidate | undefined;
     const override = pm.cenova_uprava;
-    const price = override?.nabidkova_cena_bez_dph ?? product.cena_bez_dph;
+    const price = override?.nabidkova_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
     const mnozstvi = pm.mnozstvi || 1;
     return sum + price * mnozstvi;
   }, 0);
   const totalSdph = Math.round(totalBezDph * 1.21);
 
-  const allConfirmed = polozky.every((pm: any) => pm.cenova_uprava?.potvrzeno);
-  const confirmedCount = polozky.filter((pm: any) => pm.cenova_uprava?.potvrzeno).length;
+  const allConfirmed = polozky.every((pm) => pm.cenova_uprava?.potvrzeno);
+  const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
 
   // Group items by part if multi-part
-  const castiArray = casti as Array<{ id: string; nazev: string; pocet_polozek: number }> | undefined;
-  const hasPartGroups = castiArray && castiArray.length > 1 && polozky.some((pm: any) => pm.cast_id);
-  const castiMap = new Map(castiArray?.map(c => [c.id, c]) || []);
+  const hasPartGroups = casti && casti.length > 1 && polozky.some((pm) => pm.cast_id);
+  const castiMap = new Map(casti?.map(c => [c.id, c]) || []);
 
   // Build grouped structure: [{castId, castName, items: [{pm, globalIdx}]}]
-  let groups: Array<{ castId: string | null; castName: string | null; items: Array<{ pm: any; globalIdx: number }> }>;
+  let groups: Array<{ castId: string | null; castName: string | null; items: Array<{ pm: PolozkaMatch; globalIdx: number }> }>;
   if (hasPartGroups) {
-    const groupMap = new Map<string, Array<{ pm: any; globalIdx: number }>>();
+    const groupMap = new Map<string, Array<{ pm: PolozkaMatch; globalIdx: number }>>();
     const order: string[] = [];
     for (let idx = 0; idx < polozky.length; idx++) {
-      const pm = polozky[idx];
+      const pm = polozky[idx]!;
       const key = pm.cast_id || '__none__';
       if (!groupMap.has(key)) {
         groupMap.set(key, []);
@@ -161,7 +176,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
       items: groupMap.get(key)!,
     }));
   } else {
-    groups = [{ castId: null, castName: null, items: polozky.map((pm: any, idx: number) => ({ pm, globalIdx: idx })) }];
+    groups = [{ castId: null, castName: null, items: polozky.map((pm, idx) => ({ pm, globalIdx: idx })) }];
   }
 
   return (
@@ -290,7 +305,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
                 )}
 
                 <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-                  {pm.kandidati.map((product: any, i: number) => (
+                  {pm.kandidati.map((product: ProductCandidate, i: number) => (
                     <ProductCandidateCard
                       key={i}
                       product={product}
@@ -303,7 +318,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: any) {
                   <ItemPriceCalculator
                     selectedProduct={selectedProduct}
                     existingOverride={pm.cenova_uprava}
-                    budget={budget ? Math.round(budget / polozky.length) : undefined}
+                    budget={undefined}
                     onConfirm={(data) => handleItemConfirm(idx, data)}
                     label={`Cenová kalkulace: ${pm.polozka_nazev}`}
                     mnozstvi={pm.mnozstvi}
