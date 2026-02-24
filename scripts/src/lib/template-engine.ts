@@ -1,5 +1,5 @@
-import { readFile, readdir } from 'fs/promises';
-import { basename, join } from 'path';
+import { readFile, readdir, writeFile as fsWriteFile } from 'fs/promises';
+import { basename, dirname, join } from 'path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { callClaude } from './ai-client.js';
@@ -171,9 +171,23 @@ export async function fillTemplate(
 
 // --- AI-powered template filling ---
 
+type ReplacementStrategy =
+  | 'exact-paragraph'
+  | 'normalized'
+  | 'multi-paragraph'
+  | 'fuzzy'
+  | 'label-deterministic'
+  | 'xml-entity'
+  | 'legacy-indexOf'
+  | 'legacy-flexRegex'
+  | 'legacy-proximity'
+  | 'retry-pass'
+  | 'not-found';
+
 interface TemplateReplacement {
   original: string;
   replacement: string;
+  strategy?: ReplacementStrategy;
 }
 
 interface FillTemplateWithAIResult {
@@ -181,6 +195,22 @@ interface FillTemplateWithAIResult {
   replacements: TemplateReplacement[];
   costCZK: number;
 }
+
+// --- Known Czech label → company data field mapping for deterministic replacement ---
+const CZECH_LABEL_MAP: Array<{ labels: RegExp[]; field: string }> = [
+  { labels: [/^i[čc]o?\s*(?:dodavatele|uchazeče|účastníka)?:?\s*$/i, /^i\.?\s*[čc]\.?\s*(?:dodavatele|uchazeče)?:?\s*$/i], field: 'ico' },
+  { labels: [/^di[čc]\s*(?:dodavatele|uchazeče|účastníka)?:?\s*$/i, /^d\.?\s*i\.?\s*[čc]\.?:?\s*$/i], field: 'dic' },
+  { labels: [/^s[ií]dlo\s*(?:dodavatele|uchazeče|firmy|účastníka|společnosti)?:?\s*$/i, /^adresa\s*s[ií]dla:?\s*$/i], field: 'sidlo' },
+  { labels: [/^obchodn[ií]\s*(?:firma|název|jméno)\s*(?:\(jméno\))?:?\s*$/i, /^název\s*(?:dodavatele|uchazeče|firmy|účastníka|společnosti):?\s*$/i, /^firma:?\s*$/i], field: 'nazev' },
+  { labels: [/^(?:jednaj[ií]c[ií]\s*osob[ay]|jednatel|statutární\s*zástupce|osoba\s*oprávněná\s*jednat):?\s*$/i], field: 'jednajici_osoba' },
+  { labels: [/^telefon:?\s*$/i, /^tel\.?:?\s*$/i, /^kontaktn[ií]\s*telefon:?\s*$/i], field: 'telefon' },
+  { labels: [/^e-?mail:?\s*$/i, /^elektronická\s*pošta:?\s*$/i, /^kontaktn[ií]\s*e-?mail:?\s*$/i], field: 'email' },
+  { labels: [/^(?:číslo\s*)?(?:bankovn[ií]\s*)?[úu](?:čtu|čet):?\s*$/i], field: 'ucet' },
+  { labels: [/^iban:?\s*$/i], field: 'iban' },
+  { labels: [/^(?:swift|bic):?\s*$/i], field: 'bic' },
+  { labels: [/^datov[áa]\s*schr[áa]nka:?\s*$/i, /^id\s*datov[ée]\s*schr[áa]nky:?\s*$/i], field: 'datova_schranka' },
+  { labels: [/^z[áa]pis\s*v\s*(?:obchodn[ií]m\s*)?rejst[řr][ií]ku:?\s*$/i, /^rejst[řr][ií]k:?\s*$/i, /^spisov[áa]\s*značka:?\s*$/i], field: 'rejstrik' },
+];
 
 /** Strip XML tags to get plain text for AI analysis */
 function stripXmlTags(xml: string): string {
@@ -193,6 +223,180 @@ function stripXmlTags(xml: string): string {
     .replace(/&apos;/g, "'")
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// --- Paragraph map for reliable XML ↔ plain text mapping ---
+
+interface TextNodeInfo {
+  start: number;    // offset in the paragraph's plainText
+  end: number;      // offset in the paragraph's plainText
+  xmlStart: number; // position of text content start in original XML
+  xmlEnd: number;   // position of text content end in original XML
+}
+
+interface ParagraphInfo {
+  plainText: string;
+  textNodes: TextNodeInfo[];
+  xmlStart: number; // <w:p> start position in XML
+  xmlEnd: number;   // </w:p> end position in XML
+}
+
+/**
+ * Build a map of paragraphs with their plain text and XML offset information.
+ * This allows mapping a substring found in plain text back to exact XML positions,
+ * even when text is split across multiple <w:r> runs.
+ */
+function buildParagraphMap(xml: string): ParagraphInfo[] {
+  const paragraphs: ParagraphInfo[] = [];
+  const paraRegex = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let paraMatch: RegExpExecArray | null;
+
+  while ((paraMatch = paraRegex.exec(xml)) !== null) {
+    const paraXml = paraMatch[0];
+    const paraXmlStart = paraMatch.index;
+    const paraXmlEnd = paraMatch.index + paraMatch[0].length;
+
+    // Find all <w:t ...>text</w:t> within this paragraph
+    const textNodes: TextNodeInfo[] = [];
+    let plainText = '';
+    const textRegex = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
+    let textMatch: RegExpExecArray | null;
+
+    while ((textMatch = textRegex.exec(paraXml)) !== null) {
+      const rawText = textMatch[1];
+      // Decode XML entities for plain text
+      const decoded = rawText
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'");
+
+      const textContentStart = paraXmlStart + textMatch.index + textMatch[0].indexOf('>') + 1;
+      // The text content end is right before </w:t>
+      const textContentEnd = textContentStart + rawText.length;
+
+      textNodes.push({
+        start: plainText.length,
+        end: plainText.length + decoded.length,
+        xmlStart: textContentStart,
+        xmlEnd: textContentEnd,
+      });
+
+      plainText += decoded;
+    }
+
+    paragraphs.push({ plainText, textNodes, xmlStart: paraXmlStart, xmlEnd: paraXmlEnd });
+  }
+
+  return paragraphs;
+}
+
+/**
+ * Given a paragraph and a substring match (start/end offsets in plainText),
+ * replace that substring in the original XML, handling text that spans multiple
+ * <w:t> nodes. Returns the new XML string with the replacement applied.
+ */
+function replaceInXmlViaParagraphMap(
+  xml: string,
+  paragraph: ParagraphInfo,
+  matchStart: number,
+  matchEnd: number,
+  replacement: string
+): string {
+  // Find all text nodes that overlap with our match range
+  const overlapping = paragraph.textNodes.filter(
+    (tn) => tn.start < matchEnd && tn.end > matchStart
+  );
+
+  if (overlapping.length === 0) return xml;
+
+  // Simple case: match is within a single text node
+  if (overlapping.length === 1) {
+    const tn = overlapping[0];
+    const offsetInNode = matchStart - tn.start;
+    const lengthInNode = matchEnd - matchStart;
+
+    // Encode replacement for XML context
+    const xmlReplacement = replacement
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+    // Calculate XML positions within the text node content
+    // We need to find the raw (XML-encoded) text that corresponds to our plain text range
+    const nodeRawText = xml.slice(tn.xmlStart, tn.xmlEnd);
+
+    // Map plain text offset to raw XML offset within the node
+    const rawStart = mapDecodedOffsetToRaw(nodeRawText, offsetInNode);
+    const rawEnd = mapDecodedOffsetToRaw(nodeRawText, offsetInNode + lengthInNode);
+
+    const xmlPos = tn.xmlStart + rawStart;
+    const xmlEndPos = tn.xmlStart + rawEnd;
+
+    return xml.slice(0, xmlPos) + xmlReplacement + xml.slice(xmlEndPos);
+  }
+
+  // Complex case: match spans multiple text nodes
+  // Strategy: put the full replacement in the first node, clear the matched portions of subsequent nodes
+  const xmlReplacement = replacement
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  // Work backwards through overlapping nodes to avoid offset corruption
+  let result = xml;
+  for (let i = overlapping.length - 1; i >= 0; i--) {
+    const tn = overlapping[i];
+    const overlapStart = Math.max(matchStart, tn.start);
+    const overlapEnd = Math.min(matchEnd, tn.end);
+    const offsetInNode = overlapStart - tn.start;
+    const lengthInNode = overlapEnd - overlapStart;
+
+    const nodeRawText = result.slice(tn.xmlStart, tn.xmlEnd);
+    const rawStart = mapDecodedOffsetToRaw(nodeRawText, offsetInNode);
+    const rawEnd = mapDecodedOffsetToRaw(nodeRawText, offsetInNode + lengthInNode);
+
+    const xmlPos = tn.xmlStart + rawStart;
+    const xmlEndPos = tn.xmlStart + rawEnd;
+
+    if (i === 0) {
+      // First overlapping node: insert the replacement
+      result = result.slice(0, xmlPos) + xmlReplacement + result.slice(xmlEndPos);
+    } else {
+      // Subsequent nodes: just remove the overlapping portion
+      result = result.slice(0, xmlPos) + result.slice(xmlEndPos);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Map a character offset in decoded text back to the raw XML-encoded text offset.
+ * Handles XML entities like &amp; &lt; &gt; &quot; &apos;
+ */
+function mapDecodedOffsetToRaw(rawText: string, decodedOffset: number): number {
+  let decoded = 0;
+  let raw = 0;
+
+  while (decoded < decodedOffset && raw < rawText.length) {
+    if (rawText[raw] === '&') {
+      // Check for XML entities
+      const remaining = rawText.slice(raw);
+      if (remaining.startsWith('&amp;')) { raw += 5; decoded++; continue; }
+      if (remaining.startsWith('&lt;')) { raw += 4; decoded++; continue; }
+      if (remaining.startsWith('&gt;')) { raw += 4; decoded++; continue; }
+      if (remaining.startsWith('&quot;')) { raw += 6; decoded++; continue; }
+      if (remaining.startsWith('&apos;')) { raw += 6; decoded++; continue; }
+    }
+    raw++;
+    decoded++;
+  }
+
+  return raw;
 }
 
 /**
@@ -316,6 +520,23 @@ function mergeRunsInParagraphs(xml: string): string {
     // Pattern for ignorable content between runs (proofErr, bookmarks, whitespace)
     const IGNORABLE_RE = /^(<w:proofErr[^>]*\/?>|<w:bookmarkStart[^>]*\/?>|<w:bookmarkEnd[^>]*\/?>|\s)*$/;
 
+    /**
+     * Look backwards from the end of merged[] to find a run that is separated
+     * from the current position only by a chain of ignorable 'other' segments.
+     * Returns the index of the run in merged[], or -1 if not found.
+     */
+    function findRunThroughIgnorableChain(merged: Segment[]): number {
+      // Walk backwards through merged, skipping ignorable 'other' segments
+      for (let k = merged.length - 1; k >= 0; k--) {
+        if (merged[k].type === 'run') return k;
+        if (merged[k].type === 'other' && IGNORABLE_RE.test(merged[k].content.trim())) {
+          continue; // ignorable, keep looking back
+        }
+        return -1; // non-ignorable 'other' — stop
+      }
+      return -1;
+    }
+
     const merged: Segment[] = [];
     for (const seg of segments) {
       if (seg.type === 'run' && merged.length > 0) {
@@ -339,14 +560,19 @@ function mergeRunsInParagraphs(xml: string): string {
           continue;
         }
 
-        // Case 3: separated by ignorable content (proofErr, bookmarks, whitespace)
-        if (prev.type === 'other' && merged.length >= 2) {
-          const prevRun = merged[merged.length - 2];
-          if (prevRun.type === 'run' && IGNORABLE_RE.test(prev.content.trim())) {
+        // Case 3+4: separated by a CHAIN of ignorable content (proofErr, bookmarks, whitespace).
+        // Handles both same and different formatting — merges runs separated by one or more
+        // ignorable elements like: run → proofErr → bookmarkStart → bookmarkEnd → run
+        if (prev.type === 'other') {
+          const runIdx = findRunThroughIgnorableChain(merged);
+          if (runIdx >= 0) {
+            const prevRun = merged[runIdx];
+            // Merge text into the earlier run (keep its formatting)
             prevRun.text += seg.text;
             const rPrTag = prevRun.rPrRaw ? `<w:rPr>${prevRun.rPrRaw}</w:rPr>` : '';
             prevRun.content = `<w:r>${rPrTag}<w:t xml:space="preserve">${prevRun.text}</w:t></w:r>`;
-            merged.pop(); // Remove the ignorable segment
+            // Remove all ignorable segments between the run and current position
+            merged.splice(runIdx + 1);
             continue;
           }
         }
@@ -447,6 +673,328 @@ function hasDocxtemplaterTags(xml: string): boolean {
   return /\{\{[^}]+\}\}/.test(plainText);
 }
 
+// --- Replacement strategy helpers ---
+
+/**
+ * Normalize text for fuzzy matching: collapse whitespace, lowercase, strip entities.
+ */
+function normalizeText(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Tokenize text into words for fuzzy matching.
+ */
+function tokenize(text: string): string[] {
+  return normalizeText(text).toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Calculate token overlap ratio between two texts.
+ */
+function tokenOverlap(a: string, b: string): number {
+  const tokensA = tokenize(a);
+  const tokensB = new Set(tokenize(b));
+  if (tokensA.length === 0) return 0;
+  let matches = 0;
+  for (const t of tokensA) {
+    if (tokensB.has(t)) matches++;
+  }
+  return matches / tokensA.length;
+}
+
+/**
+ * Try to find and apply a label→data deterministic replacement.
+ * Looks for known Czech labels (IČO:, DIČ:, etc.) in the paragraph text,
+ * and if the value after the label is a placeholder, replaces it with company data.
+ */
+function tryLabelDeterministicReplacement(
+  xml: string,
+  paragraphMap: ParagraphInfo[],
+  companyData: Record<string, string>,
+  original: string,
+  replacement: string
+): { xml: string; success: boolean } {
+  // Try to find a label in the original text
+  for (const { labels, field } of CZECH_LABEL_MAP) {
+    const value = companyData[field];
+    if (!value) continue;
+
+    for (const labelRe of labels) {
+      // Check if original contains this label pattern
+      // Extract label prefix from original (everything before the placeholder)
+      const parts = original.split(/(?:doplní\s*(?:účastník|uchazeč)|vyplní\s*(?:účastník|uchazeč)|\[doplnit\]|\[vyplnit\]|_{3,}|\.{4,}|…{2,})/i);
+      if (parts.length < 2) continue;
+      const labelPart = parts[0].trim();
+      if (!labelRe.test(labelPart)) continue;
+
+      // Found a matching label. Look for it in paragraphs.
+      for (const para of paragraphMap) {
+        const paraLower = para.plainText.toLowerCase();
+        const labelMatch = paraLower.match(new RegExp(labelRe.source, 'i'));
+        if (!labelMatch) continue;
+
+        // Found the label in this paragraph. Find the placeholder after it.
+        const labelEndIdx = (paraLower.indexOf(labelMatch[0]) ?? 0) + labelMatch[0].length;
+        const afterLabel = para.plainText.slice(labelEndIdx);
+
+        // Match common placeholder patterns after the label
+        const phMatch = afterLabel.match(/^\s*(doplní\s*(?:účastník|uchazeč)|vyplní\s*(?:účastník|uchazeč)|\[doplnit\]|\[vyplnit\]|_{3,}|\.{4,}|…{2,})/i);
+        if (phMatch) {
+          const phStart = labelEndIdx + (phMatch.index ?? 0);
+          const phEnd = phStart + phMatch[0].length;
+          const newXml = replaceInXmlViaParagraphMap(xml, para, phStart, phEnd, value);
+          if (newXml !== xml) {
+            return { xml: newXml, success: true };
+          }
+        }
+      }
+    }
+  }
+  return { xml, success: false };
+}
+
+/**
+ * Parse AI JSON response robustly, handling markdown code blocks and other wrappers.
+ */
+function parseAIReplacements(content: string): TemplateReplacement[] {
+  let jsonStr = content.trim();
+  // Extract JSON from markdown code block if present
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  }
+  // Fallback: find the first [...] in the response
+  if (!jsonStr.startsWith('[')) {
+    const bracketStart = jsonStr.indexOf('[');
+    const bracketEnd = jsonStr.lastIndexOf(']');
+    if (bracketStart !== -1 && bracketEnd > bracketStart) {
+      jsonStr = jsonStr.slice(bracketStart, bracketEnd + 1);
+    }
+  }
+  return JSON.parse(jsonStr);
+}
+
+/**
+ * Apply a single replacement using the 6-strategy pipeline.
+ * Returns the modified XML and the strategy that succeeded.
+ */
+function applyReplacementWithStrategies(
+  xml: string,
+  paragraphMap: ParagraphInfo[],
+  original: string,
+  replacement: string,
+  companyData: Record<string, string>
+): { xml: string; strategy: ReplacementStrategy; appliedReplacement: string } {
+  // Strategy 1: Exact paragraph match
+  // Find the original text within a single paragraph's plainText, then replace via XML offsets
+  for (const para of paragraphMap) {
+    const idx = para.plainText.indexOf(original);
+    if (idx !== -1) {
+      const newXml = replaceInXmlViaParagraphMap(xml, para, idx, idx + original.length, replacement);
+      if (newXml !== xml) {
+        return { xml: newXml, strategy: 'exact-paragraph', appliedReplacement: replacement };
+      }
+    }
+  }
+
+  // Strategy 2: Normalized match
+  // Normalize whitespace and entities in both the original and paragraph text, then match
+  const normOriginal = normalizeText(original);
+  for (const para of paragraphMap) {
+    const normPara = normalizeText(para.plainText);
+    const idx = normPara.indexOf(normOriginal);
+    if (idx !== -1) {
+      // Map the normalized offset back to the paragraph's raw plainText offset
+      // This is approximate — find the best match window in the raw text
+      let bestStart = -1;
+      let bestLen = 0;
+      for (let start = 0; start <= para.plainText.length - 1; start++) {
+        for (let end = start + 1; end <= para.plainText.length; end++) {
+          const candidate = normalizeText(para.plainText.slice(start, end));
+          if (candidate === normOriginal) {
+            bestStart = start;
+            bestLen = end - start;
+            break;
+          }
+        }
+        if (bestStart >= 0) break;
+      }
+      if (bestStart >= 0) {
+        const newXml = replaceInXmlViaParagraphMap(xml, para, bestStart, bestStart + bestLen, replacement);
+        if (newXml !== xml) {
+          return { xml: newXml, strategy: 'normalized', appliedReplacement: replacement };
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Multi-paragraph match
+  // If original spans 2+ paragraphs (contains \n or looks like multi-line), match across adjacent paragraphs
+  if (original.includes('\n') || original.includes('\r')) {
+    const origLines = original.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+    if (origLines.length >= 2) {
+      for (let i = 0; i <= paragraphMap.length - origLines.length; i++) {
+        let allMatch = true;
+        for (let j = 0; j < origLines.length; j++) {
+          if (!paragraphMap[i + j].plainText.includes(origLines[j])) {
+            allMatch = false;
+            break;
+          }
+        }
+        if (allMatch) {
+          // Extract the changed part: diff original vs replacement to find what changed
+          const commonPre = longestCommonPrefix(original, replacement);
+          const remainOrig = original.slice(commonPre.length);
+          const remainRepl = replacement.slice(commonPre.length);
+          const commonSuf = longestCommonSuffix(remainOrig, remainRepl);
+          const oldPart = remainOrig.slice(0, remainOrig.length - commonSuf.length);
+          const newPart = remainRepl.slice(0, remainRepl.length - commonSuf.length);
+
+          if (oldPart.length >= 2) {
+            // Find oldPart in one of the matched paragraphs
+            for (let j = 0; j < origLines.length; j++) {
+              const para = paragraphMap[i + j];
+              const phIdx = para.plainText.indexOf(oldPart);
+              if (phIdx !== -1) {
+                const newXml = replaceInXmlViaParagraphMap(xml, para, phIdx, phIdx + oldPart.length, newPart);
+                if (newXml !== xml) {
+                  return { xml: newXml, strategy: 'multi-paragraph', appliedReplacement: newPart };
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Strategy 4: Fuzzy match
+  // Tokenize original, find paragraph with >=80% token overlap, then do replacement
+  if (original.length >= 5) {
+    let bestPara: ParagraphInfo | null = null;
+    let bestOverlap = 0;
+    for (const para of paragraphMap) {
+      if (para.plainText.length < 3) continue;
+      const overlap = tokenOverlap(original, para.plainText);
+      if (overlap > bestOverlap && overlap >= 0.8) {
+        bestOverlap = overlap;
+        bestPara = para;
+      }
+    }
+    if (bestPara) {
+      // Extract the changed part
+      const commonPre = longestCommonPrefix(original, replacement);
+      const remainOrig = original.slice(commonPre.length);
+      const remainRepl = replacement.slice(commonPre.length);
+      const commonSuf = longestCommonSuffix(remainOrig, remainRepl);
+      const oldPart = remainOrig.slice(0, remainOrig.length - commonSuf.length);
+      const newPart = remainRepl.slice(0, remainRepl.length - commonSuf.length);
+
+      if (oldPart.length >= 2) {
+        const phIdx = bestPara.plainText.indexOf(oldPart);
+        if (phIdx !== -1) {
+          const newXml = replaceInXmlViaParagraphMap(xml, bestPara, phIdx, phIdx + oldPart.length, newPart);
+          if (newXml !== xml) {
+            return { xml: newXml, strategy: 'fuzzy', appliedReplacement: newPart };
+          }
+        }
+      } else {
+        // oldPart is the same as original (no common prefix/suffix) — try full match
+        const phIdx = bestPara.plainText.indexOf(original);
+        if (phIdx !== -1) {
+          const newXml = replaceInXmlViaParagraphMap(xml, bestPara, phIdx, phIdx + original.length, replacement);
+          if (newXml !== xml) {
+            return { xml: newXml, strategy: 'fuzzy', appliedReplacement: replacement };
+          }
+        }
+      }
+    }
+  }
+
+  // Strategy 5: Label→data deterministic mapping
+  // For known labels like "IČO:", "DIČ:", "Sídlo:", find the label in paragraphs
+  // and replace the placeholder text after it
+  const labelResult = tryLabelDeterministicReplacement(xml, paragraphMap, companyData, original, replacement);
+  if (labelResult.success) {
+    return { xml: labelResult.xml, strategy: 'label-deterministic', appliedReplacement: replacement };
+  }
+
+  // Strategy 6: XML entity match
+  // Try with &amp; etc. encoding — direct indexOf on the XML string
+  const xmlEncoded = original
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+  if (xmlEncoded !== original) {
+    const idx = xml.indexOf(xmlEncoded);
+    if (idx !== -1) {
+      const newXml = xml.slice(0, idx) + replacement + xml.slice(idx + xmlEncoded.length);
+      return { xml: newXml, strategy: 'xml-entity', appliedReplacement: replacement };
+    }
+  }
+
+  // Fallback: legacy direct indexOf on XML (handles cases where text appears directly in XML)
+  const directIdx = xml.indexOf(original);
+  if (directIdx !== -1) {
+    const newXml = xml.slice(0, directIdx) + replacement + xml.slice(directIdx + original.length);
+    return { xml: newXml, strategy: 'legacy-indexOf', appliedReplacement: replacement };
+  }
+
+  // Fallback: legacy flexible regex for text split across XML runs (shouldn't be needed after merge, but safety net)
+  if (original.length <= 200) {
+    const flexRegex = buildFlexibleXmlRegex(original);
+    const match = flexRegex.exec(xml);
+    if (match) {
+      const newXml = xml.slice(0, match.index) + replacement + xml.slice(match.index + match[0].length);
+      return { xml: newXml, strategy: 'legacy-flexRegex', appliedReplacement: replacement };
+    }
+  }
+
+  // Fallback: proximity-based replacement (legacy strategy 3)
+  const commonPre = longestCommonPrefix(original, replacement);
+  const remainOrig = original.slice(commonPre.length);
+  const remainRepl = replacement.slice(commonPre.length);
+  const commonSuf = longestCommonSuffix(remainOrig, remainRepl);
+  const oldPart = remainOrig.slice(0, remainOrig.length - commonSuf.length);
+  const newPart = remainRepl.slice(0, remainRepl.length - commonSuf.length);
+
+  if (oldPart.length >= 3 && oldPart !== original) {
+    const anchorWords = commonPre.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
+    let searchFrom = 0;
+    let anchorFound = false;
+    const anchorText = anchorWords.slice(-3).join(' ');
+    if (anchorText.length >= 3) {
+      for (let wordCount = Math.min(3, anchorWords.length); wordCount >= 1; wordCount--) {
+        const tryAnchor = anchorWords.slice(-wordCount).join(' ');
+        const anchorIdx = xml.indexOf(tryAnchor, searchFrom);
+        if (anchorIdx !== -1) {
+          searchFrom = anchorIdx;
+          anchorFound = true;
+          break;
+        }
+      }
+    }
+    const maxDist = anchorFound ? 5000 : xml.length;
+    const phIdx = xml.indexOf(oldPart, searchFrom);
+    if (phIdx !== -1 && phIdx - searchFrom < maxDist) {
+      const newXml = xml.slice(0, phIdx) + newPart + xml.slice(phIdx + oldPart.length);
+      return { xml: newXml, strategy: 'legacy-proximity', appliedReplacement: newPart };
+    }
+  }
+
+  return { xml, strategy: 'not-found', appliedReplacement: replacement };
+}
+
 /**
  * Fill a DOCX template using AI to identify and replace free-text placeholders.
  * Falls back to docxtemplater if the template contains {{}} tags.
@@ -472,6 +1020,8 @@ export async function fillTemplateWithAI(
     produkt_popis?: string;
   }
 ): Promise<FillTemplateWithAIResult> {
+  const debugMode = process.env.DEBUG_TEMPLATES === '1';
+  const outputDir = dirname(templatePath);
   const content = await readFile(templatePath);
   const zip = new PizZip(content);
   const xml = zip.file('word/document.xml')?.asText();
@@ -488,41 +1038,6 @@ export async function fillTemplateWithAI(
     return { buffer: buf, replacements: [], costCZK: 0 };
   }
 
-  // Extract plain text for AI
-  const plainText = stripXmlTags(xml);
-  const templateName = basename(templatePath);
-
-  // Call AI to identify placeholders
-  const result = await callClaude(
-    TEMPLATE_FILL_SYSTEM,
-    buildTemplateFillUserMessage(plainText, templateName, companyData, tenderData),
-    { maxTokens: 4096, temperature: 0.1 }
-  );
-
-  // Parse AI response — extract JSON array robustly
-  let replacements: TemplateReplacement[];
-  try {
-    let jsonStr = result.content.trim();
-    // Extract JSON from markdown code block if present
-    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-    if (codeBlockMatch) {
-      jsonStr = codeBlockMatch[1].trim();
-    }
-    // Fallback: find the first [...] in the response
-    if (!jsonStr.startsWith('[')) {
-      const bracketStart = jsonStr.indexOf('[');
-      const bracketEnd = jsonStr.lastIndexOf(']');
-      if (bracketStart !== -1 && bracketEnd > bracketStart) {
-        jsonStr = jsonStr.slice(bracketStart, bracketEnd + 1);
-      }
-    }
-    replacements = JSON.parse(jsonStr);
-  } catch (err) {
-    console.log(`    Warning: Failed to parse AI response as JSON: ${err}`);
-    console.log(`    AI response: ${result.content.slice(0, 200)}...`);
-    replacements = [];
-  }
-
   // Merge split runs in paragraphs so placeholder text is contiguous
   const mergedXml = mergeRunsInParagraphs(xml);
   const mergeStats = xml.length - mergedXml.length;
@@ -530,146 +1045,127 @@ export async function fillTemplateWithAI(
     console.log(`    Run merging: consolidated XML (${mergeStats} chars removed)`);
   }
 
-  // Apply replacements in XML — one at a time (important when multiple
-  // placeholders have the same text, e.g. "doplní účastník" appearing 10x)
+  // Debug: dump merged XML
+  if (debugMode) {
+    const debugName = basename(templatePath).replace('.docx', '_debug_merged.xml');
+    await fsWriteFile(join(outputDir, debugName), mergedXml, 'utf-8');
+    console.log(`    DEBUG: Saved merged XML to ${debugName}`);
+  }
+
+  // Build paragraph map from merged XML
+  let paragraphMap = buildParagraphMap(mergedXml);
+  const paragraphTexts = paragraphMap.map(p => p.plainText);
+
+  // Extract plain text for AI (segmented by paragraphs)
+  const plainText = stripXmlTags(mergedXml);
+  const templateName = basename(templatePath);
+
+  // Call AI to identify placeholders — now with paragraph-segmented text
+  const aiResult = await callClaude(
+    TEMPLATE_FILL_SYSTEM,
+    buildTemplateFillUserMessage(plainText, templateName, companyData, tenderData, paragraphTexts),
+    { maxTokens: 4096, temperature: 0.1 }
+  );
+
+  // Parse AI response — extract JSON array robustly
+  let replacements: TemplateReplacement[];
+  try {
+    replacements = parseAIReplacements(aiResult.content);
+  } catch (err) {
+    console.log(`    Warning: Failed to parse AI response as JSON: ${err}`);
+    console.log(`    AI response: ${aiResult.content.slice(0, 200)}...`);
+    replacements = [];
+  }
+
+  // Apply replacements using 6-strategy pipeline
   let modifiedXml = mergedXml;
   let replacementCount = 0;
   const appliedReplacementsList: Array<{ replacement: string }> = [];
+  const strategyCounts: Record<string, number> = {};
 
-  for (const { original, replacement } of replacements) {
-    // First try: replace the FIRST occurrence in XML text
-    let idx = modifiedXml.indexOf(original);
-    if (idx !== -1) {
-      modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + original.length);
+  for (const rep of replacements) {
+    const { original, replacement } = rep;
+
+    const strategyResult = applyReplacementWithStrategies(
+      modifiedXml, paragraphMap, original, replacement, companyData
+    );
+
+    rep.strategy = strategyResult.strategy;
+
+    if (strategyResult.strategy !== 'not-found') {
+      modifiedXml = strategyResult.xml;
       replacementCount++;
-      appliedReplacementsList.push({ replacement });
-      continue;
+      appliedReplacementsList.push({ replacement: strategyResult.appliedReplacement });
+      strategyCounts[strategyResult.strategy] = (strategyCounts[strategyResult.strategy] || 0) + 1;
+
+      // Rebuild paragraph map after each successful replacement (offsets changed)
+      paragraphMap = buildParagraphMap(modifiedXml);
+    } else {
+      console.log(`    Warning: Could not find placeholder "${original.slice(0, 50)}..." in XML`);
     }
+  }
 
-    // Try with XML entity encoding: original may have plain chars, XML has entities
-    const xmlEncoded = original
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
-    if (xmlEncoded !== original) {
-      idx = modifiedXml.indexOf(xmlEncoded);
-      if (idx !== -1) {
-        modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + xmlEncoded.length);
-        replacementCount++;
-        appliedReplacementsList.push({ replacement });
-        continue;
-      }
-    }
-
-    // Second try: flexible regex for text split across XML runs
-    if (original.length <= 200) {
-      const flexRegex = buildFlexibleXmlRegex(original);
-      const match = flexRegex.exec(modifiedXml);
-      if (match) {
-        modifiedXml = modifiedXml.slice(0, match.index) + replacement + modifiedXml.slice(match.index + match[0].length);
-        replacementCount++;
-        appliedReplacementsList.push({ replacement });
-        continue;
-      }
-    }
-
-    // Third try: proximity-based replacement
-    // When original includes context (e.g. "Název:\ndoplní účastník"),
-    // extract just the placeholder part and find it near the context anchor.
-    const commonPre = longestCommonPrefix(original, replacement);
-    const remainOrig = original.slice(commonPre.length);
-    const remainRepl = replacement.slice(commonPre.length);
-    const commonSuf = longestCommonSuffix(remainOrig, remainRepl);
-    const oldPart = remainOrig.slice(0, remainOrig.length - commonSuf.length);
-    const newPart = remainRepl.slice(0, remainRepl.length - commonSuf.length);
-
-    if (oldPart.length >= 3 && oldPart !== original) {
-      // Get context anchor from common prefix (last 3 words, no newlines)
-      const anchorWords = commonPre.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
-      const anchorText = anchorWords.slice(-3).join(' ');
-
-      let searchFrom = 0;
-      let anchorFound = false;
-      if (anchorText.length >= 3) {
-        // Try full anchor first, then progressively shorter
-        for (let wordCount = Math.min(3, anchorWords.length); wordCount >= 1; wordCount--) {
-          const tryAnchor = anchorWords.slice(-wordCount).join(' ');
-          const anchorIdx = modifiedXml.indexOf(tryAnchor, searchFrom);
-          if (anchorIdx !== -1) {
-            searchFrom = anchorIdx;
-            anchorFound = true;
-            break;
-          }
-        }
-      }
-
-      // Find oldPart near context (or from beginning if no anchor)
-      const maxDist = anchorFound ? 5000 : modifiedXml.length;
-      const phIdx = modifiedXml.indexOf(oldPart, searchFrom);
-      if (phIdx !== -1 && phIdx - searchFrom < maxDist) {
-        modifiedXml = modifiedXml.slice(0, phIdx) + newPart + modifiedXml.slice(phIdx + oldPart.length);
-        replacementCount++;
-        appliedReplacementsList.push({ replacement: newPart });
-        continue;
-      }
-
-      // Try flexible regex for oldPart split across runs
-      if (oldPart.length <= 200) {
-        const flexRegex = buildFlexibleXmlRegex(oldPart);
-        flexRegex.lastIndex = searchFrom;
-        const fMatch = flexRegex.exec(modifiedXml);
-        if (fMatch && fMatch.index - searchFrom < maxDist) {
-          modifiedXml = modifiedXml.slice(0, fMatch.index) + newPart + modifiedXml.slice(fMatch.index + fMatch[0].length);
-          replacementCount++;
-          appliedReplacementsList.push({ replacement: newPart });
-          continue;
-        }
-      }
-    }
-
-    console.log(`    Warning: Could not find placeholder "${original.slice(0, 50)}..." in XML`);
+  // Log strategy statistics
+  const strategyInfo = Object.entries(strategyCounts)
+    .map(([s, c]) => `${s}:${c}`)
+    .join(', ');
+  if (strategyInfo) {
+    console.log(`    Strategies used: ${strategyInfo}`);
   }
 
   // Second-pass retry: if >2 unfilled placeholders remain, try again with explicit prompt
-  let totalCostCZK = result.costCZK;
+  let totalCostCZK = aiResult.costCZK;
   const remainingUnfilled = UNFILLED_PATTERNS.filter(p => modifiedXml.includes(p));
   if (remainingUnfilled.length > 2) {
     console.log(`    Second-pass retry: ${remainingUnfilled.length} unfilled placeholders remain`);
+
+    // Rebuild paragraph map for second pass
+    paragraphMap = buildParagraphMap(modifiedXml);
+    const paragraphTexts2 = paragraphMap.map(p => p.plainText);
     const plainText2 = stripXmlTags(modifiedXml);
+
     const retryResult = await callClaude(
       TEMPLATE_FILL_SYSTEM,
-      buildTemplateFillUserMessage(plainText2, `${templateName} (second pass)`, companyData, tenderData),
+      buildTemplateFillUserMessage(plainText2, `${templateName} (second pass)`, companyData, tenderData, paragraphTexts2),
       { maxTokens: 4096, temperature: 0.0 }
     );
     totalCostCZK += retryResult.costCZK;
 
     let retryReplacements: TemplateReplacement[] = [];
     try {
-      let jsonStr2 = retryResult.content.trim();
-      const cb2 = jsonStr2.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-      if (cb2) jsonStr2 = cb2[1].trim();
-      if (!jsonStr2.startsWith('[')) {
-        const bs = jsonStr2.indexOf('['), be = jsonStr2.lastIndexOf(']');
-        if (bs !== -1 && be > bs) jsonStr2 = jsonStr2.slice(bs, be + 1);
-      }
-      retryReplacements = JSON.parse(jsonStr2);
+      retryReplacements = parseAIReplacements(retryResult.content);
     } catch {
       console.log(`    Second-pass JSON parse failed — skipping`);
     }
 
     let retryApplied = 0;
-    for (const { original, replacement } of retryReplacements) {
-      const idx = modifiedXml.indexOf(original);
-      if (idx !== -1) {
-        modifiedXml = modifiedXml.slice(0, idx) + replacement + modifiedXml.slice(idx + original.length);
+    for (const rep of retryReplacements) {
+      const { original, replacement } = rep;
+      const retryRes = applyReplacementWithStrategies(
+        modifiedXml, paragraphMap, original, replacement, companyData
+      );
+
+      rep.strategy = retryRes.strategy !== 'not-found' ? 'retry-pass' : 'not-found';
+
+      if (retryRes.strategy !== 'not-found') {
+        modifiedXml = retryRes.xml;
         replacementCount++;
         retryApplied++;
-        appliedReplacementsList.push({ replacement });
+        appliedReplacementsList.push({ replacement: retryRes.appliedReplacement });
+        paragraphMap = buildParagraphMap(modifiedXml);
       }
     }
     console.log(`    Second-pass: applied ${retryApplied}/${retryReplacements.length} additional replacements`);
+
+    // Merge retry replacements into the main list for reporting
+    replacements.push(...retryReplacements);
+  }
+
+  // Debug: dump final XML
+  if (debugMode) {
+    const debugName = basename(templatePath).replace('.docx', '_debug_final.xml');
+    await fsWriteFile(join(outputDir, debugName), modifiedXml, 'utf-8');
+    console.log(`    DEBUG: Saved final XML to ${debugName}`);
   }
 
   // Apply color highlighting:
