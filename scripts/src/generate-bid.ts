@@ -18,7 +18,29 @@ import { fillSoupisWithPrices } from './fill-soupis.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
 import { extractCastIdFromFilename } from './parse-soupis.js';
+import { resolveDocumentData, type DocumentData, type DocMode, type GenerationMeta } from './lib/data-resolver.js';
+import { buildKryciList, buildCestneProhlaseni, buildSeznamPoddodavatelu } from './lib/clean-builders/index.js';
+import { reconstructDocument } from './lib/reconstruct-engine.js';
 import type { TenderAnalysis, ProductMatch, ProductCandidate, ExtractedText } from './lib/types.js';
+
+// Re-export for backward compatibility
+export type { DocMode, GenerationMeta } from './lib/data-resolver.js';
+
+// Default modes for standard document types
+const DEFAULT_MODES: Record<string, DocMode> = {
+  kryci_list: 'clean',
+  cestne_prohlaseni: 'clean',
+  seznam_poddodavatelu: 'clean',
+  kupni_smlouva: 'reconstruct',
+  technicka_specifikace: 'reconstruct',
+};
+
+// Clean builder dispatch
+const CLEAN_BUILDERS: Record<string, (data: DocumentData) => Promise<Buffer>> = {
+  kryci_list: buildKryciList,
+  cestne_prohlaseni: buildCestneProhlaseni,
+  seznam_poddodavatelu: buildSeznamPoddodavatelu,
+};
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -196,8 +218,19 @@ async function main() {
   totalCostCZK += technicalResult.costCZK;
   await logCost(tenderId, 'generate-technical-proposal', technicalResult.modelId, technicalResult.inputTokens, technicalResult.outputTokens, technicalResult.costCZK);
 
-  // 4B: Generate documents
+  // 4B: Resolve DocumentData + load mode overrides
   console.log('\n4B: Generating DOCX documents...');
+  const docData = await resolveDocumentData(tenderId);
+  const generationMeta: GenerationMeta = {};
+
+  // Load document-modes.json overrides (if exists)
+  let modeOverrides: Record<string, DocMode> = {};
+  try {
+    modeOverrides = JSON.parse(await readFile(join(outputDir, 'document-modes.json'), 'utf-8'));
+    console.log(`  Mode overrides: ${Object.entries(modeOverrides).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  } catch {
+    // No overrides, use defaults
+  }
 
   // 1. Technický návrh
   console.log('  - technicky_navrh.docx');
@@ -205,6 +238,7 @@ async function main() {
     analysis, primaryProduct, company, technicalResult.content
   );
   await writeFile(join(outputDir, 'technicky_navrh.docx'), techNavrh);
+  generationMeta['technicky_navrh.docx'] = { mode: 'fill', source: 'programmatic', cost_czk: technicalResult.costCZK };
 
   // 2. Cenová nabídka
   console.log('  - cenova_nabidka.docx');
@@ -221,6 +255,7 @@ async function main() {
     );
   }
   await writeFile(join(outputDir, 'cenova_nabidka.docx'), cenovaNabidka);
+  generationMeta['cenova_nabidka.docx'] = { mode: 'clean', source: 'programmatic', cost_czk: 0 };
 
   // 3. Template-based documents
   console.log('\n4C: Discovering and filling templates...');
@@ -262,9 +297,41 @@ async function main() {
     const ext = isExcel ? '.xlsx' : '.docx';
     const outputName = `${baseName}${suffix}${ext}`;
 
-    console.log(`  - ${outputName} (from: ${template.filename})`);
+    // Resolve generation mode: override > default > fill
+    const mode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
+    const modeLabel = mode.toUpperCase();
+
+    console.log(`  - ${outputName} [${modeLabel}] (from: ${template.filename})`);
 
     try {
+      // Mode 1: Clean — deterministic builder, zero AI cost
+      if (mode === 'clean' && CLEAN_BUILDERS[template.type]) {
+        const buffer = await CLEAN_BUILDERS[template.type](docData);
+        await writeFile(join(outputDir, outputName), buffer);
+        generationMeta[outputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
+        console.log(`    Clean builder: 0 CZK`);
+        continue;
+      }
+
+      // Mode 2: Reconstruct — AI extracts structure, then deterministic build
+      if (mode === 'reconstruct' && !isExcel) {
+        try {
+          const result = await reconstructDocument(template.path, docData, tenderId);
+          await writeFile(join(outputDir, outputName), result.buffer);
+          totalCostCZK += result.costCZK;
+          if (result.costCZK > 0) {
+            await logCost(tenderId, `generate-template-${outputName}`, 'reconstruct', 0, 0, result.costCZK);
+          }
+          generationMeta[outputName] = { mode: 'reconstruct', source: 'reconstruct-engine', cost_czk: result.costCZK, template_source: template.filename };
+          console.log(`    Reconstruct: ${result.costCZK.toFixed(2)} CZK`);
+          continue;
+        } catch (err) {
+          console.log(`    Reconstruct failed, falling back to Fill: ${err}`);
+          // Fall through to Mode 3
+        }
+      }
+
+      // Mode 3: Fill — existing AI-powered template filling
       if (isExcel) {
         const result = await fillExcelWithAI(template.path, company, tenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
@@ -272,6 +339,7 @@ async function main() {
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'excel-ai', 0, 0, result.costCZK);
         }
+        generationMeta[outputName] = { mode: 'fill', source: 'excel-ai', cost_czk: result.costCZK, template_source: template.filename };
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace(ext, '_replacements.json');
@@ -289,6 +357,7 @@ async function main() {
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'docx-ai', 0, 0, result.costCZK);
         }
+        generationMeta[outputName] = { mode: 'fill', source: 'ai-fill', cost_czk: result.costCZK, template_source: template.filename };
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace('.docx', '_replacements.json');
@@ -379,9 +448,18 @@ async function main() {
     console.log('\n4E: PDF conversion skipped (GOTENBERG_URL not set)');
   }
 
+  // Save generation metadata
+  await writeFile(
+    join(outputDir, 'generation-meta.json'),
+    JSON.stringify(generationMeta, null, 2),
+    'utf-8'
+  );
+
   console.log(`\nGeneration complete!`);
   console.log(`  Total price: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH / ${totalSdph.toLocaleString('cs-CZ')} Kč s DPH`);
   console.log(`  AI cost: ${totalCostCZK.toFixed(2)} CZK`);
+  const modeStats = Object.values(generationMeta).reduce((acc, m) => { acc[m.mode] = (acc[m.mode] || 0) + 1; return acc; }, {} as Record<string, number>);
+  console.log(`  Modes: ${Object.entries(modeStats).map(([k, v]) => `${v} ${k}`).join(', ')}`);
   console.log(`  Output: ${outputDir}/`);
 }
 

@@ -228,6 +228,55 @@ export function getAttachmentDownloadUrl(id: string, filename: string): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// --- Generation meta + field validation ---
+
+export interface GenerationMetaEntry {
+  mode: 'clean' | 'reconstruct' | 'fill';
+  source: string;
+  cost_czk: number;
+  template_source?: string;
+}
+
+export type GenerationMeta = Record<string, GenerationMetaEntry>;
+
+export interface FieldValidationCheck {
+  field: string;
+  expected: string;
+  actual: string;
+  status: 'pass' | 'fail' | 'warning';
+}
+
+export interface FieldValidationResult {
+  document: string;
+  mode: 'clean' | 'reconstruct' | 'fill';
+  checks: FieldValidationCheck[];
+  overall: 'pass' | 'fail';
+  confidence: number;
+}
+
+export async function getGenerationMeta(id: string): Promise<GenerationMeta> {
+  return fetchJson(`/tenders/${id}/generation-meta`);
+}
+
+export async function getFieldValidation(id: string): Promise<FieldValidationResult[]> {
+  return fetchJson(`/tenders/${id}/field-validation`);
+}
+
+export async function setDocumentMode(
+  id: string, filename: string, mode: 'clean' | 'reconstruct' | 'fill'
+): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}/mode`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to set mode');
+  }
+  return res.json();
+}
+
 // --- Tender rename ---
 
 export async function renameTender(id: string, name: string): Promise<{ success: boolean }> {

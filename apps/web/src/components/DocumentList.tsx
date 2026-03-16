@@ -9,8 +9,13 @@ import {
   getAttachmentDownloadUrl,
   getDocumentsZipUrl,
   getBundleZipUrl,
+  getGenerationMeta,
+  getFieldValidation,
+  setDocumentMode,
+  type GenerationMeta,
+  type FieldValidationResult,
 } from '../lib/api';
-import { FileText, Download, Upload, Trash2, Paperclip, Archive } from 'lucide-react';
+import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert } from 'lucide-react';
 
 interface DocumentListProps {
   tenderId: string;
@@ -33,6 +38,59 @@ const DOC_LABELS: Record<string, string> = {
   'technicka_specifikace.pdf': 'Technická specifikace (PDF)',
 };
 
+const MODE_BADGES: Record<string, { label: string; color: string }> = {
+  clean: { label: 'Clean', color: 'bg-green-100 text-green-800' },
+  reconstruct: { label: 'Reconstruct', color: 'bg-blue-100 text-blue-800' },
+  fill: { label: 'Fill', color: 'bg-amber-100 text-amber-800' },
+  programmatic: { label: 'Built-in', color: 'bg-green-100 text-green-800' },
+};
+
+function ConfidenceBadge({ confidence }: { confidence: number }) {
+  let color = 'text-green-600';
+  if (confidence < 80) color = 'text-red-600';
+  else if (confidence < 95) color = 'text-amber-600';
+  return <span className={`text-xs font-semibold ${color}`}>{confidence}%</span>;
+}
+
+function ValidationChecklist({ result }: { result: FieldValidationResult }) {
+  const [expanded, setExpanded] = useState(false);
+  const passCount = result.checks.filter(c => c.status === 'pass').length;
+  const failCount = result.checks.filter(c => c.status === 'fail').length;
+  const warnCount = result.checks.filter(c => c.status === 'warning').length;
+
+  return (
+    <div className="mt-2 border-t pt-2">
+      <button
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setExpanded(!expanded); }}
+        className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700"
+      >
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span className="text-green-600">{passCount} OK</span>
+        {failCount > 0 && <span className="text-red-600">{failCount} chyb</span>}
+        {warnCount > 0 && <span className="text-amber-600">{warnCount} upoz.</span>}
+      </button>
+      {expanded && (
+        <div className="mt-1.5 space-y-1 text-xs">
+          {result.checks.map((check, i) => (
+            <div key={i} className="flex items-start gap-1.5">
+              {check.status === 'pass' && <span className="text-green-500 font-bold shrink-0">OK</span>}
+              {check.status === 'fail' && <span className="text-red-500 font-bold shrink-0">X</span>}
+              {check.status === 'warning' && <span className="text-amber-500 font-bold shrink-0">!</span>}
+              <span className="text-gray-600">
+                <strong>{check.field}:</strong>{' '}
+                {check.status === 'pass'
+                  ? check.expected
+                  : <><span className="line-through text-red-400">{check.actual}</span> (očekáváno: {check.expected})</>
+                }
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DocumentList({ tenderId }: DocumentListProps) {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -47,6 +105,18 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
   const { data: attachments } = useQuery({
     queryKey: ['attachments', tenderId],
     queryFn: () => getAttachments(tenderId),
+  });
+
+  const { data: genMeta } = useQuery({
+    queryKey: ['generation-meta', tenderId],
+    queryFn: () => getGenerationMeta(tenderId),
+    retry: false,
+  });
+
+  const { data: fieldValidation } = useQuery({
+    queryKey: ['field-validation', tenderId],
+    queryFn: () => getFieldValidation(tenderId),
+    retry: false,
   });
 
   const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,14 +148,52 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     }
   }, [tenderId, queryClient]);
 
+  const handleModeChange = useCallback(async (filename: string, mode: 'clean' | 'reconstruct' | 'fill') => {
+    setActionError(null);
+    try {
+      await setDocumentMode(tenderId, filename, mode);
+      queryClient.invalidateQueries({ queryKey: ['generation-meta', tenderId] });
+    } catch (err) {
+      console.error('Mode change failed:', err);
+      setActionError('Změna režimu se nezdařila.');
+    }
+  }, [tenderId, queryClient]);
+
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
-  if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok „Dokumenty".</div>;
+  if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok "Dokumenty".</div>;
+
+  // Build validation lookup
+  const validationByDoc = new Map<string, FieldValidationResult>();
+  if (fieldValidation) {
+    for (const r of fieldValidation) {
+      validationByDoc.set(r.document, r);
+    }
+  }
+
+  // Overall readiness
+  const allDocsPass = fieldValidation?.every(r => r.overall === 'pass');
+  const hasValidation = fieldValidation && fieldValidation.length > 0;
 
   return (
     <div className="space-y-6">
       {actionError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{actionError}</div>
       )}
+
+      {/* Overall status banner */}
+      {hasValidation && (
+        <div className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
+          allDocsPass
+            ? 'border-green-200 bg-green-50 text-green-800'
+            : 'border-amber-200 bg-amber-50 text-amber-800'
+        }`}>
+          {allDocsPass
+            ? <><ShieldCheck className="h-5 w-5" /> <span className="font-medium">Dokumenty jsou připraveny k odeslání</span></>
+            : <><ShieldAlert className="h-5 w-5" /> <span className="font-medium">Některé dokumenty vyžadují kontrolu</span></>
+          }
+        </div>
+      )}
+
       {/* Generated documents */}
       {documents && documents.length > 0 && (
         <div>
@@ -113,23 +221,75 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
             </div>
           </div>
           <div className="space-y-2">
-            {documents.map((filename) => (
-              <a
-                key={filename}
-                href={getDocumentDownloadUrl(tenderId, filename)}
-                download
-                className="flex items-center justify-between rounded-lg border bg-white p-4 transition-colors hover:bg-gray-50"
-              >
-                <div className="flex items-center gap-3">
-                  <FileText className="h-8 w-8 text-blue-500" />
-                  <div>
-                    <div className="font-medium">{DOC_LABELS[filename] || filename}</div>
-                    <div className="text-xs text-gray-500">{filename}</div>
+            {documents.map((filename) => {
+              const meta = genMeta?.[filename];
+              const validation = validationByDoc.get(filename);
+              const mode = meta?.mode;
+              const modeBadge = mode ? MODE_BADGES[mode] : null;
+
+              return (
+                <div
+                  key={filename}
+                  className="rounded-lg border bg-white p-4 transition-colors hover:bg-gray-50"
+                >
+                  <div className="flex items-center justify-between">
+                    <a
+                      href={getDocumentDownloadUrl(tenderId, filename)}
+                      download
+                      className="flex items-center gap-3 flex-1"
+                    >
+                      <FileText className="h-8 w-8 text-blue-500 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="font-medium flex items-center gap-2">
+                          {DOC_LABELS[filename] || filename}
+                          {modeBadge && (
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${modeBadge.color}`}>
+                              {modeBadge.label}
+                            </span>
+                          )}
+                          {validation && <ConfidenceBadge confidence={validation.confidence} />}
+                        </div>
+                        <div className="text-xs text-gray-500 flex items-center gap-2">
+                          {filename}
+                          {meta?.cost_czk !== undefined && meta.cost_czk > 0 && (
+                            <span className="text-gray-400">({meta.cost_czk.toFixed(2)} CZK)</span>
+                          )}
+                        </div>
+                      </div>
+                    </a>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Mode selector — only for DOCX files with known modes */}
+                      {filename.endsWith('.docx') && mode && (
+                        <select
+                          value={mode}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            handleModeChange(filename, e.target.value as 'clean' | 'reconstruct' | 'fill');
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="rounded border border-gray-300 px-1.5 py-1 text-xs text-gray-600 bg-white"
+                          title="Režim generování"
+                        >
+                          <option value="clean">Clean</option>
+                          <option value="reconstruct">Reconstruct</option>
+                          <option value="fill">Fill</option>
+                        </select>
+                      )}
+                      {validation && (
+                        validation.overall === 'pass'
+                          ? <ShieldCheck className="h-5 w-5 text-green-500" title="Validace OK" />
+                          : <ShieldAlert className="h-5 w-5 text-amber-500" title="Vyžaduje kontrolu" />
+                      )}
+                      <a href={getDocumentDownloadUrl(tenderId, filename)} download>
+                        <Download className="h-5 w-5 text-gray-400 hover:text-gray-600" />
+                      </a>
+                    </div>
                   </div>
+                  {/* Validation checklist (expandable) */}
+                  {validation && <ValidationChecklist result={validation} />}
                 </div>
-                <Download className="h-5 w-5 text-gray-400" />
-              </a>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

@@ -811,6 +811,87 @@ app.post('/api/tenders/:id/documents/:filename/convert-pdf', async (req, res) =>
   }
 });
 
+// GET /api/tenders/:id/documents/:filename/validation - field-by-field validation
+app.get('/api/tenders/:id/documents/:filename/validation', async (req, res) => {
+  try {
+    const { id, filename } = req.params;
+    const fieldValidationPath = join(OUTPUT_DIR, id, 'field-validation.json');
+    if (!existsSync(fieldValidationPath)) {
+      return res.status(404).json({ error: 'Field validation not found — run validate step first' });
+    }
+    const allResults = JSON.parse(await readFile(fieldValidationPath, 'utf-8'));
+    const result = allResults.find((r: any) => r.document === decodeURIComponent(filename));
+    if (!result) {
+      return res.status(404).json({ error: `No validation data for ${filename}` });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/tenders/:id/documents/:filename/mode - set generation mode override
+app.put('/api/tenders/:id/documents/:filename/mode', async (req, res) => {
+  try {
+    const { id, filename } = req.params;
+    const { mode } = req.body;
+    if (!['clean', 'reconstruct', 'fill'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid mode. Must be: clean, reconstruct, or fill' });
+    }
+    const modesPath = join(OUTPUT_DIR, id, 'document-modes.json');
+    let modes: Record<string, string> = {};
+    try {
+      modes = JSON.parse(await readFile(modesPath, 'utf-8'));
+    } catch {}
+    modes[decodeURIComponent(filename)] = mode;
+    await writeFile(modesPath, JSON.stringify(modes, null, 2), 'utf-8');
+    res.json({ success: true, modes });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/tenders/:id/documents/:filename/regenerate - regenerate single document
+app.post('/api/tenders/:id/documents/:filename/regenerate', async (req, res) => {
+  const { id, filename } = req.params;
+  try {
+    // Queue generate step (re-runs entire generation which will pick up mode overrides)
+    // For now, return guidance — full single-doc regen would need refactoring generate-bid
+    const modesPath = join(OUTPUT_DIR, id, 'document-modes.json');
+    let modes: Record<string, string> = {};
+    try {
+      modes = JSON.parse(await readFile(modesPath, 'utf-8'));
+    } catch {}
+    res.json({
+      message: `To regenerate ${filename}, run the generate step again. Mode overrides are saved.`,
+      current_modes: modes,
+      hint: 'POST /api/tenders/:id/run/generate to re-run full generation',
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/generation-meta - generation metadata (modes, costs per document)
+app.get('/api/tenders/:id/generation-meta', async (req, res) => {
+  try {
+    const data = await readFile(join(OUTPUT_DIR, req.params.id, 'generation-meta.json'), 'utf-8');
+    res.json(JSON.parse(data));
+  } catch {
+    res.status(404).json({ error: 'Not found — run generate step first' });
+  }
+});
+
+// GET /api/tenders/:id/field-validation - all field validation results
+app.get('/api/tenders/:id/field-validation', async (req, res) => {
+  try {
+    const data = await readFile(join(OUTPUT_DIR, req.params.id, 'field-validation.json'), 'utf-8');
+    res.json(JSON.parse(data));
+  } catch {
+    res.status(404).json({ error: 'Not found — run validate step first' });
+  }
+});
+
 // GET /api/tenders/:id/download/documents - ZIP of generated docs (DOCX/XLSX/PDF)
 app.get('/api/tenders/:id/download/documents', async (req, res) => {
   const { id } = req.params;

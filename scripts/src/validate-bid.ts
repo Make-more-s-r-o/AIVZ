@@ -1,9 +1,12 @@
 import { readFile, writeFile, readdir, mkdir } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ValidationReportSchema, type TenderAnalysis, type ProductMatch } from './lib/types.js';
+import { resolveDocumentData, type GenerationMeta } from './lib/data-resolver.js';
+import { validateAllDocuments, type ValidationResult } from './lib/doc-validator.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -209,6 +212,38 @@ Odpověz ve formátu:
   }
   console.log(`  AI cost: ${result.costCZK.toFixed(2)} CZK`);
   console.log(`Output: ${outputPath}`);
+
+  // Programmatic validation (field-by-field checks)
+  console.log(`\n--- Programmatic field validation ---`);
+  try {
+    const docData = await resolveDocumentData(tenderId);
+    let genMeta: GenerationMeta = {};
+    const genMetaPath = join(outputDir, 'generation-meta.json');
+    if (existsSync(genMetaPath)) {
+      genMeta = JSON.parse(await readFile(genMetaPath, 'utf-8'));
+    }
+
+    const fieldResults = await validateAllDocuments(outputDir, docData, genMeta);
+
+    // Save programmatic validation results
+    const fieldValidationPath = join(outputDir, 'field-validation.json');
+    await writeFile(fieldValidationPath, JSON.stringify(fieldResults, null, 2), 'utf-8');
+
+    // Summary
+    for (const r of fieldResults) {
+      const passCount = r.checks.filter(c => c.status === 'pass').length;
+      const failCount = r.checks.filter(c => c.status === 'fail').length;
+      const warnCount = r.checks.filter(c => c.status === 'warning').length;
+      const icon = r.overall === 'pass' ? 'OK' : 'FAIL';
+      console.log(`  [${icon}] ${r.document} (${r.mode}): ${passCount} pass, ${failCount} fail, ${warnCount} warn — confidence ${r.confidence}%`);
+    }
+
+    const allPass = fieldResults.every(r => r.overall === 'pass');
+    console.log(`  Overall: ${allPass ? 'ALL PASS' : 'HAS FAILURES'}`);
+    console.log(`  Field validation: ${fieldValidationPath}`);
+  } catch (err) {
+    console.log(`  Programmatic validation skipped: ${err}`);
+  }
 }
 
 main().catch((err) => {
