@@ -25,6 +25,16 @@ Příklad: Pokud [P5] = "IČ: doplní účastník" a [P7] = "DIČ: doplní úča
   {"original": "IČ: doplní účastník", "replacement": "IČ: 07023987"}
   {"original": "DIČ: doplní účastník", "replacement": "DIČ: CZ07023987"}
 
+PRAVIDLO PRO PRÁZDNÉ BUŇKY V TABULKÁCH:
+Pokud šablona obsahuje tabulku kde je sloupec zcela prázdný (buňky neobsahují žádný text) a mají se vyplnit hodnotami:
+- NIKDY nevracej "original": "" — to nelze matchnout
+- Místo toho použij "original" = text z vedlejší buňky ve STEJNÉM řádku (label/popisek) a do "replacement" dej celý obsah: [EMPTY_CELL_AFTER:label] hodnota
+- Příklad: Tabulka s řádkem "Hmotnost stroje | 500 kg | (prázdné)" → vrať:
+  {"original": "", "replacement": "[EMPTY_CELL_AFTER:Hmotnost stroje] splněno — 480 kg"}
+  Engine pak najde buňku s "Hmotnost stroje" a vloží text do sousední prázdné buňky.
+- Pro KAŽDÝ řádek tabulky s prázdnou buňkou vrať samostatný replacement
+- Label musí být PŘESNÝ text z buňky (copy-paste), ne zkrácený
+
 PRAVIDLA:
 1. "original" MUSÍ být přesný text z šablony (copy-paste přesnost) — nezměněný, nezkrácený
 2. "original" MUSÍ odpovídat textu z přesně jednoho [Pxx] řádku — nikdy neslučuj text z více řádků

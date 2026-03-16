@@ -181,6 +181,7 @@ type ReplacementStrategy =
   | 'legacy-indexOf'
   | 'legacy-flexRegex'
   | 'legacy-proximity'
+  | 'table-cell-insert'
   | 'retry-pass'
   | 'not-found';
 
@@ -685,6 +686,11 @@ function normalizeText(text: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
+    // Unicode normalization — smart quotes, ellipsis, dashes
+    .replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB]/g, '"')  // smart/Czech quotes → straight
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")               // smart apostrophes → straight
+    .replace(/\u2026/g, '...')                                  // ellipsis → dots
+    .replace(/[\u2013\u2014]/g, '-')                            // en/em dash → hyphen
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -811,6 +817,95 @@ function parseAIReplacements(content: string): TemplateReplacement[] {
 }
 
 /**
+ * Fill an empty table cell adjacent to a label cell.
+ * Searches for a <w:tc> containing the label text, then inserts value into the next <w:tc> in the same row.
+ */
+function fillEmptyTableCell(xml: string, label: string, value: string): string {
+  const normLabel = normalizeText(label);
+
+  // Find all table rows
+  const rowRegex = /<w:tr\b[^>]*>([\s\S]*?)<\/w:tr>/g;
+  let rowMatch: RegExpExecArray | null;
+
+  while ((rowMatch = rowRegex.exec(xml)) !== null) {
+    const rowXml = rowMatch[0];
+    const rowStart = rowMatch.index;
+
+    // Find all cells in this row
+    const cellRegex = /<w:tc\b[^>]*>([\s\S]*?)<\/w:tc>/g;
+    const cells: Array<{ fullMatch: string; startInRow: number; content: string }> = [];
+    let cellMatch: RegExpExecArray | null;
+
+    while ((cellMatch = cellRegex.exec(rowXml)) !== null) {
+      cells.push({
+        fullMatch: cellMatch[0],
+        startInRow: cellMatch.index,
+        content: cellMatch[1],
+      });
+    }
+
+    // Check each cell for the label
+    for (let i = 0; i < cells.length - 1; i++) {
+      const cellText = normalizeText(stripXmlTags(cells[i].content));
+      if (cellText.includes(normLabel)) {
+        // Found label — check if next cell is empty or near-empty
+        const nextCellText = stripXmlTags(cells[i + 1].content).trim();
+        if (nextCellText.length <= 2) {
+          // Insert value into the next cell: find the last <w:t> or create content in <w:p>
+          const nextCell = cells[i + 1];
+          let newCellContent: string;
+
+          // Look for existing <w:t> tag in next cell
+          const wtMatch = nextCell.content.match(/(<w:t[^>]*>)([\s\S]*?)(<\/w:t>)/);
+          if (wtMatch) {
+            // Replace content of existing <w:t>
+            newCellContent = nextCell.content.replace(
+              /(<w:t[^>]*>)([\s\S]*?)(<\/w:t>)/,
+              `$1${escapeXml(value)}$3`
+            );
+          } else {
+            // No <w:t> found — insert into the <w:p> element
+            const wpMatch = nextCell.content.match(/(<w:p\b[^>]*>)([\s\S]*?)(<\/w:p>)/);
+            if (wpMatch) {
+              newCellContent = nextCell.content.replace(
+                /(<w:p\b[^>]*>)([\s\S]*?)(<\/w:p>)/,
+                `$1$2<w:r><w:t xml:space="preserve">${escapeXml(value)}</w:t></w:r>$3`
+              );
+            } else {
+              continue; // Cannot find paragraph in cell — skip
+            }
+          }
+
+          // Reconstruct cell: preserve original <w:tc...> opening tag, replace inner content
+          const tcOpenMatch = nextCell.fullMatch.match(/^(<w:tc\b[^>]*>)/);
+          const tcOpen = tcOpenMatch ? tcOpenMatch[1] : '<w:tc>';
+          const newCell = `${tcOpen}${newCellContent}</w:tc>`;
+          const absoluteStart = rowStart + nextCell.startInRow;
+          xml = xml.slice(0, absoluteStart) + newCell + xml.slice(absoluteStart + nextCell.fullMatch.length);
+
+          // Reset rowRegex since XML changed
+          return xml;
+        }
+      }
+    }
+  }
+
+  return xml; // No matching cell found
+}
+
+/**
+ * Escape special characters for XML content.
+ */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
  * Apply a single replacement using the 6-strategy pipeline.
  * Returns the modified XML and the strategy that succeeded.
  */
@@ -821,6 +916,22 @@ function applyReplacementWithStrategies(
   replacement: string,
   companyData: Record<string, string>
 ): { xml: string; strategy: ReplacementStrategy; appliedReplacement: string } {
+  // Guard: skip empty originals — indexOf("") === 0 for any string, causing all replacements to land in first paragraph
+  if (!original || original.trim() === '') {
+    // Check for [EMPTY_CELL_AFTER:label] pattern for table cell filling
+    const emptyCellMatch = replacement.match(/^\[EMPTY_CELL_AFTER:(.+?)\]\s*(.+)$/s);
+    if (emptyCellMatch) {
+      const label = emptyCellMatch[1].trim();
+      const value = emptyCellMatch[2].trim();
+      const newXml = fillEmptyTableCell(xml, label, value);
+      if (newXml !== xml) {
+        return { xml: newXml, strategy: 'table-cell-insert' as ReplacementStrategy, appliedReplacement: value };
+      }
+    }
+    console.log(`    Warning: Empty original for replacement "${replacement.slice(0, 50)}..." — skipped`);
+    return { xml, strategy: 'none' as ReplacementStrategy, appliedReplacement: '' };
+  }
+
   // Strategy 1: Exact paragraph match
   // Find the original text within a single paragraph's plainText, then replace via XML offsets
   for (const para of paragraphMap) {
@@ -1256,9 +1367,11 @@ function classifyByContent(text: string): DiscoveredTemplate['type'] | null {
   const lower = text.toLowerCase();
   if (/kryc[ií]\s*list/i.test(lower)) return 'kryci_list';
   if (/čestně\s*prohlašuj/i.test(lower) || /čestné\s*prohlášení/i.test(lower)) return 'cestne_prohlaseni';
-  if (/poddodavatel/i.test(lower)) return 'seznam_poddodavatelu';
-  if (/kupní\s*smlouv/i.test(lower) || /smlouva\s*o\s*dodávce/i.test(lower)) return 'kupni_smlouva';
   if (/technická\s*specifikace/i.test(lower)) return 'technicka_specifikace';
+  // kupni_smlouva BEFORE poddodavatel — kupní smlouva often mentions "poddodavatelů" in legal clauses
+  if (/kupní\s*smlouv/i.test(lower) || /smlouva\s*o\s*dodávce/i.test(lower)) return 'kupni_smlouva';
+  // Require "seznam" prefix to avoid false positives from contract clauses mentioning poddodavatelé
+  if (/seznam\s*poddodavatel/i.test(lower)) return 'seznam_poddodavatelu';
   return null;
 }
 
@@ -1290,9 +1403,11 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
     const filePath = join(inputDir, filename);
 
     // 1. Try filename-based classification first (fast)
+    // Normalize underscores to spaces so patterns like /kupn[ií]\s*smlouv/ match "Navrh_kupni_smlouvy.docx"
+    const normalizedFilename = filename.replace(/_/g, ' ');
     let type: DiscoveredTemplate['type'] | null = null;
     for (const { type: t, patterns } of TEMPLATE_PATTERNS) {
-      if (patterns.some((p) => p.test(filename))) {
+      if (patterns.some((p) => p.test(normalizedFilename))) {
         type = t;
         break;
       }
