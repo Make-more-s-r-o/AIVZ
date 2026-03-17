@@ -12,7 +12,6 @@ import {
   getGenerationMeta,
   getFieldValidation,
   setDocumentMode,
-  type GenerationMeta,
   type FieldValidationResult,
 } from '../lib/api';
 import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert } from 'lucide-react';
@@ -277,8 +276,8 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
                       )}
                       {validation && (
                         validation.overall === 'pass'
-                          ? <ShieldCheck className="h-5 w-5 text-green-500" title="Validace OK" />
-                          : <ShieldAlert className="h-5 w-5 text-amber-500" title="Vyžaduje kontrolu" />
+                          ? <span title="Validace OK"><ShieldCheck className="h-5 w-5 text-green-500" /></span>
+                          : <span title="Vyžaduje kontrolu"><ShieldAlert className="h-5 w-5 text-amber-500" /></span>
                       )}
                       <a href={getDocumentDownloadUrl(tenderId, filename)} download>
                         <Download className="h-5 w-5 text-gray-400 hover:text-gray-600" />
