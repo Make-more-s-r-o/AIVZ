@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, basename } from 'path';
 import { config } from 'dotenv';
@@ -67,6 +67,18 @@ async function main() {
   const outputDir = join(ROOT, 'output', tenderId);
   const inputDir = join(ROOT, 'input', tenderId);
   await mkdir(outputDir, { recursive: true });
+
+  // Vyčistit staré vygenerované soubory (ponechat data z předchozích kroků pipeline)
+  const KEEP_FILES = new Set([
+    'analysis.json', 'extracted-text.json', 'product-match.json',
+    'cenova_uprava.json', 'cost-log.json', 'tender-meta.json', 'prilohy',
+  ]);
+  const existingFiles = await readdir(outputDir);
+  for (const file of existingFiles) {
+    if (!KEEP_FILES.has(file)) {
+      await unlink(join(outputDir, file)).catch(() => {});
+    }
+  }
 
   // Read inputs
   const analysis: TenderAnalysis = JSON.parse(
@@ -307,8 +319,10 @@ async function main() {
       // Mode 1: Clean — deterministic builder, zero AI cost
       if (mode === 'clean' && CLEAN_BUILDERS[template.type]) {
         const buffer = await CLEAN_BUILDERS[template.type](docData);
-        await writeFile(join(outputDir, outputName), buffer);
-        generationMeta[outputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
+        // Clean builder vždy generuje DOCX — vynutit příponu .docx bez ohledu na source template
+        const cleanOutputName = `${baseName}${suffix}.docx`;
+        await writeFile(join(outputDir, cleanOutputName), buffer);
+        generationMeta[cleanOutputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
         console.log(`    Clean builder: 0 CZK`);
         continue;
       }

@@ -1445,6 +1445,22 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
   return templates;
 }
 
+// --- Cenová nabídka helpers ---
+
+/** Formátuje datum jako DD.MM.YYYY (s nulami) */
+function formatDatumCN(): string {
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = now.getFullYear();
+  return `${day}.${month}.${year}`;
+}
+
+/** Formátuje cenu jako "195 000,00" */
+function formatPrice(value: number): string {
+  return value.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 // --- Cenová nabídka ---
 
 export async function generateCenovaNabidka(
@@ -1501,11 +1517,11 @@ export async function generateCenovaNabidka(
           borders,
         }),
         new TableCell({
-          children: [new Paragraph(priceBezDph.toLocaleString('cs-CZ'))],
+          children: [new Paragraph(formatPrice(priceBezDph))],
           borders,
         }),
         new TableCell({
-          children: [new Paragraph(priceSdph.toLocaleString('cs-CZ'))],
+          children: [new Paragraph(formatPrice(priceSdph))],
           borders,
         }),
       ],
@@ -1530,6 +1546,13 @@ export async function generateCenovaNabidka(
         }),
         new Paragraph({
           children: [
+            new TextRun({ text: 'Zadavatel: ', bold: true }),
+            new TextRun(analysis.zakazka.zadavatel || ''),
+          ],
+        }),
+        new Paragraph({ text: '' }),
+        new Paragraph({
+          children: [
             new TextRun({ text: 'Uchazeč: ', bold: true }),
             new TextRun(company.nazev),
           ],
@@ -1540,29 +1563,53 @@ export async function generateCenovaNabidka(
             new TextRun(company.ico),
           ],
         }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'DIČ: ', bold: true }),
+            new TextRun(company.dic),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Sídlo: ', bold: true }),
+            new TextRun(company.sidlo),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Telefon: ', bold: true }),
+            new TextRun(company.telefon),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'E-mail: ', bold: true }),
+            new TextRun(company.email),
+          ],
+        }),
         new Paragraph({ text: '' }),
         new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }),
         new Paragraph({ text: '' }),
         new Paragraph({
           children: [
             new TextRun({ text: 'Celková nabídková cena bez DPH: ', bold: true }),
-            new TextRun(`${priceBezDph.toLocaleString('cs-CZ')} Kč`),
+            new TextRun(`${formatPrice(priceBezDph)} Kč`),
           ],
         }),
         new Paragraph({
           children: [
             new TextRun({ text: 'DPH 21 %: ', bold: true }),
-            new TextRun(`${dph.toLocaleString('cs-CZ')} Kč`),
+            new TextRun(`${formatPrice(dph)} Kč`),
           ],
         }),
         new Paragraph({
           children: [
             new TextRun({ text: 'Celková nabídková cena s DPH: ', bold: true }),
-            new TextRun({ text: `${priceSdph.toLocaleString('cs-CZ')} Kč`, bold: true }),
+            new TextRun({ text: `${formatPrice(priceSdph)} Kč`, bold: true }),
           ],
         }),
         new Paragraph({ text: '' }),
-        new Paragraph(`V Praze dne ${new Date().toLocaleDateString('cs-CZ')}`),
+        new Paragraph(`V Praze dne ${formatDatumCN()}`),
         new Paragraph({ text: '' }),
         new Paragraph(company.jednajici_osoba),
         new Paragraph(company.nazev),
@@ -1629,8 +1676,8 @@ export async function generateCenovaNabidkaMulti(
       new TableCell({ children: [new Paragraph(item.polozka)], borders }),
       new TableCell({ children: [new Paragraph(`${item.product.vyrobce} ${item.product.model}`)], borders }),
       new TableCell({ children: [new Paragraph(`${item.mnozstvi} ks`)], borders }),
-      new TableCell({ children: [new Paragraph((item.priceBezDph * item.mnozstvi).toLocaleString('cs-CZ'))], borders }),
-      new TableCell({ children: [new Paragraph((item.priceSdph * item.mnozstvi).toLocaleString('cs-CZ'))], borders }),
+      new TableCell({ children: [new Paragraph(formatPrice(item.priceBezDph * item.mnozstvi))], borders }),
+      new TableCell({ children: [new Paragraph(formatPrice(item.priceSdph * item.mnozstvi))], borders }),
     ],
   }));
 
@@ -1656,6 +1703,13 @@ export async function generateCenovaNabidkaMulti(
         }),
         new Paragraph({
           children: [
+            new TextRun({ text: 'Zadavatel: ', bold: true }),
+            new TextRun(analysis.zakazka.zadavatel || ''),
+          ],
+        }),
+        new Paragraph({ text: '' }),
+        new Paragraph({
+          children: [
             new TextRun({ text: 'Uchazeč: ', bold: true }),
             new TextRun(company.nazev),
           ],
@@ -1666,29 +1720,53 @@ export async function generateCenovaNabidkaMulti(
             new TextRun(company.ico),
           ],
         }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'DIČ: ', bold: true }),
+            new TextRun(company.dic),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Sídlo: ', bold: true }),
+            new TextRun(company.sidlo),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'Telefon: ', bold: true }),
+            new TextRun(company.telefon),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: 'E-mail: ', bold: true }),
+            new TextRun(company.email),
+          ],
+        }),
         new Paragraph({ text: '' }),
         new Table({ rows: [headerRow, ...dataRows], width: { size: 100, type: WidthType.PERCENTAGE } }),
         new Paragraph({ text: '' }),
         new Paragraph({
           children: [
             new TextRun({ text: 'Celková nabídková cena bez DPH: ', bold: true }),
-            new TextRun(`${totalBezDph.toLocaleString('cs-CZ')} Kč`),
+            new TextRun(`${formatPrice(totalBezDph)} Kč`),
           ],
         }),
         new Paragraph({
           children: [
             new TextRun({ text: 'DPH 21 %: ', bold: true }),
-            new TextRun(`${dph.toLocaleString('cs-CZ')} Kč`),
+            new TextRun(`${formatPrice(dph)} Kč`),
           ],
         }),
         new Paragraph({
           children: [
             new TextRun({ text: 'Celková nabídková cena s DPH: ', bold: true }),
-            new TextRun({ text: `${totalSdph.toLocaleString('cs-CZ')} Kč`, bold: true }),
+            new TextRun({ text: `${formatPrice(totalSdph)} Kč`, bold: true }),
           ],
         }),
         new Paragraph({ text: '' }),
-        new Paragraph(`V Praze dne ${new Date().toLocaleDateString('cs-CZ')}`),
+        new Paragraph(`V Praze dne ${formatDatumCN()}`),
         new Paragraph({ text: '' }),
         new Paragraph(company.jednajici_osoba),
         new Paragraph(company.nazev),
