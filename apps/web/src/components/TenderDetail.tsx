@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getTenderStatus, getTenders, getCompanies, setTenderCompany, type PipelineSteps } from '../lib/api';
+import { getTenderStatus, getTenders, getCompanies, setTenderCompany, renameTender, type PipelineSteps } from '../lib/api';
+import { Pencil } from 'lucide-react';
 import PipelineStatus from './PipelineStatus';
 import AnalysisView from './AnalysisView';
 import ProductMatchView from './ProductMatchView';
@@ -24,6 +25,8 @@ type TabKey = (typeof TABS)[number]['key'];
 
 export default function TenderDetail({ tenderId }: TenderDetailProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('pipeline');
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
   const queryClient = useQueryClient();
 
   const { data } = useQuery({
@@ -79,12 +82,55 @@ export default function TenderDetail({ tenderId }: TenderDetailProps) {
     queryClient.invalidateQueries({ queryKey: ['tenders'] });
   }, [queryClient, tenderId]);
 
+  const handleRename = async () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === (tenderName || tenderId)) {
+      setIsRenaming(false);
+      return;
+    }
+    try {
+      await renameTender(tenderId, trimmed);
+      queryClient.invalidateQueries({ queryKey: ['tenders'] });
+      setIsRenaming(false);
+    } catch (err) {
+      console.error('Rename failed:', err);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-xl font-bold">{tenderName || tenderId}</h2>
-          {tenderName && <div className="text-xs text-gray-400">{tenderId}</div>}
+          {isRenaming ? (
+            <>
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleRename();
+                  if (e.key === 'Escape') setIsRenaming(false);
+                }}
+                onBlur={handleRename}
+                className="text-xl font-bold border-b-2 border-blue-500 bg-transparent outline-none"
+              />
+              <div className="text-xs text-gray-400">{tenderId}</div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <h2 className="text-xl font-bold">{tenderName || tenderId}</h2>
+                <button
+                  onClick={() => { setRenameValue(tenderName || tenderId); setIsRenaming(true); }}
+                  className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                  title="Přejmenovat"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              </div>
+              {tenderName && <div className="text-xs text-gray-400">{tenderId}</div>}
+            </>
+          )}
         </div>
         {companies && companies.length > 0 && (
           <select

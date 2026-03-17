@@ -8,14 +8,40 @@ import CompanySettings from './components/CompanySettings';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
-type AppView = 'tenders' | 'users' | 'change-password' | 'companies';
+type Route =
+  | { view: 'tenders'; tenderId: null }
+  | { view: 'tenders'; tenderId: string }
+  | { view: 'companies' }
+  | { view: 'users' }
+  | { view: 'change-password' };
+
+function parseHash(): Route {
+  const hash = window.location.hash.slice(1) || '/';
+  if (hash.startsWith('/tender/')) {
+    const tenderId = hash.split('/')[2];
+    if (tenderId) return { view: 'tenders', tenderId };
+  }
+  if (hash === '/settings/companies') return { view: 'companies' };
+  if (hash === '/settings/users') return { view: 'users' };
+  if (hash === '/settings/password') return { view: 'change-password' };
+  return { view: 'tenders', tenderId: null };
+}
+
+function navigate(path: string) {
+  window.location.hash = path;
+}
 
 export default function App() {
-  const [selectedTenderId, setSelectedTenderId] = useState<string | null>(null);
+  const [route, setRoute] = useState<Route>(parseHash);
   const [user, setUser] = useState<AuthUser | null>(getStoredUser());
   const [loggedIn, setLoggedIn] = useState(isAuthenticated() || !!getAuthToken());
-  const [view, setView] = useState<AppView>('tenders');
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(parseHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   // Close user menu on outside click
   useEffect(() => {
@@ -24,6 +50,9 @@ export default function App() {
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
   }, [showUserMenu]);
+
+  const view = route.view;
+  const selectedTenderId = route.view === 'tenders' ? route.tenderId : null;
 
   const handleLogin = (loginUser: AuthUser) => {
     setUser(loginUser);
@@ -34,8 +63,7 @@ export default function App() {
     clearAuth();
     setUser(null);
     setLoggedIn(false);
-    setView('tenders');
-    setSelectedTenderId(null);
+    window.location.hash = '/';
   };
 
   // Not authenticated: show login form
@@ -54,7 +82,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             <h1
               className="cursor-pointer text-xl font-bold text-gray-900"
-              onClick={() => { setSelectedTenderId(null); setView('tenders'); }}
+              onClick={() => navigate('/')}
             >
               VZ AI Tool
             </h1>
@@ -65,7 +93,7 @@ export default function App() {
           <div className="flex items-center gap-4">
             {selectedTenderId && view === 'tenders' && (
               <button
-                onClick={() => setSelectedTenderId(null)}
+                onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
                 &larr; Zpět na seznam
@@ -73,7 +101,7 @@ export default function App() {
             )}
             {view !== 'tenders' && (
               <button
-                onClick={() => { setView('tenders'); setSelectedTenderId(null); }}
+                onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
                 &larr; Zakázky
@@ -93,19 +121,19 @@ export default function App() {
                 {showUserMenu && (
                   <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-white py-1 shadow-lg">
                     <button
-                      onClick={() => { setView('companies'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      onClick={() => { navigate('/settings/companies'); setShowUserMenu(false); }}
                       className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                     >
                       Správa firem
                     </button>
                     <button
-                      onClick={() => { setView('users'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      onClick={() => { navigate('/settings/users'); setShowUserMenu(false); }}
                       className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                     >
                       Správa uživatelů
                     </button>
                     <button
-                      onClick={() => { setView('change-password'); setShowUserMenu(false); setSelectedTenderId(null); }}
+                      onClick={() => { navigate('/settings/password'); setShowUserMenu(false); }}
                       className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                     >
                       Změnit heslo
@@ -144,7 +172,7 @@ export default function App() {
           selectedTenderId ? (
             <TenderDetail tenderId={selectedTenderId} />
           ) : (
-            <TenderList onSelect={setSelectedTenderId} />
+            <TenderList onSelect={(id) => navigate('/tender/' + id)} />
           )
         )}
       </main>
