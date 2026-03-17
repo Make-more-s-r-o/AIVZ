@@ -1547,7 +1547,7 @@ export async function generateCenovaNabidka(
         new Paragraph({
           children: [
             new TextRun({ text: 'Zadavatel: ', bold: true }),
-            new TextRun(analysis.zakazka.zadavatel || ''),
+            new TextRun(typeof analysis.zakazka.zadavatel === 'string' ? analysis.zakazka.zadavatel : analysis.zakazka.zadavatel?.nazev || ''),
           ],
         }),
         new Paragraph({ text: '' }),
@@ -1704,7 +1704,7 @@ export async function generateCenovaNabidkaMulti(
         new Paragraph({
           children: [
             new TextRun({ text: 'Zadavatel: ', bold: true }),
-            new TextRun(analysis.zakazka.zadavatel || ''),
+            new TextRun(typeof analysis.zakazka.zadavatel === 'string' ? analysis.zakazka.zadavatel : analysis.zakazka.zadavatel?.nazev || ''),
           ],
         }),
         new Paragraph({ text: '' }),
