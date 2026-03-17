@@ -2,9 +2,18 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getCompanies, createCompany, updateCompanyApi, deleteCompanyApi,
   getCompanyDocs, uploadCompanyDocs, deleteCompanyDoc,
-  type CompanyData,
+  type CompanyData, type DocSlotEntry,
 } from '../lib/api';
-import { Building2, Trash2, Upload, FileText, Pencil, Plus, X } from 'lucide-react';
+import { Building2, Trash2, Upload, FileText, Pencil, Plus, X, Check, AlertTriangle } from 'lucide-react';
+
+const DOC_SLOTS = [
+  { type: 'vypis_or',           label: 'Výpis z obchodního rejstříku', multi: false },
+  { type: 'rejstrik_trestu',    label: 'Výpis z rejstříku trestů',     multi: false },
+  { type: 'potvrzeni_fu',       label: 'Potvrzení finančního úřadu',   multi: false },
+  { type: 'potvrzeni_ossz',     label: 'Potvrzení OSSZ',               multi: false },
+  { type: 'profesni_opravneni', label: 'Profesní oprávnění',           multi: false },
+  { type: 'ostatni',            label: 'Ostatní',                       multi: true  },
+] as const;
 
 export default function CompanySettings() {
   const [companies, setCompanies] = useState<CompanyData[]>([]);
@@ -237,15 +246,15 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
 // --- Company Documents ---
 
 function CompanyDocuments({ companyId }: { companyId: string }) {
-  const [docs, setDocs] = useState<string[]>([]);
-  const [uploading, setUploading] = useState(false);
+  const [entries, setEntries] = useState<DocSlotEntry[]>([]);
+  const [uploading, setUploading] = useState<string | null>(null);
   const [docError, setDocError] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const fileRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const loadDocs = useCallback(async () => {
     try {
-      const d = await getCompanyDocs(companyId);
-      setDocs(d);
+      const resp = await getCompanyDocs(companyId);
+      setEntries(resp.entries);
       setDocError(null);
     } catch (err) {
       console.error('Failed to load docs:', err);
@@ -254,27 +263,28 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
 
   useEffect(() => { loadDocs(); }, [loadDocs]);
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUpload = async (slotType: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    setUploading(true);
+    setUploading(slotType);
     setDocError(null);
     try {
-      await uploadCompanyDocs(companyId, Array.from(files));
-      await loadDocs();
+      const resp = await uploadCompanyDocs(companyId, Array.from(files), slotType);
+      setEntries(resp.entries);
     } catch (err) {
       console.error('Upload failed:', err);
       setDocError('Nahrání souboru se nezdařilo.');
     }
-    setUploading(false);
-    if (fileRef.current) fileRef.current.value = '';
+    setUploading(null);
+    const ref = fileRefs.current[slotType];
+    if (ref) ref.value = '';
   };
 
-  const handleDelete = async (filename: string) => {
+  const handleDelete = async (slot: string, filename: string) => {
     if (!window.confirm('Opravdu smazat tento dokument?')) return;
     try {
-      await deleteCompanyDoc(companyId, filename);
-      await loadDocs();
+      const resp = await deleteCompanyDoc(companyId, filename, slot);
+      setEntries(resp.entries);
     } catch (err) {
       console.error('Delete failed:', err);
       setDocError('Smazání souboru se nezdařilo.');
@@ -286,41 +296,64 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
       {docError && (
         <div className="mb-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{docError}</div>
       )}
-      <div className="mb-2 flex items-center justify-between">
-        <h4 className="text-xs font-semibold text-gray-600 uppercase">Výchozí kvalifikační doklady</h4>
-        <label className="flex cursor-pointer items-center gap-1.5 rounded border border-dashed border-gray-300 px-2 py-1 text-xs text-gray-600 hover:border-blue-400 hover:text-blue-600">
-          <Upload className="h-3 w-3" />
-          {uploading ? 'Nahrávám...' : 'Nahrát'}
-          <input
-            ref={fileRef}
-            type="file"
-            multiple
-            accept=".pdf,.docx,.doc,.xls,.xlsx,.jpg,.jpeg,.png"
-            onChange={handleUpload}
-            className="hidden"
-            disabled={uploading}
-          />
-        </label>
-      </div>
-      {docs.length === 0 ? (
-        <div className="text-xs text-gray-400">
-          Žádné výchozí doklady. Nahrajte výpis z OR, reference apod. — budou automaticky přidány ke každé zakázce.
-        </div>
-      ) : (
-        <div className="space-y-1">
-          {docs.map(f => (
-            <div key={f} className="flex items-center justify-between rounded px-2 py-1 text-xs hover:bg-gray-50">
-              <div className="flex items-center gap-2">
-                <FileText className="h-3.5 w-3.5 text-gray-400" />
-                <span>{f}</span>
+      <h4 className="mb-3 text-xs font-semibold text-gray-600 uppercase">Výchozí kvalifikační doklady</h4>
+      <div className="space-y-2">
+        {DOC_SLOTS.map(slot => {
+          const slotEntries = entries.filter(e => e.slot === slot.type);
+          const isUploading = uploading === slot.type;
+
+          return (
+            <div key={slot.type} className="flex items-start gap-3 rounded px-2 py-1.5 hover:bg-gray-50">
+              {/* Label */}
+              <div className="w-56 shrink-0 text-xs font-medium text-gray-600 pt-0.5">
+                {slot.label}
               </div>
-              <button onClick={() => handleDelete(f)} className="text-gray-400 hover:text-red-500">
-                <Trash2 className="h-3 w-3" />
-              </button>
+
+              {/* Content */}
+              <div className="flex-1 min-w-0">
+                {slotEntries.length === 0 ? (
+                  <div className="flex items-center gap-1.5 text-xs text-amber-600">
+                    <AlertTriangle className="h-3 w-3" />
+                    <span>Nenahrán</span>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {slotEntries.map(entry => (
+                      <div key={entry.filename} className="flex items-center gap-2 text-xs">
+                        <Check className="h-3 w-3 text-green-600 shrink-0" />
+                        <FileText className="h-3 w-3 text-gray-400 shrink-0" />
+                        <span className="truncate text-gray-700">{entry.filename}</span>
+                        <button
+                          onClick={() => handleDelete(entry.slot, entry.filename)}
+                          className="ml-auto shrink-0 text-gray-400 hover:text-red-500"
+                          title="Smazat"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Upload button */}
+              <label className="shrink-0 flex cursor-pointer items-center gap-1 rounded border border-dashed border-gray-300 px-2 py-1 text-xs text-gray-500 hover:border-blue-400 hover:text-blue-600">
+                <Upload className="h-3 w-3" />
+                {isUploading ? '...' : slot.multi && slotEntries.length > 0 ? '+ Nahrát' : 'Nahrát'}
+                <input
+                  ref={(el) => { fileRefs.current[slot.type] = el; }}
+                  type="file"
+                  multiple={slot.multi}
+                  accept=".pdf,.docx,.doc,.xls,.xlsx,.jpg,.jpeg,.png"
+                  onChange={(e) => handleUpload(slot.type, e)}
+                  className="hidden"
+                  disabled={isUploading}
+                />
+              </label>
             </div>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }

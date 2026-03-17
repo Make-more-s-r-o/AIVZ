@@ -23,7 +23,9 @@ import {
   getAllCompanies, getCompany, createCompany, updateCompany, deleteCompany as deleteCompanyById,
   getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
   copyCompanyDocsToTender,
+  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
 } from './lib/company-store.js';
+import type { DocSlotType } from './lib/doc-slots.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -1238,35 +1240,42 @@ const companyDocUpload = multer({
   },
 });
 
-// POST /api/companies/:companyId/documents - upload company docs
+// POST /api/companies/:companyId/documents - upload company docs (with slot)
 app.post('/api/companies/:companyId/documents', companyDocUpload.array('files', 20), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
-    const docs = await getCompanyDocuments(req.params.companyId);
-    res.json({ uploaded: files.map(f => f.filename), documents: docs });
+    const slot = (req.body?.slot || 'ostatni') as DocSlotType;
+    let manifest = await getDocManifest(req.params.companyId);
+    for (const f of files) {
+      manifest = await addDocToSlot(req.params.companyId, slot, f.filename);
+    }
+    const allFiles = await getCompanyDocuments(req.params.companyId);
+    res.json({ uploaded: files.map(f => f.filename), entries: manifest.entries, files: allFiles });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// GET /api/companies/:companyId/documents - list company docs
+// GET /api/companies/:companyId/documents - list company docs (with manifest entries)
 app.get('/api/companies/:companyId/documents', async (req, res) => {
   try {
-    const docs = await getCompanyDocuments(req.params.companyId);
-    res.json(docs);
+    const manifest = await getDocManifest(req.params.companyId);
+    const files = await getCompanyDocuments(req.params.companyId);
+    res.json({ entries: manifest.entries, files });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// DELETE /api/companies/:companyId/documents/:filename - delete company doc
+// DELETE /api/companies/:companyId/documents/:filename - delete company doc (with slot)
 app.delete('/api/companies/:companyId/documents/:filename', async (req, res) => {
   try {
-    await deleteCompanyDocument(req.params.companyId, req.params.filename);
-    res.json({ success: true });
+    const slot = (req.query.slot || 'ostatni') as DocSlotType;
+    const manifest = await removeDocFromSlot(req.params.companyId, slot, req.params.filename);
+    res.json({ success: true, entries: manifest.entries });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1298,9 +1307,20 @@ app.put('/api/tenders/:id/company', async (req, res) => {
     meta.company_id = company_id;
     if (!meta.created_at) meta.created_at = new Date().toISOString();
     await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
-    // Copy company docs to prilohy
-    const copied = await copyCompanyDocsToTender(company_id, id);
-    res.json({ success: true, company_id, copied_documents: copied });
+
+    // Map kvalifikace to required slots if analysis exists
+    let requiredSlots: DocSlotType[] | undefined;
+    try {
+      const analysisPath = join(OUTPUT_DIR, id, 'analysis.json');
+      const analysis = JSON.parse(await readFile(analysisPath, 'utf-8'));
+      if (analysis.kvalifikacni_pozadavky && Array.isArray(analysis.kvalifikacni_pozadavky)) {
+        requiredSlots = mapQualifikaceToSlots(analysis.kvalifikacni_pozadavky);
+      }
+    } catch {}
+
+    // Copy company docs to prilohy (selective if we have kvalifikace info)
+    const { copied, missing } = await copyCompanyDocsToTender(company_id, id, requiredSlots);
+    res.json({ success: true, company_id, copied_documents: copied, missing_documents: missing });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -1,4 +1,7 @@
-// --- Document slot types for company qualification docs ---
+/**
+ * Document slot types for company qualification docs.
+ * Mirrors packages/shared/constants.ts — keep in sync.
+ */
 
 export const DOC_SLOTS = [
   { type: 'vypis_or',           label: 'Výpis z obchodního rejstříku', multi: false },
@@ -21,23 +24,3 @@ export interface DocManifest {
   version: number;
   entries: DocSlotEntry[];
 }
-
-// --- Pipeline steps ---
-
-export const PIPELINE_STEPS = [
-  'extract',
-  'analyze',
-  'match',
-  'generate',
-  'validate',
-] as const;
-
-export type PipelineStep = (typeof PIPELINE_STEPS)[number];
-
-export const STEP_LABELS: Record<PipelineStep, string> = {
-  extract: 'Extrakce dokumentů',
-  analyze: 'AI analýza',
-  match: 'Výběr produktu',
-  generate: 'Generování nabídky',
-  validate: 'Kontrola kvality',
-};

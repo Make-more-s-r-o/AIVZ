@@ -465,13 +465,31 @@ export async function deleteCompanyApi(id: string): Promise<{ success: boolean }
   return res.json();
 }
 
-export async function getCompanyDocs(companyId: string): Promise<string[]> {
+// --- Document slot types (mirrored from shared/constants) ---
+
+export interface DocSlotEntry {
+  slot: string;
+  filename: string;
+  uploadedAt: string;
+}
+
+export interface CompanyDocsResponse {
+  entries: DocSlotEntry[];
+  files: string[];
+}
+
+export async function getCompanyDocs(companyId: string): Promise<CompanyDocsResponse> {
   return fetchJson(`/companies/${companyId}/documents`);
 }
 
-export async function uploadCompanyDocs(companyId: string, files: File[]): Promise<{ uploaded: string[]; documents: string[] }> {
+export async function uploadCompanyDocs(
+  companyId: string,
+  files: File[],
+  slot: string = 'ostatni',
+): Promise<{ uploaded: string[]; entries: DocSlotEntry[]; files: string[] }> {
   const formData = new FormData();
   files.forEach(f => formData.append('files', f));
+  formData.append('slot', slot);
   const res = await fetch(`${API_BASE}/companies/${companyId}/documents`, {
     method: 'POST',
     body: formData,
@@ -481,16 +499,20 @@ export async function uploadCompanyDocs(companyId: string, files: File[]): Promi
   return res.json();
 }
 
-export async function deleteCompanyDoc(companyId: string, filename: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/companies/${companyId}/documents/${encodeURIComponent(filename)}`, {
-    method: 'DELETE',
-    headers: authHeaders(),
-  });
+export async function deleteCompanyDoc(
+  companyId: string,
+  filename: string,
+  slot: string = 'ostatni',
+): Promise<{ success: boolean; entries: DocSlotEntry[] }> {
+  const res = await fetch(
+    `${API_BASE}/companies/${companyId}/documents/${encodeURIComponent(filename)}?slot=${encodeURIComponent(slot)}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
   if (!res.ok) throw new Error('Delete failed');
   return res.json();
 }
 
-export async function setTenderCompany(tenderId: string, companyId: string): Promise<{ success: boolean; copied_documents: string[] }> {
+export async function setTenderCompany(tenderId: string, companyId: string): Promise<{ success: boolean; copied_documents: string[]; missing_documents?: string[] }> {
   const res = await fetch(`${API_BASE}/tenders/${tenderId}/company`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
