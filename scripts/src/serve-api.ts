@@ -32,7 +32,10 @@ import {
   getWarehouseStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
   getDataSources, getManufacturers, getProductPrices, getPriceHistory,
+  upsertPrice,
 } from './lib/warehouse-store.js';
+import { getImportPreview, runImport, type ColumnMapping } from './lib/csv-importer.js';
+import { generateMissingEmbeddings } from './lib/embedding-service.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -1604,6 +1607,98 @@ app.get('/api/warehouse/products/:productId/prices/history', requireWarehouse, a
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
     const history = await getPriceHistory(req.params.productId, sourceId, limit);
     res.json(history);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Warehouse Import API ---
+
+const importUpload = multer({
+  storage: multer.diskStorage({
+    destination: async (_req, _file, cb) => {
+      const dir = join(ROOT, 'data', 'imports');
+      await mkdir(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      const name = `${Date.now()}-${Buffer.from(file.originalname, 'latin1').toString('utf8')}`;
+      cb(null, name);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = extname(file.originalname).toLowerCase();
+    if (['.csv', '.xlsx', '.xls'].includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV, XLSX, and XLS files are allowed'));
+    }
+  },
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+});
+
+// POST /api/warehouse/import/preview — nahrát soubor a získat preview s mapováním
+app.post('/api/warehouse/import/preview', requireWarehouse, importUpload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+    const preview = await getImportPreview(file.path);
+    res.json({ ...preview, upload_path: file.path });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/warehouse/import/run — spustit import s potvrzeným mapováním
+app.post('/api/warehouse/import/run', requireWarehouse, async (req, res) => {
+  try {
+    const { upload_path, mapping, source_id, category_id, enrich_params } = req.body;
+    if (!upload_path || !mapping || !source_id) {
+      return res.status(400).json({ error: 'upload_path, mapping, and source_id are required' });
+    }
+    const result = await runImport(upload_path, mapping as ColumnMapping[], {
+      source_id,
+      category_id: category_id || undefined,
+      enrich_params: enrich_params ?? false,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/warehouse/products/:productId/prices — přidat/aktualizovat cenu
+app.post('/api/warehouse/products/:productId/prices', requireWarehouse, async (req, res) => {
+  try {
+    const { source_id, price_bez_dph, price_s_dph, currency, availability, stock_quantity, delivery_days, source_url, source_sku } = req.body;
+    if (!source_id || price_bez_dph === undefined) {
+      return res.status(400).json({ error: 'source_id and price_bez_dph are required' });
+    }
+    await upsertPrice({
+      product_id: req.params.productId,
+      source_id,
+      price_bez_dph,
+      price_s_dph,
+      currency,
+      availability,
+      stock_quantity,
+      delivery_days,
+      source_url,
+      source_sku,
+    });
+    const prices = await getProductPrices(req.params.productId);
+    res.json(prices);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/warehouse/embeddings/generate — vygenerovat chybějící embeddingy
+app.post('/api/warehouse/embeddings/generate', requireWarehouse, async (req, res) => {
+  try {
+    const limit = req.body.limit ?? 500;
+    const count = await generateMissingEmbeddings(limit);
+    res.json({ processed: count });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

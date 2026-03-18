@@ -103,6 +103,19 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync compose file to Hetzner
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 23.88.61.12
+          username: root
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          source: "docker/docker-compose.hetzner.yml"
+          target: "/opt/vz/"
+          strip_components: 1
+
       - name: Deploy to Hetzner via SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -112,9 +125,13 @@ jobs:
           script: |
             echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u make-more-s-r-o --password-stdin
             cd /opt/vz
+            # Symlink compose file
+            ln -sf docker-compose.hetzner.yml docker-compose.yml
+            # Ensure .env has POSTGRES_PASSWORD
+            grep -q POSTGRES_PASSWORD .env 2>/dev/null || echo "POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}" >> .env
             docker compose pull
             docker compose up -d --remove-orphans
-            sleep 10
+            sleep 15
             docker exec vz-api wget --spider -q http://localhost:3001/api/health
 
       - name: External health check

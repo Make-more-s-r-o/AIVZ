@@ -524,3 +524,139 @@ export async function setTenderCompany(tenderId: string, companyId: string): Pro
   }
   return res.json();
 }
+
+// --- Warehouse (cenový sklad) API ---
+
+export interface WarehouseStats {
+  products: number;
+  products_active: number;
+  sources: number;
+  categories: number;
+  prices: number;
+  last_import: string | null;
+}
+
+export interface WarehouseProduct {
+  id: string;
+  manufacturer: string;
+  model: string;
+  ean: string | null;
+  part_number: string | null;
+  category_id: number | null;
+  category_slug?: string;
+  category_nazev?: string;
+  description: string | null;
+  parameters: Record<string, string>;
+  parameters_normalized: Record<string, unknown>;
+  image_url: string | null;
+  is_active: boolean;
+  best_price?: number | null;
+  best_price_source?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WarehouseCategory {
+  id: number;
+  slug: string;
+  nazev: string;
+  parent_id: number | null;
+  ikona: string | null;
+  children?: WarehouseCategory[];
+}
+
+export interface ImportPreview {
+  filename: string;
+  total_rows: number;
+  columns: string[];
+  suggested_mapping: Array<{
+    source_index: number;
+    source_name: string;
+    target_field: string | null;
+  }>;
+  sample_rows: Record<string, string>[];
+  upload_path: string;
+}
+
+export interface ImportResult {
+  total_rows: number;
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: Array<{ row: number; error: string }>;
+}
+
+export async function getWarehouseStats(): Promise<WarehouseStats> {
+  return fetchJson('/warehouse/stats');
+}
+
+export async function getWarehouseProducts(params?: {
+  q?: string;
+  category_id?: number;
+  manufacturer?: string;
+  limit?: number;
+  offset?: number;
+  sort_by?: string;
+  sort_dir?: string;
+}): Promise<{ items: WarehouseProduct[]; total: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.q) searchParams.set('q', params.q);
+  if (params?.category_id) searchParams.set('category_id', String(params.category_id));
+  if (params?.manufacturer) searchParams.set('manufacturer', params.manufacturer);
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.sort_by) searchParams.set('sort_by', params.sort_by);
+  if (params?.sort_dir) searchParams.set('sort_dir', params.sort_dir);
+  const qs = searchParams.toString();
+  return fetchJson(`/warehouse/products${qs ? '?' + qs : ''}`);
+}
+
+export async function getWarehouseProduct(id: string): Promise<WarehouseProduct & { prices: any[] }> {
+  return fetchJson(`/warehouse/products/${id}`);
+}
+
+export async function getWarehouseCategories(tree?: boolean): Promise<WarehouseCategory[]> {
+  return fetchJson(`/warehouse/categories${tree ? '?tree=1' : ''}`);
+}
+
+export async function getWarehouseManufacturers(): Promise<string[]> {
+  return fetchJson('/warehouse/manufacturers');
+}
+
+export async function getWarehouseSources(): Promise<any[]> {
+  return fetchJson('/warehouse/sources');
+}
+
+export async function uploadImportFile(file: File): Promise<ImportPreview> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/warehouse/import/preview`, {
+    method: 'POST',
+    body: formData,
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return res.json();
+}
+
+export async function runWarehouseImport(data: {
+  upload_path: string;
+  mapping: ImportPreview['suggested_mapping'];
+  source_id: number;
+  category_id?: number;
+  enrich_params?: boolean;
+}): Promise<ImportResult> {
+  const res = await fetch(`${API_BASE}/warehouse/import/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Import failed');
+  }
+  return res.json();
+}

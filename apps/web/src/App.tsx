@@ -5,12 +5,14 @@ import LoginForm from './components/LoginForm';
 import UserManagement from './components/UserManagement';
 import ChangePasswordForm from './components/ChangePasswordForm';
 import CompanySettings from './components/CompanySettings';
+import WarehouseDashboard from './components/warehouse/WarehouseDashboard';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
 type Route =
   | { view: 'tenders'; tenderId: null }
   | { view: 'tenders'; tenderId: string }
+  | { view: 'warehouse' }
   | { view: 'companies' }
   | { view: 'users' }
   | { view: 'change-password' };
@@ -21,6 +23,7 @@ function parseHash(): Route {
     const tenderId = hash.split('/')[2];
     if (tenderId) return { view: 'tenders', tenderId };
   }
+  if (hash === '/warehouse') return { view: 'warehouse' };
   if (hash === '/settings/companies') return { view: 'companies' };
   if (hash === '/settings/users') return { view: 'users' };
   if (hash === '/settings/password') return { view: 'change-password' };
@@ -91,20 +94,26 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => navigate('/warehouse')}
+              className={`text-sm ${view === 'warehouse' ? 'font-medium text-blue-600' : 'text-gray-500 hover:text-gray-900'}`}
+            >
+              Cenovy sklad
+            </button>
             {selectedTenderId && view === 'tenders' && (
               <button
                 onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
-                &larr; Zpět na seznam
+                &larr; Zpet na seznam
               </button>
             )}
-            {view !== 'tenders' && (
+            {view !== 'tenders' && view !== 'warehouse' && (
               <button
                 onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
-                &larr; Zakázky
+                &larr; Zakazky
               </button>
             )}
             {user ? (
@@ -161,6 +170,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8">
+        {view === 'warehouse' && <WarehouseDashboard />}
         {view === 'companies' && <CompanySettings />}
         {view === 'users' && user && (
           <UserManagement currentUserId={user.id} />
