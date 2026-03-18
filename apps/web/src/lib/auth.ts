@@ -1,6 +1,7 @@
 const API_BASE = '/api';
 const JWT_KEY = 'vz_jwt';
 const USER_KEY = 'vz_user';
+const REMEMBER_KEY = 'vz_remember';
 
 export interface AuthUser {
   id: string;
@@ -15,29 +16,45 @@ export interface AuthStatus {
   jwtEnabled: boolean;
 }
 
-// --- localStorage management ---
+// --- Dual storage management (localStorage vs sessionStorage) ---
 
 export function getJwt(): string | null {
-  return localStorage.getItem(JWT_KEY);
+  return localStorage.getItem(JWT_KEY) || sessionStorage.getItem(JWT_KEY);
 }
 
 export function getStoredUser(): AuthUser | null {
   try {
-    const raw = localStorage.getItem(USER_KEY);
+    const raw = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-export function setAuth(token: string, user: AuthUser): void {
-  localStorage.setItem(JWT_KEY, token);
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+export function setAuth(token: string, user: AuthUser, rememberMe?: boolean): void {
+  // Vyčistit oba storage před uložením
+  localStorage.removeItem(JWT_KEY);
+  localStorage.removeItem(USER_KEY);
+  sessionStorage.removeItem(JWT_KEY);
+  sessionStorage.removeItem(USER_KEY);
+
+  const storage = rememberMe ? localStorage : sessionStorage;
+  storage.setItem(JWT_KEY, token);
+  storage.setItem(USER_KEY, JSON.stringify(user));
+
+  if (rememberMe) {
+    localStorage.setItem(REMEMBER_KEY, '1');
+  } else {
+    localStorage.removeItem(REMEMBER_KEY);
+  }
 }
 
 export function clearAuth(): void {
   localStorage.removeItem(JWT_KEY);
   localStorage.removeItem(USER_KEY);
+  localStorage.removeItem(REMEMBER_KEY);
+  sessionStorage.removeItem(JWT_KEY);
+  sessionStorage.removeItem(USER_KEY);
 }
 
 export function isAuthenticated(): boolean {
@@ -52,11 +69,11 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   return res.json();
 }
 
-export async function login(email: string, password: string): Promise<{ token: string; user: AuthUser }> {
+export async function login(email: string, password: string, rememberMe?: boolean): Promise<{ token: string; user: AuthUser }> {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, rememberMe }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));

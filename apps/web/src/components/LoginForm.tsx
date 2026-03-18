@@ -20,6 +20,7 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [legacyToken, setLegacyToken] = useState('');
+  const [rememberMe, setRememberMe] = useState(true);
 
   useEffect(() => {
     getAuthStatus()
@@ -33,8 +34,8 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
     setError('');
     setSubmitting(true);
     try {
-      const result = await login(email, password);
-      setAuth(result.token, result.user);
+      const result = await login(email, password, rememberMe);
+      setAuth(result.token, result.user, rememberMe);
       onLogin(result.user);
     } catch (err: any) {
       setError(err.message || 'Přihlášení selhalo');
@@ -50,7 +51,7 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
     try {
       const result = await setupFirstUser(email, name, password);
       if (result.token) {
-        setAuth(result.token, result.user);
+        setAuth(result.token, result.user, true);
       }
       onLogin(result.user);
     } catch (err: any) {
@@ -211,6 +212,15 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
               required
             />
           </div>
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Zapamatovat přihlášení
+          </label>
           <button
             type="submit"
             disabled={submitting}

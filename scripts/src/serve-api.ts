@@ -365,7 +365,7 @@ app.post('/api/auth/setup', async (req, res) => {
     }
     const user = await createUser(email, name, password);
     if (isJwtEnabled()) {
-      const token = signToken(user);
+      const token = signToken(user, true);
       await updateLastLogin(user.id);
       return res.json({ token, user });
     }
@@ -378,7 +378,7 @@ app.post('/api/auth/setup', async (req, res) => {
 // POST /api/auth/login - authenticate and get JWT
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, rememberMe } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
@@ -394,7 +394,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(500).json({ error: 'JWT_SECRET not configured on server' });
     }
     const { passwordHash: _, ...safeUser } = user;
-    const token = signToken(safeUser);
+    const token = signToken(safeUser, !!rememberMe);
     await updateLastLogin(user.id);
     res.json({ token, user: safeUser });
   } catch (err: any) {
