@@ -1,0 +1,59 @@
+# VZ AI Tool — Hetzner VPS (vz.ludone.cz)
+# Nginx reverse proxy (external), no Traefik
+# Deploy: cd /opt/vz && docker compose up -d
+
+services:
+  vz-api:
+    image: ${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}
+    container_name: vz-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - API_PORT=3001
+      - API_TOKEN=${API_TOKEN}
+      - JWT_SECRET=${JWT_SECRET}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6}
+      - GOTENBERG_URL=http://vz-gotenberg:3000
+    volumes:
+      - /opt/vz/data/input:/app/input
+      - /opt/vz/data/output:/app/output
+      - /opt/vz/data/config:/app/config
+    expose:
+      - "3001"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    depends_on:
+      vz-gotenberg:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - vz-internal
+      - makemore-data_makemore
+
+  vz-gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: vz-gotenberg
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      - GOTENBERG_API_TIMEOUT=120s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - vz-internal
+
+networks:
+  vz-internal:
+    driver: bridge
+  makemore-data_makemore:
+    external: true

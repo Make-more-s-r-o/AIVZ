@@ -98,3 +98,27 @@ jobs:
           done
           echo "Health check failed after 5 attempts"
           exit 1
+
+  deploy-hetzner:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Hetzner via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 23.88.61.12
+          username: root
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u make-more-s-r-o --password-stdin
+            cd /opt/vz
+            docker compose pull
+            docker compose up -d --remove-orphans
+            sleep 10
+            docker exec vz-api wget --spider -q http://localhost:3001/api/health
+
+      - name: External health check
+        continue-on-error: true
+        run: |
+          sleep 15
+          curl -sf --max-time 10 "https://vz.ludone.cz/api/health" || echo "External check failed (may be DNS)"
