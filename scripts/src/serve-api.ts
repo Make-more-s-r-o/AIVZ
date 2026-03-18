@@ -36,6 +36,8 @@ import {
 } from './lib/warehouse-store.js';
 import { getImportPreview, runImport, type ColumnMapping } from './lib/csv-importer.js';
 import { generateMissingEmbeddings } from './lib/embedding-service.js';
+import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
+import { enrichProductsFromIcecat } from './lib/icecat-client.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -1699,6 +1701,62 @@ app.post('/api/warehouse/embeddings/generate', requireWarehouse, async (req, res
     const limit = req.body.limit ?? 500;
     const count = await generateMissingEmbeddings(limit);
     res.json({ processed: count });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Scraping API ---
+
+// POST /api/warehouse/scrape — spustit scraping
+app.post('/api/warehouse/scrape', requireWarehouse, async (req, res) => {
+  try {
+    const { source_id, query: searchQuery, category_url, max_items, category_id } = req.body;
+    if (!source_id) {
+      return res.status(400).json({ error: 'source_id is required' });
+    }
+    // Najdi zdroj
+    const source = await import('./lib/warehouse-store.js').then(m => m.getDataSources())
+      .then(sources => sources.find(s => s.id === source_id));
+    if (!source) return res.status(404).json({ error: 'Source not found' });
+
+    const config: ScrapeConfig = {
+      source_id,
+      source_name: source.name,
+      query: searchQuery,
+      category_url,
+      max_items: max_items || 100,
+      category_id,
+    };
+
+    // Spustit async — neblokovat request
+    const jobPromise = runScraping(config).catch(err => {
+      console.error('Scrape job failed:', err);
+    });
+
+    res.json({ status: 'started', source: source.name });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/scrape/jobs — seznam jobů
+app.get('/api/warehouse/scrape/jobs', requireWarehouse, async (req, res) => {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
+    const jobs = await getScrapeJobs(limit);
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/warehouse/enrich/icecat — obohatit produkty přes Icecat
+app.post('/api/warehouse/enrich/icecat', requireWarehouse, async (req, res) => {
+  try {
+    const limit = req.body.limit ?? 50;
+    const result = await enrichProductsFromIcecat(limit);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

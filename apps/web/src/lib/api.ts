@@ -642,6 +642,43 @@ export async function uploadImportFile(file: File): Promise<ImportPreview> {
   return res.json();
 }
 
+// Scraping
+export async function startScraping(data: {
+  source_id: number;
+  query?: string;
+  category_url?: string;
+  max_items?: number;
+  category_id?: number;
+}): Promise<{ status: string; source: string }> {
+  const res = await fetch(`${API_BASE}/warehouse/scrape`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Scrape failed');
+  }
+  return res.json();
+}
+
+export async function getScrapeJobs(limit = 20): Promise<any[]> {
+  return fetchJson(`/warehouse/scrape/jobs?limit=${limit}`);
+}
+
+export async function enrichWithIcecat(limit = 50): Promise<any> {
+  const res = await fetch(`${API_BASE}/warehouse/enrich/icecat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Icecat enrichment failed');
+  }
+  return res.json();
+}
+
 export async function runWarehouseImport(data: {
   upload_path: string;
   mapping: ImportPreview['suggested_mapping'];
