@@ -113,6 +113,10 @@ export const ProductCandidateSchema = z.object({
   zdroj_ceny: z.string().optional(),
   katalogove_cislo: z.string().optional(),
   reference_urls: z.array(z.string()).optional(),
+  // Warehouse matching metadata
+  warehouse_product_id: z.string().uuid().optional(),
+  match_tier: z.enum(['exact', 'text', 'vector']).optional(),
+  match_score: z.number().optional(),
 });
 
 export const PriceOverrideSchema = z.object({

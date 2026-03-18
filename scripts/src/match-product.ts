@@ -6,6 +6,7 @@ import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
+import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -295,6 +296,43 @@ async function main() {
 
   let polozkyMatch: any[] = [];
 
+  // Step 0: Warehouse search — hledej produkty ve skladu PŘED AI
+  const warehouseResults = new Map<number, any[]>(); // index → warehouse candidates
+  const warehouseContext: string[] = []; // pro AI prompt kontext
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const request: MatchRequest = {
+      nazev: item.nazev,
+      specifikace: item.specifikace,
+      technicke_pozadavky: item.technicke_pozadavky,
+      limit: 3,
+    };
+
+    const result = await searchWarehouse(request);
+    if (result && result.matches.length > 0) {
+      const candidates = result.matches.map(warehouseMatchToCandidate);
+      warehouseResults.set(i, candidates);
+
+      // Kontext pro AI — ať nenavrhuje stejné produkty
+      for (const m of result.matches) {
+        warehouseContext.push(
+          `  - ${m.manufacturer} ${m.model} (${m.part_number || m.ean || 'bez P/N'})` +
+          (m.price_bez_dph ? `, ${Number(m.price_bez_dph).toLocaleString('cs-CZ')} Kč` : '') +
+          ` [${m.match_tier}, score: ${Number(m.match_score).toFixed(2)}]`,
+        );
+      }
+
+      console.log(`  Warehouse: "${item.nazev}" → ${result.matches.length} match(es) via ${result.tier_used} (${result.search_time_ms}ms)`);
+    }
+  }
+
+  if (warehouseResults.size > 0) {
+    console.log(`\nWarehouse found matches for ${warehouseResults.size}/${items.length} items`);
+  } else if (items.length > 0) {
+    console.log(`\nWarehouse: no matches found (${items.length > 0 ? 'empty warehouse or DB unavailable' : 'no items'})`);
+  }
+
   // Step 1: Match products + accessories via AI (in batches of BATCH_SIZE)
   const BATCH_SIZE = 15;
   if (items.length > 0) {
@@ -318,15 +356,22 @@ async function main() {
       const reqCount = batchRelevantReqs.length || 10;
       const maxTokens = Math.min(65536, 8192 + batchItems.length * candidateCount * Math.max(reqCount * 80, 2000));
 
+      // Přidej warehouse kontext do AI promptu
+      let userMessage = buildProductMatchUserMessage(
+        batchItemsWithReqs,
+        analysis.zakazka.nazev,
+        analysis.zakazka.predmet,
+        analysis.zakazka.predpokladana_hodnota,
+        candidateCount,
+      );
+
+      if (warehouseContext.length > 0) {
+        userMessage += `\n\nINTERNÍ KATALOG — nalezeno:\n${warehouseContext.join('\n')}\n\nINSTRUKCE: Produkty z katalogu NENAVRHUJ znovu jako kandidáty. Navrhni ALTERNATIVY nebo jiné modely.`;
+      }
+
       const result = await callClaude(
         PRODUCT_MATCH_SYSTEM,
-        buildProductMatchUserMessage(
-          batchItemsWithReqs,
-          analysis.zakazka.nazev,
-          analysis.zakazka.predmet,
-          analysis.zakazka.predpokladana_hodnota,
-          candidateCount,
-        ),
+        userMessage,
         { maxTokens, temperature: 0.3 }
       );
 
@@ -396,6 +441,22 @@ async function main() {
     }
 
     console.log(`  Total AI cost: ${totalCost.toFixed(2)} CZK`);
+  }
+
+  // Step 1.5: Merge warehouse candidates into polozky_match
+  // Warehouse kandidáti se přidají na ZAČÁTEK seznamu kandidátů (vyšší spolehlivost)
+  if (warehouseResults.size > 0) {
+    for (const pm of polozkyMatch) {
+      const whCandidates = warehouseResults.get(pm.polozka_index);
+      if (whCandidates && whCandidates.length > 0) {
+        // Přidej warehouse kandidáty na začátek
+        pm.kandidati = [...whCandidates, ...pm.kandidati];
+        // Warehouse kandidát na indexu 0 = nejlepší match
+        pm.vybrany_index = 0;
+        pm.oduvodneni_vyberu = `Produkt nalezen v cenovém skladu (reálná cena). ${pm.oduvodneni_vyberu || ''}`.trim();
+        console.log(`  Merged warehouse candidates for "${pm.polozka_nazev}": +${whCandidates.length} candidates`);
+      }
+    }
   }
 
   // Step 2: Price services via AI (simple pricing, no candidates)
