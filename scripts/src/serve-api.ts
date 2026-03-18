@@ -26,6 +26,13 @@ import {
   getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
 } from './lib/company-store.js';
 import type { DocSlotType } from './lib/doc-slots.js';
+import { isDbAvailable, closePool } from './lib/db.js';
+import { runMigrations } from './lib/db-migrate.js';
+import {
+  getWarehouseStats, searchProducts, getProduct, createProduct,
+  updateProduct, deleteProduct, getCategories, getCategoryTree,
+  getDataSources, getManufacturers, getProductPrices, getPriceHistory,
+} from './lib/warehouse-store.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -1466,6 +1473,142 @@ app.post('/api/tenders/:id/output', express.json({ limit: '50mb' }), async (req,
   }
 });
 
+// --- Warehouse API (cenový sklad) ---
+
+// Middleware: warehouse DB availability check
+const requireWarehouse = async (_req: any, res: any, next: any) => {
+  if (!(await isDbAvailable())) {
+    return res.status(503).json({ error: 'Warehouse database not available' });
+  }
+  next();
+};
+
+// GET /api/warehouse/stats — přehled skladu
+app.get('/api/warehouse/stats', requireWarehouse, async (_req, res) => {
+  try {
+    const stats = await getWarehouseStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/categories — seznam kategorií (flat)
+app.get('/api/warehouse/categories', requireWarehouse, async (req, res) => {
+  try {
+    const tree = req.query.tree === '1';
+    const data = tree ? await getCategoryTree() : await getCategories();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/manufacturers — unikátní výrobci
+app.get('/api/warehouse/manufacturers', requireWarehouse, async (_req, res) => {
+  try {
+    const data = await getManufacturers();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/sources — datové zdroje
+app.get('/api/warehouse/sources', requireWarehouse, async (_req, res) => {
+  try {
+    const data = await getDataSources();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/products — vyhledávání a listing produktů
+app.get('/api/warehouse/products', requireWarehouse, async (req, res) => {
+  try {
+    const params = {
+      q: req.query.q as string | undefined,
+      category_id: req.query.category_id ? parseInt(req.query.category_id as string) : undefined,
+      manufacturer: req.query.manufacturer as string | undefined,
+      price_min: req.query.price_min ? parseFloat(req.query.price_min as string) : undefined,
+      price_max: req.query.price_max ? parseFloat(req.query.price_max as string) : undefined,
+      is_active: req.query.is_active !== undefined ? req.query.is_active === 'true' : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
+      offset: req.query.offset ? parseInt(req.query.offset as string) : 0,
+      sort_by: (req.query.sort_by as any) || 'name',
+      sort_dir: (req.query.sort_dir as any) || 'asc',
+    };
+    const result = await searchProducts(params);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/products/:productId — detail produktu
+app.get('/api/warehouse/products/:productId', requireWarehouse, async (req, res) => {
+  try {
+    const product = await getProduct(req.params.productId);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const prices = await getProductPrices(req.params.productId);
+    res.json({ ...product, prices });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/warehouse/products — vytvořit produkt
+app.post('/api/warehouse/products', requireWarehouse, async (req, res) => {
+  try {
+    const { manufacturer, model } = req.body;
+    if (!manufacturer || !model) {
+      return res.status(400).json({ error: 'manufacturer and model are required' });
+    }
+    const product = await createProduct(req.body);
+    res.json(product);
+  } catch (err: any) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Product already exists (duplicate EAN, MPN, or manufacturer+model)' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/warehouse/products/:productId — update produkt
+app.put('/api/warehouse/products/:productId', requireWarehouse, async (req, res) => {
+  try {
+    const product = await updateProduct(req.params.productId, req.body);
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /api/warehouse/products/:productId — smazat produkt
+app.delete('/api/warehouse/products/:productId', requireWarehouse, async (req, res) => {
+  try {
+    const ok = await deleteProduct(req.params.productId);
+    if (!ok) return res.status(404).json({ error: 'Product not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/products/:productId/prices/history — cenová historie
+app.get('/api/warehouse/products/:productId/prices/history', requireWarehouse, async (req, res) => {
+  try {
+    const sourceId = req.query.source_id ? parseInt(req.query.source_id as string) : undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+    const history = await getPriceHistory(req.params.productId, sourceId, limit);
+    res.json(history);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // Static file serving for production (React build)
 const staticDir = join(ROOT, 'apps', 'web', 'dist');
 if (existsSync(staticDir)) {
@@ -1474,11 +1617,37 @@ if (existsSync(staticDir)) {
   console.log(`Serving static files from: ${staticDir}`);
 }
 
-// Startup: migrate legacy company.json
-migrateCompanies().catch(err => console.error('Company migration error:', err));
+// Startup: migrate legacy company.json + DB migrace
+async function startup() {
+  await migrateCompanies().catch(err => console.error('Company migration error:', err));
 
-app.listen(PORT, () => {
-  console.log(`\nVZ AI Tool API server running on http://localhost:${PORT}`);
-  console.log(`Input dir: ${INPUT_DIR}`);
-  console.log(`Output dir: ${OUTPUT_DIR}`);
+  // PostgreSQL: migrace (pokud DATABASE_URL nastavena)
+  try {
+    await runMigrations();
+    if (await isDbAvailable()) {
+      const stats = await getWarehouseStats();
+      console.log(`Warehouse DB: ${stats.products} products, ${stats.sources} sources, ${stats.categories} categories`);
+    }
+  } catch (err) {
+    console.error('Warehouse DB migration error:', err);
+    console.log('Warehouse features will be unavailable');
+  }
+}
+
+startup().then(() => {
+  const server = app.listen(PORT, () => {
+    console.log(`\nVZ AI Tool API server running on http://localhost:${PORT}`);
+    console.log(`Input dir: ${INPUT_DIR}`);
+    console.log(`Output dir: ${OUTPUT_DIR}`);
+  });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log('\nShutting down...');
+    server.close();
+    await closePool();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 });
