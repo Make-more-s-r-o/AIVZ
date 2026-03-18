@@ -3,10 +3,32 @@
  * Sleduje aplikované migrace v tabulce _migrations.
  */
 import { readdir, readFile } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 import { getPool } from './db.js';
 
-const MIGRATIONS_DIR = new URL('../../../migrations', import.meta.url).pathname;
+// Resolve migrations dir robustně — funguje lokálně i v Docker kontejneru
+function findMigrationsDir(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  const thisDir = dirname(thisFile);
+
+  // Zkus relativní cestu z scripts/src/lib/ → scripts/migrations/
+  const candidates = [
+    join(thisDir, '..', '..', 'migrations'),        // scripts/src/lib → scripts/migrations
+    join(thisDir, '..', '..', '..', 'migrations'),   // fallback
+    join(thisDir, '..', 'migrations'),               // pokud je v scripts/src/
+    '/app/scripts/migrations',                       // Docker absolute
+  ];
+
+  for (const dir of candidates) {
+    if (existsSync(dir)) return dir;
+  }
+
+  return candidates[0]; // default — bude hlásit "no migrations directory found"
+}
+
+const MIGRATIONS_DIR = findMigrationsDir();
 
 export async function runMigrations(): Promise<void> {
   const pool = getPool();
