@@ -1,22 +1,11 @@
 import type { WarehouseProduct } from '../../lib/api';
+import { PriceAgeDot, formatPrice } from './shared';
 
 interface ProductCardProps {
   product: WarehouseProduct;
   onClick: () => void;
   onMouseEnter?: () => void;
 }
-
-function PriceAgeDot({ fetchedAt }: { fetchedAt?: string | null }) {
-  if (!fetchedAt) return null;
-  const days = Math.floor((Date.now() - new Date(fetchedAt).getTime()) / 86400000);
-  const color = days < 7 ? 'bg-green-500' : days < 30 ? 'bg-yellow-500' : 'bg-red-500';
-  return <span className={`inline-block h-2 w-2 rounded-full ${color}`} title={`${days}d`} />;
-}
-
-const formatPrice = (price: number | null | undefined) => {
-  if (!price) return '-';
-  return new Intl.NumberFormat('cs-CZ', { style: 'currency', currency: 'CZK', maximumFractionDigits: 0 }).format(price);
-};
 
 export default function ProductCard({ product, onClick, onMouseEnter }: ProductCardProps) {
   return (

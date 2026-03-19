@@ -8,21 +8,46 @@ import {
 import ProductList from './ProductList';
 import ImportWizard from './ImportWizard';
 import { useHashParams } from '../../hooks/useHashParams';
+import { formatPrice, FreshnessDot, JobStatusBadge } from './shared';
 
 type Tab = 'dashboard' | 'products' | 'import' | 'sources' | 'scraping';
+
+const TAB_PATHS: Record<Tab, string> = {
+  dashboard: '/warehouse',
+  products: '/warehouse/products',
+  import: '/warehouse/import',
+  scraping: '/warehouse/scraping',
+  sources: '/warehouse/sources',
+};
 
 function navigate(path: string) {
   window.location.hash = path;
 }
 
-export default function WarehouseDashboard() {
-  const [tab, setTab] = useState<Tab>('dashboard');
+interface WarehouseDashboardProps {
+  initialTab?: Tab;
+}
+
+export default function WarehouseDashboard({ initialTab = 'dashboard' }: WarehouseDashboardProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const { getParam, setParams } = useHashParams();
   const [viewMode, setViewMode] = useState<'list' | 'grid'>(() =>
     (localStorage.getItem('warehouse_view_mode') as 'list' | 'grid') || 'list'
   );
 
-  const { data: stats, error } = useQuery({
+  // Sync tab s URL při změně z App.tsx
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
+
+  const handleTabChange = useCallback((newTab: Tab) => {
+    setTab(newTab);
+    // Zachovat query params při přepnutí na products
+    const hash = window.location.hash.slice(1) || '/';
+    const qIdx = hash.indexOf('?');
+    const qs = qIdx !== -1 ? hash.slice(qIdx) : '';
+    navigate(newTab === 'products' ? `${TAB_PATHS[newTab]}${qs}` : TAB_PATHS[newTab]);
+  }, []);
+
+  const { data: stats, error, isLoading: isStatsLoading } = useQuery({
     queryKey: ['warehouse-stats'],
     queryFn: getWarehouseStats,
     staleTime: 30000,
@@ -61,14 +86,14 @@ export default function WarehouseDashboard() {
   if (error) {
     return (
       <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-center">
-        <p className="text-red-700">Cenovy sklad neni dostupny</p>
+        <p className="text-red-700">Cenový sklad není dostupný</p>
         <p className="mt-1 text-sm text-red-500">{(error as Error).message}</p>
       </div>
     );
   }
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'dashboard', label: 'Prehled' },
+    { id: 'dashboard', label: 'Přehled' },
     { id: 'products', label: 'Produkty' },
     { id: 'import', label: 'Import' },
     { id: 'scraping', label: 'Scraping' },
@@ -79,10 +104,10 @@ export default function WarehouseDashboard() {
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Cenovy sklad</h2>
+          <h2 className="text-2xl font-bold text-gray-900">Cenový sklad</h2>
           {stats && (
             <p className="mt-1 text-sm text-gray-500">
-              {stats.products_active} aktivnich produktu | {stats.prices} cen | {stats.sources} zdroju
+              {stats.products_active} aktivních produktů | {stats.prices} cen | {stats.sources} zdroju
             </p>
           )}
         </div>
@@ -98,7 +123,7 @@ export default function WarehouseDashboard() {
             <button
               onClick={() => handleViewModeChange('grid')}
               className={`rounded px-2 py-1 text-xs ${viewMode === 'grid' ? 'bg-gray-100 font-medium' : 'text-gray-500'}`}
-              title="Mrizka"
+              title="Mřížka"
             >
               :::
             </button>
@@ -111,7 +136,7 @@ export default function WarehouseDashboard() {
           {tabs.map((t) => (
             <button
               key={t.id}
-              onClick={() => setTab(t.id)}
+              onClick={() => handleTabChange(t.id)}
               className={`border-b-2 px-1 py-2 text-sm font-medium ${
                 tab === t.id
                   ? 'border-blue-500 text-blue-600'
@@ -124,7 +149,7 @@ export default function WarehouseDashboard() {
         </nav>
       </div>
 
-      {tab === 'dashboard' && <DashboardPanel stats={stats} />}
+      {tab === 'dashboard' && <DashboardPanel stats={stats} isStatsLoading={isStatsLoading} />}
       {tab === 'products' && (
         <ProductList
           query={query}
@@ -151,7 +176,7 @@ export default function WarehouseDashboard() {
 // Dashboard Panel
 // ============================================================
 
-function DashboardPanel({ stats }: { stats: WarehouseStats | null | undefined }) {
+function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | null | undefined; isStatsLoading: boolean }) {
   const { data: quality } = useQuery({
     queryKey: ['warehouse-quality-stats'],
     queryFn: getWarehouseQualityStats,
@@ -164,46 +189,52 @@ function DashboardPanel({ stats }: { stats: WarehouseStats | null | undefined })
     staleTime: 30000,
   });
 
-  const formatPrice = (price: number | null | undefined) => {
-    if (price == null) return '-';
-    return new Intl.NumberFormat('cs-CZ', { style: 'currency', currency: 'CZK', maximumFractionDigits: 0 }).format(price);
-  };
-
   return (
     <div className="space-y-6">
       {/* Stats karty */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatCard label="Produkty" value={stats ? `${stats.products_active} / ${stats.products}` : '-'} sub="aktivni / celkem" />
-        <StatCard label="Cenove zaznamy" value={stats?.prices?.toString() || '-'} sub={quality ? `${quality.avg_prices_per_product.toFixed(1)} cen/produkt` : ''} />
-        <StatCard label="Zdroje dat" value={stats?.sources?.toString() || '-'} sub="aktivnich" />
-        <StatCard label="Posledni import" value={stats?.last_import ? new Date(stats.last_import).toLocaleDateString('cs') : '-'} sub="" />
-      </div>
+      {isStatsLoading ? (
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="rounded-lg border p-4 animate-pulse">
+              <div className="h-3 w-20 bg-gray-200 rounded mb-2" />
+              <div className="h-7 w-16 bg-gray-200 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <StatCard label="Produkty" value={stats ? `${stats.products_active} / ${stats.products}` : '-'} sub="aktivní / celkem" />
+          <StatCard label="Cenové záznamy" value={stats?.prices?.toString() || '-'} sub={quality ? `${quality.avg_prices_per_product.toFixed(1)} cen/produkt` : ''} />
+          <StatCard label="Zdroje dat" value={stats?.sources?.toString() || '-'} sub="aktivních" />
+          <StatCard label="Poslední import" value={stats?.last_import ? new Date(stats.last_import).toLocaleDateString('cs') : '-'} sub="" />
+        </div>
+      )}
 
       {/* Data quality metriky */}
       {quality && (
         <div className="rounded-lg border p-4">
           <h3 className="mb-3 text-sm font-semibold text-gray-700">Kvalita dat</h3>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-            <QualityMetric label="Ceny < 7 dni" value={quality.price_freshness.fresh} color="green" />
-            <QualityMetric label="Ceny 7-30 dni" value={quality.price_freshness.aging} color="yellow" />
-            <QualityMetric label="Ceny > 30 dni" value={quality.price_freshness.stale} color="red" />
+            <QualityMetric label="Ceny < 7 dní" value={quality.price_freshness.fresh} color="green" />
+            <QualityMetric label="Ceny 7-30 dní" value={quality.price_freshness.aging} color="yellow" />
+            <QualityMetric label="Ceny > 30 dní" value={quality.price_freshness.stale} color="red" />
             <QualityMetric label="Bez ceny" value={quality.products_without_price} color={quality.products_without_price > 0 ? 'red' : 'green'} />
-            <QualityMetric label="Bez obrazku" value={quality.products_without_image} color={quality.products_without_image > 0 ? 'yellow' : 'green'} />
+            <QualityMetric label="Bez obrázku" value={quality.products_without_image} color={quality.products_without_image > 0 ? 'yellow' : 'green'} />
             <QualityMetric label="Bez popisu" value={quality.products_without_description} color={quality.products_without_description > 0 ? 'yellow' : 'green'} />
           </div>
         </div>
       )}
 
-      {/* Rozlozeni kategorii */}
+      {/* Rozložení kategorií */}
       {quality && quality.categories_breakdown.length > 0 && (
         <div className="rounded-lg border">
-          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Rozlozeni kategorii</h3>
+          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Rozložení kategorií</h3>
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Kategorie</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-600">Produktu</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-600">Prumerna cena</th>
+                <th className="px-4 py-2 text-right font-medium text-gray-600">Produktů</th>
+                <th className="px-4 py-2 text-right font-medium text-gray-600">Průměrná cena</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -219,10 +250,10 @@ function DashboardPanel({ stats }: { stats: WarehouseStats | null | undefined })
         </div>
       )}
 
-      {/* Posledni scraping joby */}
+      {/* Poslední scraping joby */}
       {jobs && jobs.length > 0 && (
         <div className="rounded-lg border">
-          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Poslednich 5 scraping jobu</h3>
+          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Posledních 5 scraping jobů</h3>
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
               <tr>
@@ -233,7 +264,7 @@ function DashboardPanel({ stats }: { stats: WarehouseStats | null | undefined })
               </tr>
             </thead>
             <tbody className="divide-y">
-              {jobs.map((j: any) => (
+              {jobs.map((j) => (
                 <tr key={j.id} className="hover:bg-gray-50">
                   <td className="px-4 py-2">{j.source_name}</td>
                   <td className="px-4 py-2">
@@ -282,30 +313,9 @@ function QualityMetric({ label, value, color }: { label: string; value: number; 
   );
 }
 
-function JobStatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    pending: 'bg-yellow-100 text-yellow-700',
-    running: 'bg-blue-100 text-blue-700',
-    done: 'bg-green-100 text-green-700',
-    error: 'bg-red-100 text-red-700',
-  };
-  return (
-    <span className={`rounded px-2 py-0.5 text-xs font-medium ${colors[status] || 'bg-gray-100'}`}>
-      {status}
-    </span>
-  );
-}
-
 // ============================================================
 // Source List
 // ============================================================
-
-function FreshnessDot({ lastScrapedAt }: { lastScrapedAt: string | null }) {
-  if (!lastScrapedAt) return <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" title="Nikdy scrapovano" />;
-  const days = Math.floor((Date.now() - new Date(lastScrapedAt).getTime()) / 86400000);
-  const color = days < 7 ? 'bg-green-500' : days < 30 ? 'bg-yellow-500' : 'bg-red-500';
-  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} title={`${days}d`} />;
-}
 
 function SourceList() {
   const { data: sources } = useQuery({
@@ -314,7 +324,15 @@ function SourceList() {
     staleTime: 30000,
   });
 
-  if (!sources) return <div className="py-6 text-center text-gray-400">Nacitam...</div>;
+  if (!sources) return <div className="py-6 text-center text-gray-400">Načítám...</div>;
+
+  if (sources.length === 0) {
+    return (
+      <div className="py-12 text-center text-gray-400">
+        Žádné zdroje. Přidejte zdroj přes import.
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-lg border">
@@ -326,12 +344,12 @@ function SourceList() {
             <th className="px-4 py-3 text-left font-medium text-gray-600">Typ</th>
             <th className="px-4 py-3 text-left font-medium text-gray-600">URL</th>
             <th className="px-4 py-3 text-right font-medium text-gray-600">Cen</th>
-            <th className="px-4 py-3 text-left font-medium text-gray-600">Posledni scraping</th>
+            <th className="px-4 py-3 text-left font-medium text-gray-600">Poslední scraping</th>
             <th className="px-4 py-3 text-left font-medium text-gray-600">Podpora</th>
           </tr>
         </thead>
         <tbody className="divide-y">
-          {sources.map((s: any) => {
+          {sources.map((s) => {
             const supported = !s.scraper_config?.unsupported;
             return (
               <tr key={s.id} className={`hover:bg-gray-50 ${!supported ? 'opacity-60' : ''}`}>
@@ -351,10 +369,10 @@ function SourceList() {
                 </td>
                 <td className="px-4 py-3">
                   {supported ? (
-                    <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">Aktivni</span>
+                    <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">Aktivní</span>
                   ) : (
-                    <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" title={s.scraper_config?.reason || 'Nepodporovano'}>
-                      Nepodporovano
+                    <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" title={String(s.scraper_config?.reason ?? 'Nepodporováno')}>
+                      Nepodporováno
                     </span>
                   )}
                 </td>
@@ -387,7 +405,7 @@ function ScrapingPanel() {
   const pollingRef = useRef<ReturnType<typeof setInterval>>();
 
   // Filtrovat zdroje na podporovane
-  const sources = (allSources || []).filter((s: any) => {
+  const sources = (allSources || []).filter((s) => {
     if (s.type !== 'eshop' && s.type !== 'apify') return false;
     return !s.scraper_config?.unsupported;
   });
@@ -400,7 +418,7 @@ function ScrapingPanel() {
 
   // Polling dokud existuje running/pending job
   useEffect(() => {
-    const hasActive = jobs?.some((j: any) => j.status === 'running' || j.status === 'pending');
+    const hasActive = jobs?.some((j) => j.status === 'running' || j.status === 'pending');
     if (hasActive) {
       pollingRef.current = setInterval(() => refetchJobs(), 5000);
     }
@@ -419,7 +437,7 @@ function ScrapingPanel() {
         query: searchQuery || undefined,
         max_items: maxItems,
       });
-      setMessage(`Scraping spusten: ${result.source}`);
+      setMessage(`Scraping spuštěn: ${result.source}`);
       refetchJobs();
     } catch (err: any) {
       setMessage(`Chyba: ${err.message}`);
@@ -460,11 +478,11 @@ function ScrapingPanel() {
         </button>
         {isInfoOpen && (
           <div className="px-4 pb-4 text-sm text-blue-800 space-y-2">
-            <p><strong>Odkud bereme data:</strong> Produkty a ceny sbirame automaticky z e-shopu. Aktualne funguje Alza.cz. CZC a Heureka vyzaduji CSV import.</p>
-            <p><strong>Jak to funguje:</strong> Scraping stahne produkty, automaticky je sparuje (EAN/P/N/nazev) a aktualizuje ceny.</p>
-            <p><strong>Icecat enrichment:</strong> Dohleda detailni technicke parametry pres mezinarodni katalog.</p>
-            <p><strong>Freshness:</strong> Zelena = &lt; 7 dni, zluta = 7-30 dni, cervena = starsi. Pro nabidky overte ceny starsi 7 dni.</p>
-            <p><strong>CSV import:</strong> Na zalozce Import nahrajte CSV/Excel. System automaticky namapuje sloupce.</p>
+            <p><strong>Odkud bereme data:</strong> Produkty a ceny sbíráme automaticky z e-shopů. Aktuálně funguje Alza.cz. CZC a Heureka vyžadují CSV import.</p>
+            <p><strong>Jak to funguje:</strong> Scraping stáhne produkty, automaticky je spáruje (EAN/P/N/název) a aktualizuje ceny.</p>
+            <p><strong>Icecat enrichment:</strong> Dohledá detailní technické parametry přes mezinárodní katalog.</p>
+            <p><strong>Freshness:</strong> Zelená = &lt; 7 dní, žlutá = 7-30 dní, červená = starší. Pro nabídky ověřte ceny starší 7 dní.</p>
+            <p><strong>CSV import:</strong> Na záložce Import nahrajte CSV/Excel. Systém automaticky namapuje sloupce.</p>
           </div>
         )}
       </div>
@@ -479,7 +497,7 @@ function ScrapingPanel() {
             className="rounded border px-3 py-2 text-sm"
           >
             <option value="">Vyberte zdroj...</option>
-            {sources.map((s: any) => (
+            {sources.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
@@ -487,7 +505,7 @@ function ScrapingPanel() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Hledany vyraz (volitelne)"
+            placeholder="Hledaný výraz (volitelné)"
             className="flex-1 rounded border px-3 py-2 text-sm"
           />
           <input
@@ -503,7 +521,7 @@ function ScrapingPanel() {
             disabled={!selectedSource || loading}
             className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {loading ? 'Spoustim...' : 'Scrape'}
+            {loading ? 'Spouštím...' : 'Scrape'}
           </button>
           <button
             onClick={handleIcecatEnrich}
@@ -543,7 +561,7 @@ function ScrapingPanel() {
             </thead>
             <tbody className="divide-y">
               {!jobs || jobs.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Zadne joby</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400">Žádné joby</td></tr>
               ) : jobs.map((j: any) => (
                 <tr key={j.id} className="hover:bg-gray-50">
                   <td className="px-4 py-2">{j.source_name}</td>

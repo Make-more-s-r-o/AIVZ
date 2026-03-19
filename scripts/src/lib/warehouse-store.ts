@@ -84,6 +84,7 @@ export interface DataSource {
   is_active: boolean;
   last_scraped_at: string | null;
   created_at: string;
+  scraper_config: Record<string, unknown> | null;
 }
 
 export interface WarehouseStats {
@@ -331,7 +332,7 @@ export async function searchProducts(params: ProductSearchParams): Promise<{
     LEFT JOIN v_best_prices bp ON p.id = bp.product_id
     ${where}
   `;
-  const { rows: countRows } = await query<{ total: string }>(countSql, values);
+  const { rows: countRows } = await query<{ total: string }>(countSql, [...values]);
   const total = parseInt(countRows[0]?.total ?? '0');
 
   // Řazení

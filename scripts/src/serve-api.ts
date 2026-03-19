@@ -325,7 +325,8 @@ app.get('/api/health', async (_req, res) => {
       gotenberg = 'unreachable';
     }
   }
-  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0', gotenberg });
+  const db = await isDbAvailable() ? 'ok' : 'unavailable';
+  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0', gotenberg, db });
 });
 
 // --- Auth endpoints ---
@@ -1718,6 +1719,12 @@ app.post('/api/warehouse/embeddings/generate', requireWarehouse, async (req, res
 
 // --- Scraping API ---
 
+// D2: Rate limiting pro scraping — max 3 concurrent, max 10/h
+const scrapeRateLimit = { active: 0, hourlyCount: 0, hourlyReset: Date.now() };
+const SCRAPE_MAX_CONCURRENT = 3;
+const SCRAPE_MAX_HOURLY = 10;
+const SCRAPE_MAX_ITEMS_CAP = 500;
+
 // POST /api/warehouse/scrape — spustit scraping
 app.post('/api/warehouse/scrape', requireWarehouse, async (req, res) => {
   try {
@@ -1725,6 +1732,20 @@ app.post('/api/warehouse/scrape', requireWarehouse, async (req, res) => {
     if (!source_id) {
       return res.status(400).json({ error: 'source_id is required' });
     }
+
+    // Rate limit check
+    const now = Date.now();
+    if (now - scrapeRateLimit.hourlyReset > 3600000) {
+      scrapeRateLimit.hourlyCount = 0;
+      scrapeRateLimit.hourlyReset = now;
+    }
+    if (scrapeRateLimit.active >= SCRAPE_MAX_CONCURRENT) {
+      return res.status(429).json({ error: `Max ${SCRAPE_MAX_CONCURRENT} souběžných scraping jobů. Počkejte na dokončení.` });
+    }
+    if (scrapeRateLimit.hourlyCount >= SCRAPE_MAX_HOURLY) {
+      return res.status(429).json({ error: `Max ${SCRAPE_MAX_HOURLY} scraping jobů za hodinu.` });
+    }
+
     // Najdi zdroj
     const source = await import('./lib/warehouse-store.js').then(m => m.getDataSources())
       .then(sources => sources.find(s => s.id === source_id));
@@ -1735,13 +1756,17 @@ app.post('/api/warehouse/scrape', requireWarehouse, async (req, res) => {
       source_name: source.name,
       query: searchQuery,
       category_url,
-      max_items: max_items || 100,
+      max_items: Math.min(max_items || 100, SCRAPE_MAX_ITEMS_CAP),
       category_id,
     };
 
     // Spustit async — neblokovat request
-    const jobPromise = runScraping(config).catch(err => {
+    scrapeRateLimit.active++;
+    scrapeRateLimit.hourlyCount++;
+    runScraping(config).catch(err => {
       console.error('Scrape job failed:', err);
+    }).finally(() => {
+      scrapeRateLimit.active--;
     });
 
     res.json({ status: 'started', source: source.name });
@@ -1790,6 +1815,20 @@ async function startup() {
     if (await isDbAvailable()) {
       const stats = await getWarehouseStats();
       console.log(`Warehouse DB: ${stats.products} products, ${stats.sources} sources, ${stats.categories} categories`);
+
+      // D1: Cleanup stuck scrape jobs (zůstaly "running" po restartu serveru)
+      try {
+        const { query: dbQuery } = await import('./lib/db.js');
+        const { rows } = await dbQuery<{ count: string }>(
+          `UPDATE scrape_jobs SET status = 'error', errors = '["Server restarted"]'
+           WHERE status = 'running' RETURNING id`,
+        );
+        if (rows.length > 0) {
+          console.log(`Cleaned up ${rows.length} stuck scrape jobs`);
+        }
+      } catch (cleanupErr) {
+        console.error('Stuck job cleanup error:', cleanupErr);
+      }
     }
   } catch (err) {
     console.error('Warehouse DB migration error:', err);

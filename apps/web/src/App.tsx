@@ -10,10 +10,12 @@ import ProductDetailPage from './components/warehouse/ProductDetailPage';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
+type WarehouseTab = 'dashboard' | 'products' | 'import' | 'scraping' | 'sources';
+
 type Route =
   | { view: 'tenders'; tenderId: null }
   | { view: 'tenders'; tenderId: string }
-  | { view: 'warehouse' }
+  | { view: 'warehouse'; tab: WarehouseTab }
   | { view: 'warehouse-product'; productId: string }
   | { view: 'companies' }
   | { view: 'users' }
@@ -33,7 +35,12 @@ function parseHash(): Route {
     const productId = path.split('/')[3];
     if (productId) return { view: 'warehouse-product', productId };
   }
-  if (path === '/warehouse' || path.startsWith('/warehouse?') || path.startsWith('/warehouse')) return { view: 'warehouse' };
+  if (path === '/warehouse') return { view: 'warehouse', tab: 'dashboard' };
+  if (path === '/warehouse/products') return { view: 'warehouse', tab: 'products' };
+  if (path === '/warehouse/import') return { view: 'warehouse', tab: 'import' };
+  if (path === '/warehouse/scraping') return { view: 'warehouse', tab: 'scraping' };
+  if (path === '/warehouse/sources') return { view: 'warehouse', tab: 'sources' };
+  if (path === '/warehouse/dashboard') return { view: 'warehouse', tab: 'dashboard' };
   if (path === '/settings/companies') return { view: 'companies' };
   if (path === '/settings/users') return { view: 'users' };
   if (path === '/settings/password') return { view: 'change-password' };
@@ -67,6 +74,7 @@ export default function App() {
   const view = route.view;
   const selectedTenderId = route.view === 'tenders' ? route.tenderId : null;
   const warehouseProductId = route.view === 'warehouse-product' ? route.productId : null;
+  const warehouseTab = route.view === 'warehouse' ? route.tab : 'dashboard';
 
   const handleLogin = (loginUser: AuthUser) => {
     setUser(loginUser);
@@ -109,14 +117,14 @@ export default function App() {
               onClick={() => navigate('/warehouse')}
               className={`text-sm ${view === 'warehouse' || view === 'warehouse-product' ? 'font-medium text-blue-600' : 'text-gray-500 hover:text-gray-900'}`}
             >
-              Cenovy sklad
+              Cenový sklad
             </button>
             {selectedTenderId && view === 'tenders' && (
               <button
                 onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
-                &larr; Zpet na seznam
+                &larr; Zpět na seznam
               </button>
             )}
             {view !== 'tenders' && view !== 'warehouse' && (
@@ -124,7 +132,7 @@ export default function App() {
                 onClick={() => navigate('/')}
                 className="text-sm text-gray-500 hover:text-gray-900"
               >
-                &larr; Zakazky
+                &larr; Zakázky
               </button>
             )}
             {user ? (
@@ -181,7 +189,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8">
-        {view === 'warehouse' && <WarehouseDashboard />}
+        {view === 'warehouse' && <WarehouseDashboard initialTab={warehouseTab} />}
         {view === 'warehouse-product' && warehouseProductId && (
           <ProductDetailPage
             productId={warehouseProductId}

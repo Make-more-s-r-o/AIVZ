@@ -5,6 +5,7 @@ import {
   getWarehouseProduct,
 } from '../../lib/api';
 import ProductCard from './ProductCard';
+import { PriceAgeDot, formatPrice } from './shared';
 
 const PAGE_SIZE = 25;
 
@@ -20,14 +21,6 @@ interface ProductListProps {
   viewMode: 'list' | 'grid';
   onParamsChange: (params: Record<string, string | null>) => void;
   onProductClick: (productId: string) => void;
-}
-
-function PriceAgeDot({ fetchedAt }: { fetchedAt?: string | null }) {
-  if (!fetchedAt) return null;
-  const days = Math.floor((Date.now() - new Date(fetchedAt).getTime()) / 86400000);
-  const color = days < 7 ? 'bg-green-500' : days < 30 ? 'bg-yellow-500' : 'bg-red-500';
-  const title = days < 7 ? `${days}d - aktuální` : days < 30 ? `${days}d - stárnoucí` : `${days}d - zastaralé`;
-  return <span className={`inline-block h-2 w-2 rounded-full ${color}`} title={title} />;
 }
 
 function SortableHeader({ label, field, current, dir, onChange }: {
@@ -49,11 +42,6 @@ function SortableHeader({ label, field, current, dir, onChange }: {
   );
 }
 
-const formatPrice = (price: number | null | undefined) => {
-  if (!price) return '-';
-  return new Intl.NumberFormat('cs-CZ', { style: 'currency', currency: 'CZK', maximumFractionDigits: 0 }).format(price);
-};
-
 export default function ProductList({
   query, categoryId, manufacturer, priceMin, priceMax,
   sortBy, sortDir, page, viewMode, onParamsChange, onProductClick,
@@ -64,6 +52,14 @@ export default function ProductList({
   const [priceMaxInput, setPriceMaxInput] = useState(priceMax?.toString() || '');
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   const priceDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Cleanup debounce timers na unmount
+  useEffect(() => {
+    return () => {
+      clearTimeout(debounceRef.current);
+      clearTimeout(priceDebounceRef.current);
+    };
+  }, []);
 
   // Sync props to local input state
   useEffect(() => { setSearchInput(query); }, [query]);
@@ -84,7 +80,7 @@ export default function ProductList({
   });
   const manufacturers = manufacturersData || [];
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['warehouse-products', { q: query, categoryId, manufacturer, priceMin, priceMax, sortBy, sortDir, page }],
     queryFn: () => getWarehouseProducts({
       q: query || undefined,
@@ -175,7 +171,17 @@ export default function ProductList({
             min={0}
           />
         </div>
+        {priceMin != null && priceMax != null && priceMin > priceMax && (
+          <p className="mt-1 text-xs text-red-600">Min cena musí být menší než max</p>
+        )}
       </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          Chyba při načítání produktů: {(error as Error).message}
+        </div>
+      )}
 
       {/* Grid nebo List */}
       {viewMode === 'grid' ? (
@@ -258,7 +264,7 @@ export default function ProductList({
           <span>{total} produktů celkem</span>
           <div className="flex gap-2">
             <button
-              onClick={() => onParamsChange({ p: String(Math.max(0, page - 1)) })}
+              onClick={() => { onParamsChange({ p: String(Math.max(0, page - 1)) }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
               disabled={page === 0}
               className="rounded border px-3 py-1 disabled:opacity-30"
             >
@@ -268,7 +274,7 @@ export default function ProductList({
               {page + 1} / {totalPages}
             </span>
             <button
-              onClick={() => onParamsChange({ p: String(Math.min(totalPages - 1, page + 1)) })}
+              onClick={() => { onParamsChange({ p: String(Math.min(totalPages - 1, page + 1)) }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
               disabled={page >= totalPages - 1}
               className="rounded border px-3 py-1 disabled:opacity-30"
             >

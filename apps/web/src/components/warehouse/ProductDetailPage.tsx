@@ -1,28 +1,12 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getWarehouseProduct } from '../../lib/api';
+import { PriceAgeDot, formatPrice } from './shared';
 
 interface ProductDetailPageProps {
   productId: string;
   onBack: () => void;
 }
-
-function PriceAgeDot({ fetchedAt }: { fetchedAt?: string | null }) {
-  if (!fetchedAt) return null;
-  const days = Math.floor((Date.now() - new Date(fetchedAt).getTime()) / 86400000);
-  const color = days < 7 ? 'bg-green-500' : days < 30 ? 'bg-yellow-500' : 'bg-red-500';
-  const label = days < 7 ? 'aktuální' : days < 30 ? 'stárnoucí' : 'zastaralé';
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} />
-      <span className="text-xs text-gray-500">{days}d — {label}</span>
-    </span>
-  );
-}
-
-const formatPrice = (price: number | null | undefined) => {
-  if (price == null) return '-';
-  return new Intl.NumberFormat('cs-CZ', { style: 'currency', currency: 'CZK', maximumFractionDigits: 0 }).format(price);
-};
 
 export default function ProductDetailPage({ productId, onBack }: ProductDetailPageProps) {
   const { data: product, isLoading, error } = useQuery({
@@ -45,8 +29,12 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
     );
   }
 
+  const [copied, setCopied] = useState(false);
+
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -99,7 +87,7 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
               onClick={handleCopyLink}
               className="rounded border px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
             >
-              Kopírovat link
+              {copied ? 'Zkopírováno!' : 'Kopírovat link'}
             </button>
             <button
               onClick={onBack}
@@ -112,7 +100,7 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
       </div>
 
       {/* Cenová tabulka */}
-      {product.prices && product.prices.length > 0 && (
+      {product.prices?.length > 0 && (
         <div className="mb-6">
           <h3 className="text-lg font-semibold mb-2">Ceny</h3>
           <div className="rounded-lg border">
@@ -129,7 +117,7 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {product.prices.map((price: any, i: number) => (
+                {product.prices.map((price, i) => (
                   <tr key={i} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium">{price.source_name}</td>
                     <td className="px-4 py-3 text-right font-medium text-gray-900">
@@ -157,7 +145,7 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
                       {price.fetched_at ? new Date(price.fetched_at).toLocaleDateString('cs') : '-'}
                     </td>
                     <td className="px-4 py-3">
-                      <PriceAgeDot fetchedAt={price.fetched_at} />
+                      <PriceAgeDot fetchedAt={price.fetched_at} variant="dot-with-label" />
                     </td>
                   </tr>
                 ))}
@@ -169,22 +157,43 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
 
       {/* Parametry */}
       {product.parameters_normalized && Object.keys(product.parameters_normalized).length > 0 && (
-        <div className="mb-6">
-          <h3 className="text-lg font-semibold mb-2">Technické parametry</h3>
-          <div className="rounded-lg border">
-            <table className="w-full text-sm">
-              <tbody className="divide-y">
-                {Object.entries(product.parameters_normalized).map(([key, value]) => (
-                  <tr key={key} className="hover:bg-gray-50">
-                    <td className="px-4 py-2 font-medium text-gray-600 w-1/3">{key}</td>
-                    <td className="px-4 py-2 text-gray-900">{String(value)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ParametersTable parameters={product.parameters_normalized} />
       )}
+    </div>
+  );
+}
+
+const PARAMS_COLLAPSE_THRESHOLD = 15;
+
+function ParametersTable({ parameters }: { parameters: Record<string, unknown> }) {
+  const [expanded, setExpanded] = useState(false);
+  const entries = Object.entries(parameters);
+  const needsCollapse = entries.length > PARAMS_COLLAPSE_THRESHOLD;
+  const visible = needsCollapse && !expanded ? entries.slice(0, PARAMS_COLLAPSE_THRESHOLD) : entries;
+
+  return (
+    <div className="mb-6">
+      <h3 className="text-lg font-semibold mb-2">Technické parametry</h3>
+      <div className="rounded-lg border">
+        <table className="w-full text-sm">
+          <tbody className="divide-y">
+            {visible.map(([key, value]) => (
+              <tr key={key} className="hover:bg-gray-50">
+                <td className="px-4 py-2 font-medium text-gray-600 w-1/3">{key}</td>
+                <td className="px-4 py-2 text-gray-900">{String(value)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {needsCollapse && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full border-t px-4 py-2 text-sm text-blue-600 hover:bg-gray-50"
+          >
+            {expanded ? 'Skrýt' : `Zobrazit všech ${entries.length} parametrů`}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

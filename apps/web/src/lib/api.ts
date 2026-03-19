@@ -630,7 +630,22 @@ export async function getWarehouseProducts(params?: {
   return fetchJson(`/warehouse/products${qs ? '?' + qs : ''}`);
 }
 
-export async function getWarehouseProduct(id: string): Promise<WarehouseProduct & { prices: any[] }> {
+export interface ProductPrice {
+  product_id: string;
+  source_id: number;
+  source_name: string;
+  price_bez_dph: number;
+  price_s_dph: number | null;
+  currency: string;
+  availability: string | null;
+  stock_quantity: number | null;
+  delivery_days: number | null;
+  source_url: string | null;
+  source_sku: string | null;
+  fetched_at: string;
+}
+
+export async function getWarehouseProduct(id: string): Promise<WarehouseProduct & { prices: ProductPrice[] }> {
   return fetchJson(`/warehouse/products/${id}`);
 }
 
@@ -642,7 +657,19 @@ export async function getWarehouseManufacturers(): Promise<string[]> {
   return fetchJson('/warehouse/manufacturers');
 }
 
-export async function getWarehouseSources(): Promise<any[]> {
+export interface DataSourceWithDetails {
+  id: number;
+  name: string;
+  type: string;
+  base_url: string | null;
+  is_active: boolean;
+  last_scraped_at: string | null;
+  created_at: string;
+  price_count: number;
+  scraper_config: Record<string, unknown> | null;
+}
+
+export async function getWarehouseSources(): Promise<DataSourceWithDetails[]> {
   return fetchJson('/warehouse/sources');
 }
 
@@ -681,7 +708,21 @@ export async function startScraping(data: {
   return res.json();
 }
 
-export async function getScrapeJobs(limit = 20): Promise<any[]> {
+export interface ScrapeJob {
+  id: number;
+  source_id: number;
+  source_name: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  query: string | null;
+  items_found: number;
+  items_new: number;
+  items_updated: number;
+  items_price_changed: number;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export async function getScrapeJobs(limit = 20): Promise<ScrapeJob[]> {
   return fetchJson(`/warehouse/scrape/jobs?limit=${limit}`);
 }
 
