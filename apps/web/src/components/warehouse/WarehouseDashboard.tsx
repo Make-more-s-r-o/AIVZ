@@ -107,7 +107,7 @@ export default function WarehouseDashboard({ initialTab = 'dashboard' }: Warehou
           <h2 className="text-2xl font-bold text-gray-900">Cenový sklad</h2>
           {stats && (
             <p className="mt-1 text-sm text-gray-500">
-              {stats.products_active} aktivních produktů | {stats.prices} cen | {stats.sources} zdroju
+              {stats.products_active} aktivních produktů | {stats.prices} cen | {stats.sources} zdrojů
             </p>
           )}
         </div>
@@ -260,7 +260,7 @@ function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | nul
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Zdroj</th>
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Stav</th>
                 <th className="px-4 py-2 text-right font-medium text-gray-600">Nalezeno</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Cas</th>
+                <th className="px-4 py-2 text-left font-medium text-gray-600">Čas</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -554,9 +554,9 @@ function ScrapingPanel() {
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Dotaz</th>
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Stav</th>
                 <th className="px-4 py-2 text-right font-medium text-gray-600">Nalezeno</th>
-                <th className="px-4 py-2 text-right font-medium text-gray-600">Novych</th>
+                <th className="px-4 py-2 text-right font-medium text-gray-600">Nových</th>
                 <th className="px-4 py-2 text-right font-medium text-gray-600">Aktual.</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Cas</th>
+                <th className="px-4 py-2 text-left font-medium text-gray-600">Čas</th>
               </tr>
             </thead>
             <tbody className="divide-y">
