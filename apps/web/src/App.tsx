@@ -6,6 +6,7 @@ import UserManagement from './components/UserManagement';
 import ChangePasswordForm from './components/ChangePasswordForm';
 import CompanySettings from './components/CompanySettings';
 import WarehouseDashboard from './components/warehouse/WarehouseDashboard';
+import ProductDetailPage from './components/warehouse/ProductDetailPage';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
@@ -13,20 +14,29 @@ type Route =
   | { view: 'tenders'; tenderId: null }
   | { view: 'tenders'; tenderId: string }
   | { view: 'warehouse' }
+  | { view: 'warehouse-product'; productId: string }
   | { view: 'companies' }
   | { view: 'users' }
   | { view: 'change-password' };
 
 function parseHash(): Route {
   const hash = window.location.hash.slice(1) || '/';
-  if (hash.startsWith('/tender/')) {
-    const tenderId = hash.split('/')[2];
+  // Oddělení path od query params
+  const qIdx = hash.indexOf('?');
+  const path = qIdx === -1 ? hash : hash.slice(0, qIdx);
+
+  if (path.startsWith('/tender/')) {
+    const tenderId = path.split('/')[2];
     if (tenderId) return { view: 'tenders', tenderId };
   }
-  if (hash === '/warehouse') return { view: 'warehouse' };
-  if (hash === '/settings/companies') return { view: 'companies' };
-  if (hash === '/settings/users') return { view: 'users' };
-  if (hash === '/settings/password') return { view: 'change-password' };
+  if (path.startsWith('/warehouse/product/')) {
+    const productId = path.split('/')[3];
+    if (productId) return { view: 'warehouse-product', productId };
+  }
+  if (path === '/warehouse' || path.startsWith('/warehouse?') || path.startsWith('/warehouse')) return { view: 'warehouse' };
+  if (path === '/settings/companies') return { view: 'companies' };
+  if (path === '/settings/users') return { view: 'users' };
+  if (path === '/settings/password') return { view: 'change-password' };
   return { view: 'tenders', tenderId: null };
 }
 
@@ -56,6 +66,7 @@ export default function App() {
 
   const view = route.view;
   const selectedTenderId = route.view === 'tenders' ? route.tenderId : null;
+  const warehouseProductId = route.view === 'warehouse-product' ? route.productId : null;
 
   const handleLogin = (loginUser: AuthUser) => {
     setUser(loginUser);
@@ -96,7 +107,7 @@ export default function App() {
           <div className="flex items-center gap-4">
             <button
               onClick={() => navigate('/warehouse')}
-              className={`text-sm ${view === 'warehouse' ? 'font-medium text-blue-600' : 'text-gray-500 hover:text-gray-900'}`}
+              className={`text-sm ${view === 'warehouse' || view === 'warehouse-product' ? 'font-medium text-blue-600' : 'text-gray-500 hover:text-gray-900'}`}
             >
               Cenovy sklad
             </button>
@@ -171,6 +182,12 @@ export default function App() {
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {view === 'warehouse' && <WarehouseDashboard />}
+        {view === 'warehouse-product' && warehouseProductId && (
+          <ProductDetailPage
+            productId={warehouseProductId}
+            onBack={() => window.history.back()}
+          />
+        )}
         {view === 'companies' && <CompanySettings />}
         {view === 'users' && user && (
           <UserManagement currentUserId={user.id} />

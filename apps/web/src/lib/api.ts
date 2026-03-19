@@ -552,6 +552,7 @@ export interface WarehouseProduct {
   is_active: boolean;
   best_price?: number | null;
   best_price_source?: string | null;
+  best_price_fetched_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -590,6 +591,20 @@ export async function getWarehouseStats(): Promise<WarehouseStats> {
   return fetchJson('/warehouse/stats');
 }
 
+export interface WarehouseQualityStats {
+  price_freshness: { fresh: number; aging: number; stale: number };
+  products_without_price: number;
+  products_without_image: number;
+  products_without_description: number;
+  categories_breakdown: Array<{ category_id: number; category_nazev: string; product_count: number; avg_price: number | null }>;
+  sources_breakdown: Array<{ source_id: number; source_name: string; product_count: number; price_count: number; last_scraped_at: string | null }>;
+  avg_prices_per_product: number;
+}
+
+export async function getWarehouseQualityStats(): Promise<WarehouseQualityStats> {
+  return fetchJson('/warehouse/quality-stats');
+}
+
 export async function getWarehouseProducts(params?: {
   q?: string;
   category_id?: number;
@@ -598,6 +613,8 @@ export async function getWarehouseProducts(params?: {
   offset?: number;
   sort_by?: string;
   sort_dir?: string;
+  price_min?: number;
+  price_max?: number;
 }): Promise<{ items: WarehouseProduct[]; total: number }> {
   const searchParams = new URLSearchParams();
   if (params?.q) searchParams.set('q', params.q);
@@ -607,6 +624,8 @@ export async function getWarehouseProducts(params?: {
   if (params?.offset) searchParams.set('offset', String(params.offset));
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by);
   if (params?.sort_dir) searchParams.set('sort_dir', params.sort_dir);
+  if (params?.price_min != null) searchParams.set('price_min', String(params.price_min));
+  if (params?.price_max != null) searchParams.set('price_max', String(params.price_max));
   const qs = searchParams.toString();
   return fetchJson(`/warehouse/products${qs ? '?' + qs : ''}`);
 }

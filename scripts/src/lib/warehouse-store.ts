@@ -132,6 +132,105 @@ export async function getWarehouseStats(): Promise<WarehouseStats> {
   };
 }
 
+// Rozšířené statistiky kvality dat pro warehouse dashboard
+export interface WarehouseQualityStats {
+  price_freshness: { fresh: number; aging: number; stale: number }; // <7d, 7-30d, >30d
+  products_without_price: number;
+  products_without_image: number;
+  products_without_description: number;
+  categories_breakdown: Array<{ category_id: number; category_nazev: string; product_count: number; avg_price: number | null }>;
+  sources_breakdown: Array<{ source_id: number; source_name: string; product_count: number; price_count: number; last_scraped_at: string | null }>;
+  avg_prices_per_product: number;
+}
+
+export async function getWarehouseQualityStats(): Promise<WarehouseQualityStats> {
+  const [
+    freshness,
+    withoutPrice,
+    withoutImage,
+    withoutDescription,
+    categoriesBreakdown,
+    sourcesBreakdown,
+    avgPrices,
+  ] = await Promise.all([
+    // Čerstvost cen: kolik je fresh (<7d), aging (7-30d), stale (>30d)
+    queryOne<{ fresh: string; aging: string; stale: string }>(`
+      SELECT
+        COALESCE(SUM(CASE WHEN fetched_at > NOW() - INTERVAL '7 days' THEN 1 ELSE 0 END), 0) as fresh,
+        COALESCE(SUM(CASE WHEN fetched_at <= NOW() - INTERVAL '7 days' AND fetched_at > NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END), 0) as aging,
+        COALESCE(SUM(CASE WHEN fetched_at <= NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END), 0) as stale
+      FROM product_prices_current
+    `),
+    // Produkty bez ceny
+    queryOne<{ count: string }>(`
+      SELECT count(*) as count FROM products p
+      LEFT JOIN product_prices_current ppc ON p.id = ppc.product_id
+      WHERE ppc.product_id IS NULL AND p.is_active = true
+    `),
+    // Produkty bez obrázku
+    queryOne<{ count: string }>(`
+      SELECT count(*) as count FROM products WHERE image_url IS NULL AND is_active = true
+    `),
+    // Produkty bez popisu
+    queryOne<{ count: string }>(`
+      SELECT count(*) as count FROM products WHERE description IS NULL AND is_active = true
+    `),
+    // Rozložení podle kategorií s průměrnou cenou
+    query<{ category_id: number; category_nazev: string; product_count: string; avg_price: number | null }>(`
+      SELECT pc.id as category_id, pc.nazev as category_nazev,
+             count(p.id)::int as product_count,
+             avg(bp.price_bez_dph) as avg_price
+      FROM product_categories pc
+      LEFT JOIN products p ON p.category_id = pc.id AND p.is_active = true
+      LEFT JOIN v_best_prices bp ON p.id = bp.product_id
+      GROUP BY pc.id, pc.nazev
+      ORDER BY count(p.id) DESC
+    `),
+    // Rozložení podle zdrojů s počtem cen
+    query<{ source_id: number; source_name: string; product_count: string; price_count: string; last_scraped_at: string | null }>(`
+      SELECT ds.id as source_id, ds.name as source_name,
+             count(DISTINCT ppc.product_id)::int as product_count,
+             count(ppc.product_id)::int as price_count,
+             ds.last_scraped_at
+      FROM data_sources ds
+      LEFT JOIN product_prices_current ppc ON ds.id = ppc.source_id
+      GROUP BY ds.id, ds.name, ds.last_scraped_at
+      ORDER BY count(ppc.product_id) DESC
+    `),
+    // Průměrný počet cen na produkt (kolik zdrojů má typicky produkt)
+    queryOne<{ avg_prices: string }>(`
+      SELECT COALESCE(avg(cnt), 0) as avg_prices FROM (
+        SELECT count(*) as cnt FROM product_prices_current GROUP BY product_id
+      ) sub
+    `),
+  ]);
+
+  return {
+    price_freshness: {
+      fresh: parseInt(freshness?.fresh ?? '0'),
+      aging: parseInt(freshness?.aging ?? '0'),
+      stale: parseInt(freshness?.stale ?? '0'),
+    },
+    products_without_price: parseInt(withoutPrice?.count ?? '0'),
+    products_without_image: parseInt(withoutImage?.count ?? '0'),
+    products_without_description: parseInt(withoutDescription?.count ?? '0'),
+    categories_breakdown: categoriesBreakdown.rows.map((r) => ({
+      category_id: r.category_id,
+      category_nazev: r.category_nazev,
+      product_count: parseInt(String(r.product_count)),
+      avg_price: r.avg_price ? parseFloat(String(r.avg_price)) : null,
+    })),
+    sources_breakdown: sourcesBreakdown.rows.map((r) => ({
+      source_id: r.source_id,
+      source_name: r.source_name,
+      product_count: parseInt(String(r.product_count)),
+      price_count: parseInt(String(r.price_count)),
+      last_scraped_at: r.last_scraped_at,
+    })),
+    avg_prices_per_product: parseFloat(avgPrices?.avg_prices ?? '0'),
+  };
+}
+
 // ============================================================
 // Kategorie
 // ============================================================
@@ -265,7 +364,8 @@ export async function searchProducts(params: ProductSearchParams): Promise<{
            p.image_url, p.hmotnost_kg, p.zaruka_mesice,
            p.is_active, p.zdroj_dat, p.created_at, p.updated_at,
            pc.slug as category_slug, pc.nazev as category_nazev,
-           bp.price_bez_dph as best_price, ds.name as best_price_source
+           bp.price_bez_dph as best_price, ds.name as best_price_source,
+           bp.fetched_at as best_price_fetched_at
     FROM products p
     LEFT JOIN product_categories pc ON p.category_id = pc.id
     LEFT JOIN v_best_prices bp ON p.id = bp.product_id
@@ -545,11 +645,15 @@ export async function getPriceHistory(
 // Datové zdroje
 // ============================================================
 
-export async function getDataSources(): Promise<DataSource[]> {
-  const { rows } = await query<DataSource>(
-    'SELECT * FROM data_sources ORDER BY name',
+export async function getDataSources(): Promise<(DataSource & { price_count: number; scraper_config: any })[]> {
+  const { rows } = await query(
+    `SELECT ds.*,
+            COALESCE(pc.cnt, 0)::int as price_count
+     FROM data_sources ds
+     LEFT JOIN (SELECT source_id, count(*) as cnt FROM product_prices_current GROUP BY source_id) pc ON ds.id = pc.source_id
+     ORDER BY ds.name`,
   );
-  return rows;
+  return rows as (DataSource & { price_count: number; scraper_config: any })[];
 }
 
 export async function createDataSource(input: {

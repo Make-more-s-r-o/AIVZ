@@ -29,7 +29,7 @@ import type { DocSlotType } from './lib/doc-slots.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
-  getWarehouseStats, searchProducts, getProduct, createProduct,
+  getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
   getDataSources, getManufacturers, getProductPrices, getPriceHistory,
   upsertPrice,
@@ -1492,6 +1492,16 @@ const requireWarehouse = async (_req: any, res: any, next: any) => {
 app.get('/api/warehouse/stats', requireWarehouse, async (_req, res) => {
   try {
     const stats = await getWarehouseStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/warehouse/quality-stats — rozšířené statistiky kvality dat
+app.get('/api/warehouse/quality-stats', requireWarehouse, async (_req, res) => {
+  try {
+    const stats = await getWarehouseQualityStats();
     res.json(stats);
   } catch (err) {
     res.status(500).json({ error: String(err) });

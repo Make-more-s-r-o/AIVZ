@@ -1,5 +1,6 @@
 /**
- * Apify client pro scraping českých e-shopů (Alza.cz, Heureka.cz).
+ * Apify client pro scraping českých e-shopů.
+ * Používá apify~e-commerce-scraping-tool actor pro Alza.cz (a další marketplace).
  * Spouští Apify Actors, stahuje výsledky, ukládá do warehouse.
  */
 import { query, queryOne } from './db.js';
@@ -8,11 +9,15 @@ import { normalizeParameters } from './param-normalizer.js';
 
 const APIFY_API_URL = 'https://api.apify.com/v2';
 
-// Známé Apify Actors pro české e-shopy
+// Apify actor pro e-commerce scraping (stejný jako v CLI orchestrátoru)
 const ACTORS = {
-  alza: 'apify/web-scraper', // Generic — custom config pro Alza
-  heureka: 'apify/web-scraper',
+  alza: 'apify~e-commerce-scraping-tool',
 } as const;
+
+// Mapování zdrojů na marketplace domény
+const MARKETPLACE_MAP: Record<string, string> = {
+  'alza': 'www.alza.cz',
+};
 
 // ============================================================
 // Typy
@@ -91,78 +96,78 @@ async function getDatasetItems(datasetId: string, limit = 1000): Promise<any[]> 
 }
 
 // ============================================================
-// Alza.cz scraping
+// E-commerce scraping (apify~e-commerce-scraping-tool)
 // ============================================================
 
-function buildAlzaInput(config: ScrapeConfig): Record<string, unknown> {
-  const startUrls: Array<{ url: string }> = [];
+/** Sestaví input pro e-commerce scraping actor */
+function buildEcommerceInput(config: ScrapeConfig): Record<string, unknown> {
+  const marketplace = MARKETPLACE_MAP[config.source_name] || 'www.alza.cz';
 
+  // Pokud je zadaná URL kategorie, použij startUrls místo keyword
   if (config.category_url) {
-    startUrls.push({ url: config.category_url });
-  } else if (config.query) {
-    startUrls.push({ url: `https://www.alza.cz/search.htm?exps=${encodeURIComponent(config.query)}` });
+    return {
+      startUrls: [{ url: config.category_url }],
+      marketplaces: [marketplace],
+      maxProductResults: config.max_items || 100,
+      additionalProperties: true,
+    };
   }
 
   return {
-    startUrls,
-    maxRequestsPerCrawl: config.max_items || 100,
-    pageFunction: `async function pageFunction(context) {
-      const { $, request, log } = context;
-      const results = [];
-      $('.browsingitem').each((i, el) => {
-        const $el = $(el);
-        const name = $el.find('.name').text().trim();
-        const price = $el.find('.price-box__price').text().replace(/[^\\d,]/g, '').replace(',', '.');
-        const url = $el.find('a.name').attr('href');
-        const img = $el.find('img.js-gallery-image').attr('src');
-        const ean = $el.attr('data-ean');
-        const avail = $el.find('.avlVal').text().trim();
-        if (name && price) {
-          results.push({
-            name,
-            price: parseFloat(price) || 0,
-            url: url ? 'https://www.alza.cz' + url : null,
-            image: img,
-            ean: ean || null,
-            availability: avail || null,
-            source: 'alza',
-          });
-        }
-      });
-      return results;
-    }`,
+    keyword: config.query || '',
+    marketplaces: [marketplace],
+    maxProductResults: config.max_items || 100,
+    additionalProperties: true,
   };
 }
 
-/** Transformuje Alza scrape data na warehouse produkty */
-function parseAlzaItem(item: any): {
+/** Transformuje e-commerce scrape data na warehouse produkty */
+function parseEcommerceItem(item: any): {
   product: Parameters<typeof upsertProduct>[0];
   price: { price_bez_dph: number; price_s_dph: number; source_url: string | null; availability: string | null };
 } | null {
-  if (!item.name || !item.price) return null;
+  if (!item.name || !item.offers?.price) return null;
 
-  // Extrahuj výrobce z názvu (první slovo)
-  const parts = item.name.split(/\s+/);
-  const manufacturer = parts[0] || 'Unknown';
-  const model = parts.slice(1).join(' ') || item.name;
+  // Výrobce — z brand.slogan nebo první slovo názvu
+  const manufacturer = item.brand?.slogan || item.name.split(/\s+/)[0] || 'Unknown';
 
-  const priceSDph = item.price;
-  const priceBezDph = Math.round((priceSDph / 1.21) * 100) / 100;
+  const priceSDph = item.offers.price;
+  const priceBezDph = item.additionalProperties?.currentPriceWithoutVAT
+    ?? Math.round((priceSDph / 1.21) * 100) / 100;
+
+  // Extrakce parametrů ze specifications pole
+  const params: Record<string, string> = {};
+  const specs = item.additionalProperties?.specifications;
+  if (specs && Array.isArray(specs)) {
+    for (const s of specs) {
+      let key = s.parameter;
+      // Oříznout příliš dlouhé klíče na první větu
+      if (key && key.length > 50) {
+        const m = key.match(/^[^.!?]+/);
+        if (m) key = m[0].trim();
+      }
+      if (key) {
+        params[key] = s.value;
+      }
+    }
+  }
 
   return {
     product: {
       manufacturer,
-      model: item.name, // Celý název jako model (AI rozliší)
-      ean: item.ean || null,
-      description: item.name,
+      model: item.name,
+      ean: null,
+      part_number: item.mpn || null,
+      description: item.description || null,
       image_url: item.image || null,
       zdroj_dat: 'apify',
+      parameters_normalized: Object.keys(params).length > 0 ? params : undefined,
     },
     price: {
       price_bez_dph: priceBezDph,
       price_s_dph: priceSDph,
       source_url: item.url || null,
-      availability: item.availability || null,
+      availability: item.additionalProperties?.availability || null,
     },
   };
 }
@@ -192,10 +197,14 @@ export async function runScraping(config: ScrapeConfig): Promise<ScrapeJobResult
   let itemsPriceChanged = 0;
 
   try {
+    // Určit actor ID podle zdroje
+    const sourceName = config.source_name.toLowerCase();
+    const actorId = (ACTORS as Record<string, string>)[sourceName] || ACTORS.alza;
+
     // Spustit Apify Actor
-    console.log(`Scrape: starting Apify actor for ${config.source_name}...`);
-    const input = buildAlzaInput(config);
-    const run = await runActor(ACTORS.alza, input, 600);
+    console.log(`Scrape: starting Apify actor ${actorId} for ${config.source_name}...`);
+    const input = buildEcommerceInput(config);
+    const run = await runActor(actorId, input, 600);
 
     if (run.status !== 'SUCCEEDED') {
       throw new Error(`Apify run status: ${run.status}`);
@@ -209,7 +218,7 @@ export async function runScraping(config: ScrapeConfig): Promise<ScrapeJobResult
     // Zpracovat a uložit
     for (const item of items) {
       try {
-        const parsed = parseAlzaItem(item);
+        const parsed = parseEcommerceItem(item);
         if (!parsed) continue;
 
         // Resolve manufacturer alias
@@ -235,8 +244,8 @@ export async function runScraping(config: ScrapeConfig): Promise<ScrapeJobResult
           ...parsed.price,
         });
 
-        // AI normalizace parametrů (pokud produkt nový)
-        if (created && parsed.product.description) {
+        // AI normalizace parametrů (pokud produkt nový a nemá je z e-commerce dat)
+        if (created && parsed.product.description && !parsed.product.parameters_normalized) {
           try {
             const params = await normalizeParameters(parsed.product.description);
             if (Object.keys(params).length > 0) {
