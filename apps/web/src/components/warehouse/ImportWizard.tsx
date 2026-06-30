@@ -5,16 +5,16 @@ import {
 } from '../../lib/api';
 
 const TARGET_FIELDS = [
-  { value: 'manufacturer', label: 'Vyrobce' },
-  { value: 'model', label: 'Model / Nazev' },
+  { value: 'manufacturer', label: 'Výrobce' },
+  { value: 'model', label: 'Model / Název' },
   { value: 'ean', label: 'EAN' },
-  { value: 'part_number', label: 'Katalogove cislo' },
+  { value: 'part_number', label: 'Katalogové číslo' },
   { value: 'description', label: 'Popis' },
   { value: 'price_bez_dph', label: 'Cena bez DPH' },
   { value: 'price_s_dph', label: 'Cena s DPH' },
   { value: 'category', label: 'Kategorie' },
-  { value: 'product_family', label: 'Produktova rada' },
-  { value: 'image_url', label: 'URL obrazku' },
+  { value: 'product_family', label: 'Produktová řada' },
+  { value: 'image_url', label: 'URL obrázku' },
   { value: 'availability', label: 'Dostupnost' },
   { value: 'stock_quantity', label: 'Sklad (ks)' },
   { value: 'source_url', label: 'URL produktu' },
@@ -118,16 +118,16 @@ export default function ImportWizard({ onImportDone }: Props) {
       <div>
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold">Mapovani sloupcu</h3>
+            <h3 className="text-lg font-semibold">Mapování sloupců</h3>
             <p className="text-sm text-gray-500">
-              {preview.filename} — {preview.total_rows} radku, {preview.columns.length} sloupcu
+              {preview.filename} — {preview.total_rows} řádků, {preview.columns.length} sloupců
             </p>
           </div>
           <button
             onClick={() => { setStep('upload'); setPreview(null); }}
             className="text-sm text-gray-500 hover:text-gray-700"
           >
-            Zrusit
+            Zrušit
           </button>
         </div>
 
@@ -158,7 +158,7 @@ export default function ImportWizard({ onImportDone }: Props) {
               onChange={(e) => setCategoryId(e.target.value ? Number(e.target.value) : undefined)}
               className="rounded border px-3 py-1.5 text-sm"
             >
-              <option value="">-- neurci --</option>
+              <option value="">-- neurčeno --</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>{c.parent_id ? '\u00A0\u00A0' : ''}{c.nazev}</option>
               ))}
@@ -171,7 +171,7 @@ export default function ImportWizard({ onImportDone }: Props) {
                 checked={enrichParams}
                 onChange={(e) => setEnrichParams(e.target.checked)}
               />
-              AI normalizace parametru
+              AI normalizace parametrů
             </label>
           </div>
         </div>
@@ -182,8 +182,8 @@ export default function ImportWizard({ onImportDone }: Props) {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-2 text-left font-medium text-gray-600">Sloupec v souboru</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Cilove pole</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Ukazka dat</th>
+                <th className="px-4 py-2 text-left font-medium text-gray-600">Cílové pole</th>
+                <th className="px-4 py-2 text-left font-medium text-gray-600">Ukázka dat</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -217,7 +217,7 @@ export default function ImportWizard({ onImportDone }: Props) {
         {/* Preview dat */}
         <details className="mb-4">
           <summary className="cursor-pointer text-sm text-gray-500 hover:text-gray-700">
-            Ukazka dat ({Math.min(10, preview.sample_rows.length)} radku)
+            Ukázka dat ({Math.min(10, preview.sample_rows.length)} řádků)
           </summary>
           <div className="mt-2 overflow-x-auto rounded border">
             <table className="w-full text-xs">
@@ -245,7 +245,7 @@ export default function ImportWizard({ onImportDone }: Props) {
           onClick={handleRunImport}
           className="rounded-md bg-green-600 px-6 py-2 text-sm text-white hover:bg-green-700"
         >
-          Spustit import ({preview.total_rows} radku)
+          Spustit import ({preview.total_rows} řádků)
         </button>
       </div>
     );
@@ -256,10 +256,10 @@ export default function ImportWizard({ onImportDone }: Props) {
     return (
       <div className="rounded-lg border p-8 text-center">
         <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
-        <p className="text-gray-600">Import probiha...</p>
+        <p className="text-gray-600">Import probíhá...</p>
         <p className="mt-1 text-sm text-gray-400">
-          Zpracovavam {preview?.total_rows} radku
-          {enrichParams && ' s AI normalizaci parametru'}
+          Zpracovávám {preview?.total_rows} řádků
+          {enrichParams && ' s AI normalizací parametrů'}
         </p>
       </div>
     );
@@ -269,19 +269,19 @@ export default function ImportWizard({ onImportDone }: Props) {
   if (step === 'done' && result) {
     return (
       <div className="rounded-lg border p-6">
-        <h3 className="mb-3 text-lg font-semibold text-green-700">Import dokoncen</h3>
+        <h3 className="mb-3 text-lg font-semibold text-green-700">Import dokončen</h3>
         <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
           <div className="rounded bg-green-50 p-3 text-center">
             <div className="text-2xl font-bold text-green-700">{result.imported}</div>
-            <div className="text-gray-500">Novych</div>
+            <div className="text-gray-500">Nových</div>
           </div>
           <div className="rounded bg-blue-50 p-3 text-center">
             <div className="text-2xl font-bold text-blue-700">{result.updated}</div>
-            <div className="text-gray-500">Aktualizovanych</div>
+            <div className="text-gray-500">Aktualizovaných</div>
           </div>
           <div className="rounded bg-gray-50 p-3 text-center">
             <div className="text-2xl font-bold text-gray-700">{result.skipped}</div>
-            <div className="text-gray-500">Preskoceno</div>
+            <div className="text-gray-500">Přeskočeno</div>
           </div>
           <div className="rounded bg-red-50 p-3 text-center">
             <div className="text-2xl font-bold text-red-700">{result.errors.length}</div>
@@ -297,7 +297,7 @@ export default function ImportWizard({ onImportDone }: Props) {
             <div className="mt-2 max-h-48 overflow-y-auto rounded border p-2 text-xs">
               {result.errors.map((e, i) => (
                 <div key={i} className="py-0.5">
-                  <span className="text-gray-500">Radek {e.row}:</span> {e.error}
+                  <span className="text-gray-500">Řádek {e.row}:</span> {e.error}
                 </div>
               ))}
             </div>
@@ -315,7 +315,7 @@ export default function ImportWizard({ onImportDone }: Props) {
             onClick={() => { setStep('upload'); setPreview(null); setResult(null); }}
             className="rounded-md border px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
           >
-            Dalsi import
+            Další import
           </button>
         </div>
       </div>

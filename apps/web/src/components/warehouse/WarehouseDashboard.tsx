@@ -104,9 +104,9 @@ export default function WarehouseDashboard({ initialTab = 'dashboard' }: Warehou
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Cenový sklad</h2>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>Cenový sklad</h2>
           {stats && (
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-sm" style={{ color: 'var(--text-secondary)' }}>
               {stats.products_active} aktivních produktů | {stats.prices} cen | {stats.sources} zdrojů
             </p>
           )}
@@ -212,8 +212,8 @@ function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | nul
 
       {/* Data quality metriky */}
       {quality && (
-        <div className="rounded-lg border p-4">
-          <h3 className="mb-3 text-sm font-semibold text-gray-700">Kvalita dat</h3>
+        <div className="rounded-lg border p-4" style={{ background: 'var(--surface-card)', borderColor: 'var(--border-default)' }}>
+          <h3 className="mb-3 text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>Kvalita dat</h3>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
             <QualityMetric label="Ceny < 7 dní" value={quality.price_freshness.fresh} color="green" />
             <QualityMetric label="Ceny 7-30 dní" value={quality.price_freshness.aging} color="yellow" />
@@ -227,8 +227,8 @@ function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | nul
 
       {/* Rozložení kategorií */}
       {quality && quality.categories_breakdown.length > 0 && (
-        <div className="rounded-lg border">
-          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Rozložení kategorií</h3>
+        <div className="rounded-lg border" style={{ background: 'var(--surface-card)', borderColor: 'var(--border-default)' }}>
+          <h3 className="px-4 py-3 text-sm font-semibold border-b" style={{ color: 'var(--text-secondary)' }}>Rozložení kategorií</h3>
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
               <tr>
@@ -252,8 +252,8 @@ function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | nul
 
       {/* Poslední scraping joby */}
       {jobs && jobs.length > 0 && (
-        <div className="rounded-lg border">
-          <h3 className="px-4 py-3 text-sm font-semibold text-gray-700 border-b">Posledních 5 scraping jobů</h3>
+        <div className="rounded-lg border" style={{ background: 'var(--surface-card)', borderColor: 'var(--border-default)' }}>
+          <h3 className="px-4 py-3 text-sm font-semibold border-b" style={{ color: 'var(--text-secondary)' }}>Posledních 5 scraping jobů</h3>
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
               <tr>
@@ -286,10 +286,10 @@ function DashboardPanel({ stats, isStatsLoading }: { stats: WarehouseStats | nul
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
-    <div className="rounded-lg border p-4">
-      <div className="text-xs font-medium text-gray-500">{label}</div>
-      <div className="mt-1 text-2xl font-bold text-gray-900">{value}</div>
-      {sub && <div className="mt-0.5 text-xs text-gray-400">{sub}</div>}
+    <div className="rounded-lg border p-4" style={{ background: 'var(--surface-card)', borderColor: 'var(--border-default)' }}>
+      <div className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</div>
+      <div className="mt-1 text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>{value}</div>
+      {sub && <div className="mt-0.5 text-xs" style={{ color: 'var(--text-tertiary)' }}>{sub}</div>}
     </div>
   );
 }
@@ -451,7 +451,7 @@ function ScrapingPanel() {
     setMessage(null);
     try {
       const result = await enrichWithIcecat(50);
-      setMessage(`Icecat: obohaceno ${result.enriched} produktu, nenalezeno ${result.not_found}`);
+      setMessage(`Icecat: obohaceno ${result.enriched} produktů, nenalezeno ${result.not_found}`);
     } catch (err: any) {
       setMessage(`Chyba: ${err.message}`);
     } finally {

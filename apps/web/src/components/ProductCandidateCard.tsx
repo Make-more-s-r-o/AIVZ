@@ -14,7 +14,7 @@ interface ProductCandidateCardProps {
 }
 
 export default function ProductCandidateCard({ product, isSelected }: ProductCandidateCardProps) {
-  const confidence = CONFIDENCE_LABELS[product.cena_spolehlivost] ?? { label: 'Nizka', color: 'bg-red-100 text-red-800' };
+  const confidence = CONFIDENCE_LABELS[product.cena_spolehlivost] ?? { label: 'Nízká', color: 'bg-red-100 text-red-800' };
 
   return (
     <div
