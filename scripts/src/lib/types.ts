@@ -73,6 +73,9 @@ export const TenderAnalysisSchema = z.object({
     jednotka: z.string().optional().nullable(),
     specifikace: z.string(),
     cast_id: z.string().optional(),  // references CastSchema.id
+    // Hard per-unit price cap incl. VAT (e.g. "Cena za kus nesmí přesáhnout 39.999,- Kč s DPH").
+    // Parsed from specifikace; null/undefined = no cap.
+    cena_max_s_dph: z.number().optional().nullable(),
   })),
   technicke_pozadavky: z.array(z.object({
     parametr: z.string(),
@@ -135,6 +138,7 @@ export const PolozkaMatchSchema = z.object({
   mnozstvi: z.number().optional(),
   jednotka: z.string().optional(),
   specifikace: z.string().optional(),
+  cena_max_s_dph: z.number().optional(),  // hard per-unit cap incl. VAT (carried from analysis)
   typ: z.enum(['produkt', 'prislusenstvi', 'sluzba']).default('produkt'),
   cast_id: z.string().optional(),    // references CastSchema.id
   kandidati: z.array(ProductCandidateSchema),

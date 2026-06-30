@@ -389,7 +389,10 @@ async function main() {
   }
 
   // 4D: Fill soupis XLSX files with matched prices
-  if (isMultiProduct && productMatch.polozky_match) {
+  if (isMultiProduct && productMatch.polozky_match && productMatch.polozky_match.length === 0) {
+    console.warn('  ⚠ No matched items (polozky_match is empty) — the binding soupis CANNOT be filled. Check the match step.');
+  }
+  if (isMultiProduct && productMatch.polozky_match && productMatch.polozky_match.length > 0) {
     const extractedTextPath = join(outputDir, 'extracted-text.json');
     if (existsSync(extractedTextPath)) {
       const extractedText: ExtractedText = JSON.parse(await readFile(extractedTextPath, 'utf-8'));
