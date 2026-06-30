@@ -6,3 +6,4 @@ export { Badge, type BadgeProps, type BadgeTone } from './Badge';
 export { Avatar, type AvatarProps } from './Avatar';
 export { Card, type CardProps } from './Card';
 export { Tabs, type TabsProps, type TabItem } from './Tabs';
+export { ToastProvider, useToast, type ToastTone } from './Toast';

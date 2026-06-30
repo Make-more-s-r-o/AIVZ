@@ -57,6 +57,14 @@ export function normalizeDecision(raw: string | null | undefined): Decision | nu
   return 'ZVAZIT';
 }
 
+/**
+ * effectiveStage — persistovaný lifecycle `status` (M2, zdroj pravdy) má přednost;
+ * když chybí (žádná DB / žádný záznam), spadne zpět na odvozenou fázi z pipeline kroků.
+ */
+export function effectiveStage(tender: { status?: StageKey | null; steps?: PipelineSteps }): StageKey {
+  return tender.status ?? deriveStage(tender.steps);
+}
+
 /** Days until an ISO deadline (negative = overdue). null if missing/invalid. */
 export function deadlineDays(iso: string | null | undefined): number | null {
   if (!iso) return null;

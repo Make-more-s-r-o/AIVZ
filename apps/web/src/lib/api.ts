@@ -1,5 +1,6 @@
 import { getJwt, clearAuth } from './auth';
 import type { TenderAnalysis, ProductMatch, ValidationReport } from '../types/tender';
+import type { StageKey } from './stages';
 
 const API_BASE = '/api';
 
@@ -39,6 +40,18 @@ export interface TenderSummary {
   inputFiles: string[];
   tenderId: string;
   steps: PipelineSteps;
+  // CRM (M2): persistovaný lifecycle stav + řešitel (null když není DB / není záznam).
+  status?: StageKey | null;
+  assignee?: string | null;
+}
+
+export interface ActivityEntry {
+  id: string;
+  tender_id: string;
+  type: string;
+  actor_id: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface PipelineSteps {
@@ -290,6 +303,55 @@ export async function renameTender(id: string, name: string): Promise<{ success:
     throw new Error(err.error || 'Failed to rename tender');
   }
   return res.json();
+}
+
+// --- CRM lifecycle status + aktivita (M2) ---
+
+/**
+ * Změna fáze zakázky přes state-machine guardy. Na zákaz (409) vyhodí Error s českým
+ * důvodem (pro guard toast); na chybějící DB (503) vyhodí Error s 'db_unavailable'.
+ */
+export async function setTenderStatus(
+  id: string,
+  status: StageKey,
+  reason?: string,
+): Promise<{ success: boolean; status: StageKey }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ status, reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se změnit stav');
+  }
+  return res.json();
+}
+
+export async function setTenderAssignee(
+  id: string,
+  assignee: string | null,
+): Promise<{ success: boolean; assignee: string | null }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/assignee`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ assignee }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se přiřadit řešitele');
+  }
+  return res.json();
+}
+
+export async function getActivity(id: string): Promise<ActivityEntry[]> {
+  const data = await fetchJson<{ activity: ActivityEntry[] }>(`/tenders/${id}/activity`);
+  return data.activity;
+}
+
+export async function getRecentActivity(): Promise<ActivityEntry[]> {
+  const data = await fetchJson<{ activity: ActivityEntry[] }>(`/activity/recent`);
+  return data.activity;
 }
 
 // --- AI Cost ---
