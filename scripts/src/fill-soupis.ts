@@ -13,7 +13,7 @@ export interface SoupisFillResult {
     soupisName: string;
     matchedItem: string | null;
     priceBezDph: number | null;
-    matchMethod: 'index' | 'fuzzy' | 'none';
+    matchMethod: 'cislo' | 'index' | 'fuzzy' | 'none';
   }>;
 }
 
@@ -34,6 +34,24 @@ function fuzzyMatch(a: string, b: string): boolean {
   return na.includes(nb) || nb.includes(na);
 }
 
+/**
+ * Read a cell as text, handling ExcelJS rich-text / formula / hyperlink objects.
+ * String(cell.value) on a rich-text cell yields '[object Object]', which silently
+ * breaks name matching and corrupts the audit log — so always go through this.
+ */
+function cellText(cell: ExcelJS.Cell): string {
+  const v = cell.value as any;
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map((rt: any) => rt.text || '').join('');
+    if ('result' in v) return v.result === null || v.result === undefined ? '' : String(v.result);
+    if ('text' in v) return v.text == null ? '' : String(v.text);
+    if (v instanceof Date) return v.toISOString();
+    return '';
+  }
+  return String(v);
+}
+
 export async function fillSoupisWithPrices(
   soupisPath: string,
   polozkyMatch: PolozkaMatch[],
@@ -49,22 +67,28 @@ export async function fillSoupisWithPrices(
 
   // Detect header row and price columns
   let headerRow = 0;
+  let cisloCol = 0;
   let nazevCol = 0;
   let unitPriceCol = 0;
   let totalPriceCol = 0;
   let mnozstviCol = 0;
 
-  // Search first 10 rows for header
-  for (let rowNum = 1; rowNum <= Math.min(10, sheet.rowCount); rowNum++) {
+  // Search first 50 rows for header. Some tender soupis have a long preamble before the
+  // data table (instructions, qualification text); e.g. N-485400 header is on row 22.
+  for (let rowNum = 1; rowNum <= Math.min(50, sheet.rowCount); rowNum++) {
     const row = sheet.getRow(rowNum);
     let hasNazev = false;
     let hasPrice = false;
 
     row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
-      const val = String(cell.value || '').trim();
+      const val = cellText(cell).trim();
       if (!val) return;
       const normalized = val.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+      // Item-number column (P.\u010d. / po\u0159adov\u00e9 \u010d\u00edslo) \u2014 stable matching key
+      if (!cisloCol && /^(p\.?\s*c\.?|por\.?\s*c|cislo|poradi|#)/i.test(normalized)) {
+        cisloCol = colNumber;
+      }
       // Name column
       if (/^(nazev|polozka|popis\s*poloz|oznacen)/i.test(normalized)) {
         nazevCol = colNumber;
@@ -119,11 +143,16 @@ export async function fillSoupisWithPrices(
     }
   }
 
-  // Build index map from filtered part items using part-local index (0-based within part)
+  // Build maps for matching soupis rows to priced items:
+  //  - byPolozkaIndex: stable key = analysis polozka_index (soupis "P.č." - 1)
+  //  - indexMap: part-local positional fallback
+  //  - nameMap: fuzzy-name fallback
+  const byPolozkaIndex = new Map<number, PolozkaMatch>();
   const indexMap = new Map<number, PolozkaMatch>();
   const nameMap = new Map<string, PolozkaMatch>();
   for (let i = 0; i < partItems.length; i++) {
     const pm = partItems[i];
+    if (typeof pm.polozka_index === 'number') byPolozkaIndex.set(pm.polozka_index, pm);
     indexMap.set(i, pm);  // part-local index
     nameMap.set(normalizeForMatching(pm.polozka_nazev), pm);
   }
@@ -135,28 +164,37 @@ export async function fillSoupisWithPrices(
 
   for (let rowNum = headerRow + 1; rowNum <= sheet.rowCount; rowNum++) {
     const row = sheet.getRow(rowNum);
-    const nameCell = row.getCell(nazevCol);
-    const nameVal = nameCell.value;
-    if (!nameVal || !String(nameVal).trim()) continue;
 
-    const name = String(nameVal).trim();
-    // Skip summary rows
-    if (/^(celkem|součet|total|suma)/i.test(name)) continue;
+    // Only fill actual table rows — those with a numeric item number (P.č.). Excludes the
+    // totals block and the per-item spec blocks ("Položka č. N ...") after the table (often
+    // merged across all columns, so their text would otherwise look like a data row).
+    const cisloText = cisloCol ? cellText(row.getCell(cisloCol)).trim() : '';
+    const isItemRow = cisloCol ? /^\d+\.?$/.test(cisloText) : true;
+    if (cisloCol && !isItemRow) continue;
 
-    // Try to find matching item
+    const name = cellText(row.getCell(nazevCol)).trim();
+    if (!name) continue;
+
+    // Skip summary rows (Czech: celkem / celková / součet ...)
+    if (/^(celkem|celkov|součet|soucet|total|suma)/i.test(name)) continue;
+
+    // Stable key: item number (P.č.) → polozka_index (P.č. - 1)
+    const pc: number | null = isItemRow && cisloText ? parseInt(cisloText.replace(/[^\d]/g, ''), 10) : null;
+
+    // Find matching item: 1) by P.č., 2) positional, 3) fuzzy name
     let matched: PolozkaMatch | undefined;
-    let matchMethod: 'index' | 'fuzzy' | 'none' = 'none';
+    let matchMethod: 'cislo' | 'index' | 'fuzzy' | 'none' = 'none';
 
-    // 1. Match by index (polozka_index corresponds to soupis row order, 0-based)
-    if (indexMap.has(dataRowIndex)) {
+    if (pc !== null && byPolozkaIndex.has(pc - 1)) {
+      matched = byPolozkaIndex.get(pc - 1);
+      matchMethod = 'cislo';
+    }
+    if (!matched && indexMap.has(dataRowIndex)) {
       matched = indexMap.get(dataRowIndex);
       matchMethod = 'index';
     }
-
-    // 2. Fallback: fuzzy name match
     if (!matched) {
-      const normalizedName = normalizeForMatching(name);
-      for (const [key, pm] of nameMap) {
+      for (const [, pm] of nameMap) {
         if (fuzzyMatch(name, pm.polozka_nazev)) {
           matched = pm;
           matchMethod = 'fuzzy';
@@ -169,21 +207,26 @@ export async function fillSoupisWithPrices(
       // Get the price (user-confirmed or AI-estimated)
       const override = matched.cenova_uprava;
       const selectedProduct = matched.kandidati[matched.vybrany_index];
-      const unitPrice = override?.nabidkova_cena_bez_dph ?? selectedProduct.cena_bez_dph;
+      const unitPrice = override?.nabidkova_cena_bez_dph ?? selectedProduct?.cena_bez_dph ?? 0;
+      const unitPriceSdph = override?.nabidkova_cena_s_dph ?? selectedProduct?.cena_s_dph ?? 0;
+
+      // C3: warn if the unit price breaches the per-item hard cap. We never add markers
+      // to the buyer's binding form (that could invalidate it) — validation flags it instead.
+      if (matched.cena_max_s_dph && unitPriceSdph > matched.cena_max_s_dph) {
+        console.warn(`  ⚠ Cap exceeded: "${matched.polozka_nazev}" ${unitPriceSdph} Kč s DPH > limit ${matched.cena_max_s_dph} Kč (row ${rowNum})`);
+      }
+      if (unitPrice <= 0) {
+        console.warn(`  ⚠ Zero/missing price for "${matched.polozka_nazev}" (row ${rowNum})`);
+      }
 
       // Write unit price
-      const priceCell = row.getCell(unitPriceCol);
-      priceCell.value = unitPrice;
+      row.getCell(unitPriceCol).value = unitPrice;
 
-      // If total price column exists and is NOT a formula, fill it too
+      // Write the per-row total as a static computed number so the binding offer is correct
+      // even in viewers that don't recalculate formulas (template cells are =G*H / shared formulas).
       if (totalPriceCol) {
-        const totalCell = row.getCell(totalPriceCol);
-        const isFormula = totalCell.value && typeof totalCell.value === 'object' && 'formula' in totalCell.value;
-        if (!isFormula) {
-          const qty = mnozstviCol ? (Number(row.getCell(mnozstviCol).value) || 1) : (matched.mnozstvi || 1);
-          totalCell.value = unitPrice * qty;
-        }
-        // If it IS a formula, leave it — Excel will recalculate
+        const qty = mnozstviCol ? (Number(cellText(row.getCell(mnozstviCol))) || 1) : (matched.mnozstvi || 1);
+        row.getCell(totalPriceCol).value = Math.round(unitPrice * qty * 100) / 100;
       }
 
       mappings.push({
@@ -206,6 +249,14 @@ export async function fillSoupisWithPrices(
     }
 
     dataRowIndex++;
+  }
+
+  // Completeness asserts: every priced item should land on a row, and no data row blank.
+  if (filledRows < partItems.length) {
+    console.warn(`  ⚠ Soupis fill incomplete: filled ${filledRows} rows but had ${partItems.length} priced items (${partItems.length - filledRows} unmatched) — check P.č./name alignment.`);
+  }
+  if (skippedRows > 0) {
+    console.warn(`  ⚠ Soupis fill: ${skippedRows} data rows had NO matching priced item (left blank).`);
   }
 
   // Save the filled workbook

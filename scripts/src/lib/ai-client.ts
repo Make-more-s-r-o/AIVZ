@@ -5,7 +5,11 @@ config({ path: new URL('../../../.env', import.meta.url).pathname });
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
-  timeout: 10 * 60 * 1000, // 10 minutes for large multi-item requests
+  // Cap per-request time so a stalled or rate-limited connection fails fast and the retry
+  // loop in callClaude() can recover, instead of hanging ~10 min on a single request
+  // (observed when the account ITPM limit was saturated). 3 min is ample for a 16k-token reply.
+  timeout: 3 * 60 * 1000,
+  maxRetries: 2,
 });
 
 export interface AICallResult {
@@ -72,13 +76,15 @@ export async function callClaude(
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await client.messages.create({
+      // Stream the response so long generations (large multi-item JSON) keep the connection
+      // alive and don't trip the request timeout; finalMessage() resolves with the full reply.
+      const response = await client.messages.stream({
         model: modelId,
         max_tokens: maxTokens,
         temperature,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
-      });
+      }).finalMessage();
 
       const content = response.content
         .filter((block): block is Anthropic.TextBlock => block.type === 'text')
