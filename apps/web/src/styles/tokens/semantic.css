@@ -1,0 +1,68 @@
+/* ============================================================
+   VZ CRM — Semantic color aliases
+   Reference these (not raw ramps) in components.
+   ============================================================ */
+:root {
+  /* Surfaces */
+  --surface-page:    var(--gray-50);   /* app body background */
+  --surface-card:    var(--white);     /* cards, panels, table */
+  --surface-sunken:  var(--gray-50);   /* inset wells, code blocks, ref tiles */
+  --surface-hover:   var(--gray-100);  /* row / menu-item hover */
+  --surface-selected: var(--blue-50);  /* selected row / active nav */
+  --surface-inverse: var(--gray-900);  /* tooltips, dark chips */
+
+  /* Text */
+  --text-primary:    var(--gray-900);  /* headings, key values */
+  --text-secondary:  var(--gray-500);  /* labels, meta, descriptions */
+  --text-tertiary:   var(--gray-400);  /* faint ids, hints */
+  --text-disabled:   var(--gray-300);
+  --text-on-accent:  var(--white);
+  --text-on-inverse: var(--gray-50);
+  --text-link:       var(--blue-600);
+
+  /* Borders */
+  --border-subtle:   var(--gray-100);
+  --border-default:  var(--gray-200);  /* default card / divider border */
+  --border-strong:   var(--gray-300);  /* inputs */
+  --border-focus:    var(--blue-500);
+
+  /* Primary accent */
+  --accent:          var(--blue-600);
+  --accent-hover:    var(--blue-700);
+  --accent-active:   var(--blue-800);
+  --accent-soft-bg:  var(--blue-50);
+  --accent-soft-fg:  var(--blue-700);
+  --accent-on:       var(--white);
+  --ring:            var(--blue-500);  /* focus ring color */
+
+  /* Semantic status — soft (badge) + solid (icon/text) pairs */
+  --success-bg:  var(--green-100);
+  --success-fg:  var(--green-800);
+  --success-solid: var(--green-600);
+  --success-soft-bg: var(--green-50);
+
+  --danger-bg:   var(--red-100);
+  --danger-fg:   var(--red-700);
+  --danger-solid: var(--red-600);
+  --danger-soft-bg: var(--red-50);
+
+  --warning-bg:  var(--amber-100);
+  --warning-fg:  var(--amber-800);
+  --warning-solid: var(--amber-500);
+  --warning-soft-bg: var(--amber-50);
+
+  --info-bg:     var(--blue-100);
+  --info-fg:     var(--blue-700);
+  --info-solid:  var(--blue-600);
+  --info-soft-bg: var(--blue-50);
+
+  /* Decision gate (GO / NOGO / ZVÁŽIT) — same as status by intent */
+  --go-bg: var(--green-100);    --go-fg: var(--green-800);
+  --nogo-bg: var(--red-100);    --nogo-fg: var(--red-700);
+  --zvazit-bg: var(--amber-100);--zvazit-fg: var(--amber-800);
+
+  /* Deadline countdown semantics */
+  --deadline-ok:     var(--gray-500);   /* > 3 days */
+  --deadline-soon:   var(--amber-600);  /* <= 3 days */
+  --deadline-overdue:var(--red-600);    /* past lhůta */
+}

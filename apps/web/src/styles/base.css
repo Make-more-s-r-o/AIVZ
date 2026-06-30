@@ -1,0 +1,25 @@
+/* ============================================================
+   VZ CRM — Base helpers on top of Tailwind preflight.
+   Tailwind's @tailwind base handles the element reset; here we
+   add the design-system body defaults + tabular / eyebrow helpers.
+   ============================================================ */
+
+/* Tabular figures helper — use on money / quantity / countdown */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* Uppercase eyebrow label */
+.eyebrow {
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* Thin, quiet scrollbars for dense admin surfaces (kanban, tables) */
+.vz-scroll::-webkit-scrollbar { height: 10px; width: 10px; }
+.vz-scroll::-webkit-scrollbar-thumb {
+  background: var(--gray-300); border-radius: var(--radius-full);
+  border: 2px solid var(--surface-page);
+}
+.vz-scroll::-webkit-scrollbar-track { background: transparent; }

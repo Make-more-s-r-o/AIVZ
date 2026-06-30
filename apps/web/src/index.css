@@ -1,7 +1,24 @@
+/* VZ CRM design-system tokens — must precede @tailwind (CSS @import ordering). */
+@import './styles/tokens/fonts.css';
+@import './styles/tokens/palette.css';
+@import './styles/tokens/semantic.css';
+@import './styles/tokens/stages.css';
+@import './styles/tokens/typography.css';
+@import './styles/tokens/layout.css';
+@import './styles/base.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+  background: var(--surface-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }

@@ -1,0 +1,43 @@
+/* ============================================================
+   VZ CRM — Typography tokens
+   Type family: IBM Plex Sans (UI + display) — excellent Czech
+   diacritics, professional/systematic feel fitting a public-
+   tender tool. IBM Plex Mono for IDs, codes, money columns.
+   ============================================================ */
+:root {
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system,
+               'Segoe UI', Roboto, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Code',
+               Menlo, Consolas, monospace;
+
+  /* Font sizes (px) — dense admin scale */
+  --font-size-2xs:  10px;  /* micro meta (cost chips, step price) */
+  --font-size-xs:   12px;  /* meta, labels, badges */
+  --font-size-sm:   14px;  /* body default in tables/cards */
+  --font-size-base: 16px;  /* base body */
+  --font-size-lg:   18px;  /* section titles */
+  --font-size-xl:   20px;  /* page H1 in app header */
+  --font-size-2xl:  24px;  /* dashboard KPI numbers */
+  --font-size-3xl:  30px;  /* big KPI / hero */
+  --font-size-4xl:  36px;
+
+  /* Line heights */
+  --leading-none:    1;
+  --leading-tight:   1.25;
+  --leading-snug:    1.375;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.625;
+
+  /* Weights (IBM Plex Sans) */
+  --weight-light:    300;
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* Letter spacing */
+  --tracking-tight:  -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide:   0.02em;
+  --tracking-caps:   0.06em;  /* uppercase eyebrow labels */
+}

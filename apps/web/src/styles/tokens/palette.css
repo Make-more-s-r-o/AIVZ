@@ -1,0 +1,90 @@
+/* ============================================================
+   VZ CRM — Base color palette (primitive ramps)
+   Honors the existing app's Tailwind-default usage:
+   blue-600 accent, neutral gray, semantic green/red/amber.
+   These are raw values; semantic aliases live in semantic.css.
+   ============================================================ */
+:root {
+  /* Brand blue (primary accent — app uses blue-600 today) */
+  --blue-50:  #eff6ff;
+  --blue-100: #dbeafe;
+  --blue-200: #bfdbfe;
+  --blue-300: #93c5fd;
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --blue-600: #2563eb;
+  --blue-700: #1d4ed8;
+  --blue-800: #1e40af;
+  --blue-900: #1e3a8a;
+  --blue-950: #172554;
+
+  /* Neutral gray (cool — matches bg-gray-50 / text-gray-900) */
+  --gray-50:  #f9fafb;
+  --gray-100: #f3f4f6;
+  --gray-200: #e5e7eb;
+  --gray-300: #d1d5db;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-600: #4b5563;
+  --gray-700: #374151;
+  --gray-800: #1f2937;
+  --gray-900: #111827;
+  --gray-950: #030712;
+
+  /* Success green (done / GO / vysoká spolehlivost / Vyhráno) */
+  --green-50:  #f0fdf4;
+  --green-100: #dcfce7;
+  --green-200: #bbf7d0;
+  --green-500: #22c55e;
+  --green-600: #16a34a;
+  --green-700: #15803d;
+  --green-800: #166534;
+
+  /* Danger red (error / NOGO / nízká / Prohráno) */
+  --red-50:  #fef2f2;
+  --red-100: #fee2e2;
+  --red-200: #fecaca;
+  --red-500: #ef4444;
+  --red-600: #dc2626;
+  --red-700: #b91c1c;
+  --red-800: #991b1b;
+
+  /* Warning amber (ZVÁŽIT / střední / blížící se lhůta) */
+  --amber-50:  #fffbeb;
+  --amber-100: #fef3c7;
+  --amber-200: #fde68a;
+  --amber-500: #f59e0b;
+  --amber-600: #d97706;
+  --amber-700: #b45309;
+  --amber-800: #92400e;
+
+  /* Extended hues for the lifecycle stage system */
+  --sky-50:  #f0f9ff;
+  --sky-100: #e0f2fe;
+  --sky-600: #0284c7;
+  --sky-700: #0369a1;
+
+  --cyan-100: #cffafe;
+  --cyan-600: #0891b2;
+  --cyan-700: #0e7490;
+
+  --indigo-50:  #eef2ff;
+  --indigo-100: #e0e7ff;
+  --indigo-600: #4f46e5;
+  --indigo-700: #4338ca;
+  --indigo-900: #312e81;
+
+  --violet-50:  #f5f3ff;
+  --violet-100: #ede9fe;
+  --violet-600: #7c3aed;
+  --violet-700: #6d28d9;
+
+  --orange-50:  #fff7ed;
+  --orange-100: #ffedd5;
+  --orange-600: #ea580c;
+  --orange-700: #c2410c;
+
+  /* Pure */
+  --white: #ffffff;
+  --black: #000000;
+}

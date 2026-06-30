@@ -99,7 +99,7 @@ export default function ItemPriceCalculator({
             {selectedProduct.cena_bez_dph?.toLocaleString('cs-CZ')} Kč bez DPH
           </div>
           {selectedProduct.cena_spolehlivost && (() => {
-            const conf = CONFIDENCE_LABELS[selectedProduct.cena_spolehlivost] ?? { label: 'Nizka', color: 'bg-red-100 text-red-800' };
+            const conf = CONFIDENCE_LABELS[selectedProduct.cena_spolehlivost] ?? { label: 'Nízká', color: 'bg-red-100 text-red-800' };
             return (
               <span className={cn(
                 'mt-0.5 inline-block rounded px-1 py-0.5 text-[9px] font-medium',
