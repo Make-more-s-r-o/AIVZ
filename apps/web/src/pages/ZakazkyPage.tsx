@@ -70,6 +70,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
       queryKey: ['analysis', t.id],
       queryFn: () => getAnalysis(t.id),
       retry: false,
+      enabled: t.steps.analyze === 'done',
       staleTime: 5 * 60 * 1000,
     })),
   });

@@ -83,6 +83,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
     queryKey: ['analysis', tenderId],
     queryFn: () => getAnalysis(tenderId),
     retry: false,
+    enabled: steps.analyze === 'done',
   });
 
   // Validace — pro indikátor „Připraveno k podání".
@@ -90,6 +91,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
     queryKey: ['validation', tenderId],
     queryFn: () => getValidation(tenderId),
     retry: false,
+    enabled: steps.validate === 'done',
   });
 
   const decision = normalizeDecision(analysis?.doporuceni?.rozhodnuti);

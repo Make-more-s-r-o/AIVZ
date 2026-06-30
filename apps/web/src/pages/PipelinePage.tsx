@@ -40,6 +40,7 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
       queryKey: ['analysis', t.id],
       queryFn: () => getAnalysis(t.id),
       retry: false,
+      enabled: t.steps.analyze === 'done',
       staleTime: 60_000,
     })),
   });

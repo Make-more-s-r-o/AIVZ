@@ -39,6 +39,7 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
       queryKey: ['analysis', t.id],
       queryFn: () => getAnalysis(t.id),
       retry: false,
+      enabled: t.steps.analyze === 'done',
       staleTime: 60_000,
     })),
   });
@@ -48,6 +49,7 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
       queryKey: ['cost', t.id],
       queryFn: () => getCost(t.id),
       retry: false,
+      enabled: t.steps.analyze === 'done',
       staleTime: 60_000,
     })),
   });
