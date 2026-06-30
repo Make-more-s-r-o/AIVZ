@@ -115,8 +115,19 @@ export async function uploadFiles(files: File[], tenderId?: string): Promise<Ten
   return res.json();
 }
 
-export async function getTenderStatus(id: string) {
-  return fetchJson<{ tenderId: string; steps: PipelineSteps }>(`/tenders/${id}/status`);
+export interface TenderStatusResponse {
+  tenderId: string;
+  steps: PipelineSteps;
+  pdfAvailable?: boolean;
+  // CRM (M2): persistovaný stav + řešitel + efektivní fáze + povolené přechody.
+  status?: StageKey | null;
+  assignee?: string | null;
+  effectiveStatus?: StageKey;
+  allowedNext?: StageKey[];
+}
+
+export async function getTenderStatus(id: string): Promise<TenderStatusResponse> {
+  return fetchJson<TenderStatusResponse>(`/tenders/${id}/status`);
 }
 
 export async function getExtractedText(id: string) {
