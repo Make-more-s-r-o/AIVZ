@@ -62,14 +62,15 @@ function detectHeaders(sheet: ExcelJS.Worksheet): {
     umisteni?: number;
   };
 } | null {
-  // Search first 10 rows for header
-  for (let rowNum = 1; rowNum <= Math.min(10, sheet.rowCount); rowNum++) {
+  // Search first 50 rows for header. Some tender soupis files have a long preamble
+  // (instructions, qualification text); e.g. N-485400 has its data-table header on row 22.
+  for (let rowNum = 1; rowNum <= Math.min(50, sheet.rowCount); rowNum++) {
     const row = sheet.getRow(rowNum);
     const cols: Record<string, number> = {};
     let matchCount = 0;
 
     row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
-      const val = String(cell.value || '').trim();
+      const val = String(getCellValue(cell) ?? '').trim();
       if (!val) return;
 
       for (const [key, pattern] of Object.entries(HEADER_PATTERNS)) {
@@ -93,14 +94,25 @@ function detectHeaders(sheet: ExcelJS.Worksheet): {
  * Get cell value, handling formulas (use computed result).
  */
 function getCellValue(cell: ExcelJS.Cell): string | number | null {
-  if (cell.value === null || cell.value === undefined) return null;
+  const v = cell.value as any;
+  if (v === null || v === undefined) return null;
 
-  // Formula cell — use the computed result
-  if (typeof cell.value === 'object' && 'result' in cell.value) {
-    return (cell.value as any).result ?? null;
+  if (typeof v === 'object') {
+    // Rich text cell ({ richText: [{ text }, ...] }) — concatenate runs.
+    // Without this, String(cell.value) yields '[object Object]'.
+    if (Array.isArray(v.richText)) {
+      const t = v.richText.map((rt: any) => rt.text || '').join('');
+      return t === '' ? null : t;
+    }
+    // Formula / shared-formula cell — use the computed result
+    if ('result' in v) return v.result ?? null;
+    // Hyperlink cell ({ text, hyperlink })
+    if ('text' in v) return v.text ?? null;
+    if (v instanceof Date) return v.toISOString();
+    return null;
   }
 
-  return cell.value as string | number;
+  return v as string | number;
 }
 
 /**
@@ -127,17 +139,24 @@ export async function parseSoupis(filePath: string): Promise<SoupisResult> {
   for (let rowNum = headerRow + 1; rowNum <= sheet.rowCount; rowNum++) {
     const row = sheet.getRow(rowNum);
 
+    // The data table consists only of rows with a numeric item number (P.č.) in the číslo
+    // column. This excludes the totals block ("Celková cena") and the per-item spec blocks
+    // ("Položka č. N ...") that follow the table — those are often merged across all columns,
+    // so their text leaks into the name column and would otherwise be parsed as items.
+    const cisloCell = cols.cislo ? getCellValue(row.getCell(cols.cislo)) : null;
+    const isItemNumber = cisloCell != null && /^\s*\d+\s*\.?\s*$/.test(String(cisloCell).trim());
+    if (cols.cislo && !isItemNumber) continue;
+
     // Get name — skip empty rows
     const nazevVal = cols.nazev ? getCellValue(row.getCell(cols.nazev)) : null;
     if (!nazevVal || !String(nazevVal).trim()) continue;
     const nazev = String(nazevVal).trim();
 
-    // Skip summary/total rows
-    if (/^(celkem|součet|total|suma)/i.test(nazev)) continue;
+    // Skip summary/total rows (Czech: celkem / celková / součet ...)
+    if (/^(celkem|celkov|součet|soucet|total|suma)/i.test(nazev)) continue;
 
-    // Get other fields
-    const cisloVal = cols.cislo ? getCellValue(row.getCell(cols.cislo)) : polozky.length + 1;
-    const cislo = typeof cisloVal === 'number' ? cisloVal : parseInt(String(cisloVal)) || polozky.length + 1;
+    // Item number
+    const cislo = isItemNumber ? parseInt(String(cisloCell).replace(/[^\d]/g, ''), 10) : polozky.length + 1;
 
     const specVal = cols.specifikace ? getCellValue(row.getCell(cols.specifikace)) : null;
     const specifikace = specVal ? String(specVal).trim() : '';

@@ -153,6 +153,27 @@ function filterRelevantRequirements(
   return allRequirements;
 }
 
+/**
+ * Parse per-item hard price caps from tender spec text, e.g.
+ *   "Položka č. 8 ... Cena za kus nesmí přesáhnout částku 39.999,- Kč s DPH."
+ * Returns Map<itemNumber, capInclVat>. Czech thousands separator is '.' or space.
+ */
+function parsePriceCaps(text: string): Map<number, number> {
+  const caps = new Map<number, number>();
+  if (!text) return caps;
+  const blockRe = /Polo[žz]ka\s*č\.?\s*(\d+)([\s\S]*?)(?=Polo[žz]ka\s*č\.?\s*\d+|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(text)) !== null) {
+    const num = parseInt(m[1], 10);
+    const capM = m[2].match(/nesm[ií]\s*p[řr]es[áa]hnout[^\d]*([\d][\d\s. ]*)[\s,.\-]*K[čc]/i);
+    if (capM) {
+      const amount = parseFloat(capM[1].replace(/[\s .]/g, '').replace(',', '.'));
+      if (!isNaN(amount) && amount > 0) caps.set(num, amount);
+    }
+  }
+  return caps;
+}
+
 async function main() {
   const tenderIdArg = process.argv.find((a) => a.startsWith('--tender-id='));
   const tenderId = tenderIdArg?.split('=')[1] || '3d-tiskarna';
@@ -180,6 +201,18 @@ async function main() {
   const companyKeywordFilters: Record<string, string[]> = company.keyword_filters || {};
 
   const requirements = analysis.technicke_pozadavky;
+
+  // C3: parse per-item hard price caps ("nesmí přesáhnout X Kč s DPH"). The soupis spec
+  // blocks are excluded from AI analysis, so read them straight from extracted-text.json.
+  let priceCaps = new Map<number, number>();
+  try {
+    const ext = JSON.parse(await readFile(join(outputDir, 'extracted-text.json'), 'utf-8'));
+    const capText = (ext.documents || []).map((d: any) => d.text || '').join('\n');
+    priceCaps = parsePriceCaps(capText);
+    if (priceCaps.size > 0) {
+      console.log(`  Parsed ${priceCaps.size} per-item price cap(s): ${[...priceCaps.entries()].map(([n, c]) => `#${n}≤${c}`).join(', ')}`);
+    }
+  } catch { /* no extracted text — skip caps */ }
 
   // Read parts selection if multi-part tender
   let selectedParts: string[] | null = null;
@@ -243,18 +276,26 @@ async function main() {
       const acceptedSectors = new Set(companyObory.map(s => s.toLowerCase()));
 
       const skipped: string[] = [];
-      matchableItems = matchableItems.filter((item, idx) => {
+      const kept = matchableItems.filter((item, idx) => {
         const sector = (sectorMap.get(idx) || 'ostatni').toLowerCase();
         const accepted = acceptedSectors.has(sector) || sector === 'it'; // always accept IT
         if (!accepted) skipped.push(`${item.nazev} [${sector}]`);
         return accepted;
       });
 
-      if (skipped.length > 0) {
-        console.log(`  Skipped ${skipped.length} items outside company sectors (${companyObory.join(', ')}):`);
-        for (const s of skipped) console.log(`    - ${s}`);
+      // C2: NEVER empty a binding offer. If the sector filter would drop every item
+      // (e.g. an IT/AV company bidding a workshop-tools tender), keep them all and price them
+      // — a domain mismatch is a human go/no-go decision, not a silent drop.
+      if (kept.length === 0) {
+        console.log(`  ⚠ Sector filter would drop ALL ${matchableItems.length} items (none in ${companyObory.join('/')}). Keeping all — every item in a binding offer must be priced.`);
+      } else {
+        if (skipped.length > 0) {
+          console.log(`  Skipped ${skipped.length} items outside company sectors (${companyObory.join(', ')}):`);
+          for (const s of skipped) console.log(`    - ${s}`);
+        }
+        matchableItems = kept;
+        console.log(`  Items after sector filter: ${matchableItems.length}`);
       }
-      console.log(`  Items after sector filter: ${matchableItems.length}`);
     }
   } else if (matchableItems.length > 0 && companyObory.length > 0) {
     // For smaller tenders, do local keyword-based filtering (no AI cost)
@@ -400,7 +441,11 @@ async function main() {
             const fixed = truncated + closers;
             try {
               parsed = JSON.parse(fixed);
-              console.log(`  Recovery successful — parsed ${parsed.polozky_match?.length || 0} items`);
+              const got = parsed.polozky_match?.length ?? (parsed.kandidati ? 1 : 0);
+              console.log(`  Recovery successful — parsed ${got} items`);
+              if (got < batchItems.length) {
+                console.warn(`  ⚠ Recovery DROPPED ${batchItems.length - got} item(s) (got ${got}/${batchItems.length}) — bid would be incomplete; rerun match or lower BATCH_SIZE.`);
+              }
             } catch {
               throw parseErr;
             }
@@ -417,7 +462,7 @@ async function main() {
         const srcItem = matchableItems[batchIdx * BATCH_SIZE];
         polozkyMatch.push({
           polozka_nazev: batchItems[0].nazev,
-          polozka_index: batchIdx * BATCH_SIZE,
+          polozka_index: srcItem?.originalIndex ?? batchIdx * BATCH_SIZE,
           mnozstvi: batchItems[0].mnozstvi || 1,
           jednotka: batchItems[0].jednotka,
           typ: batchItems[0].typ || 'produkt',
@@ -434,13 +479,20 @@ async function main() {
           const srcItem = matchableItems[batchIdx * BATCH_SIZE + localIdx];
           pm.typ = batchItems[localIdx]?.typ || 'produkt';
           pm.cast_id = srcItem?.cast_id;
-          pm.polozka_index = batchIdx * BATCH_SIZE + localIdx;
+          // Use the ORIGINAL soupis position (P.č. - 1) so prices map to the right rows even
+          // though products/accessories were reordered for matching. (M2/C3)
+          pm.polozka_index = srcItem?.originalIndex ?? (batchIdx * BATCH_SIZE + localIdx);
         }
         polozkyMatch.push(...parsed.polozky_match);
       }
     }
 
     console.log(`  Total AI cost: ${totalCost.toFixed(2)} CZK`);
+
+    // H2: every matchable item must produce a match — warn on silent drops/truncation.
+    if (polozkyMatch.length < items.length) {
+      console.warn(`  ⚠ Matching produced ${polozkyMatch.length}/${items.length} items — ${items.length - polozkyMatch.length} missing. Bid would be incomplete.`);
+    }
   }
 
   // Step 1.5: Merge warehouse candidates into polozky_match
@@ -490,7 +542,7 @@ async function main() {
       const svc = serviceItems[si];
       polozkyMatch.push({
         polozka_nazev: svc.nazev,
-        polozka_index: polozkyMatch.length,
+        polozka_index: services[si]?.originalIndex ?? polozkyMatch.length,
         mnozstvi: svc.mnozstvi || 1,
         jednotka: svc.jednotka,
         typ: 'sluzba',
@@ -517,23 +569,44 @@ async function main() {
     console.log(`  AI cost: ${serviceResult.costCZK.toFixed(2)} CZK`);
   }
 
-  // Renumber polozka_index sequentially
-  polozkyMatch.forEach((pm, idx) => { pm.polozka_index = idx; });
+  // NOTE: polozka_index now carries the original soupis position (P.č. - 1) from matching,
+  // so we deliberately do NOT renumber it sequentially here (that previously broke price↔row mapping).
 
-  // Auto-confirm prices using AI-recommended candidate (can be overridden later in UI)
+  // C3: attach per-item price caps by item number (= polozka_index + 1).
+  if (priceCaps.size > 0) {
+    let capped = 0;
+    for (const pm of polozkyMatch) {
+      const cap = priceCaps.get(pm.polozka_index + 1);
+      if (cap != null) { pm.cena_max_s_dph = cap; capped++; }
+    }
+    console.log(`  Price caps applied to ${capped} item(s).`);
+  }
+
+  // Pre-fill prices from the AI-recommended candidate. Margin is configurable
+  // (company.default_marze_procent, default 0 %). potvrzeno=false ON PURPOSE — a binding price
+  // must be reviewed/confirmed by the user before submission (H3). Items breaching the hard
+  // cap are flagged in poznamka and warned (C3).
+  const defaultMarze = Number(company.default_marze_procent) || 0;
   for (const pm of polozkyMatch) {
     const selected = pm.kandidati?.[pm.vybrany_index];
     if (selected && !pm.cenova_uprava) {
       const bez = selected.cena_bez_dph || 0;
+      const nabBez = Math.round(bez * (1 + defaultMarze / 100) * 100) / 100;
+      const nabS = Math.round(nabBez * 1.21 * 100) / 100;
+      const cap = pm.cena_max_s_dph;
+      const overCap = cap != null && nabS > cap;
       pm.cenova_uprava = {
         nakupni_cena_bez_dph: bez,
         nakupni_cena_s_dph: Math.round(bez * 1.21 * 100) / 100,
-        marze_procent: 0,
-        nabidkova_cena_bez_dph: bez,
-        nabidkova_cena_s_dph: Math.round(bez * 1.21 * 100) / 100,
-        potvrzeno: true,
-        poznamka: 'Automaticky potvrzeno — cena z AI doporučení. Zkontrolujte před podáním.',
+        marze_procent: defaultMarze,
+        nabidkova_cena_bez_dph: nabBez,
+        nabidkova_cena_s_dph: nabS,
+        potvrzeno: false,
+        poznamka: overCap
+          ? `⚠ PŘEKRAČUJE STROP ${cap} Kč s DPH — uprav cenu. Cena z AI odhadu, nutné potvrzení.`
+          : 'Cena z AI odhadu — zkontrolujte a potvrďte před podáním.',
       };
+      if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
     }
   }
 
