@@ -443,7 +443,15 @@ export interface SafeUser {
 }
 
 export async function getUsers(): Promise<SafeUser[]> {
-  return fetchJson('/users');
+  // Řešitelské jméno je jen enrichment — 401/chyba NESMÍ spustit globální logout/reload
+  // (getUsers se volá napříč Pipeline/Přehled/Detail). Degraduje na prázdný seznam.
+  try {
+    const res = await fetch(`${API_BASE}/users`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
 }
 
 export async function createNewUser(email: string, name: string, password: string): Promise<SafeUser> {
