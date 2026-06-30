@@ -1,11 +1,12 @@
-import { useState, type CSSProperties } from 'react';
-import { useQueries, useQuery } from '@tanstack/react-query';
+import { useState, type CSSProperties, type DragEvent } from 'react';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, Filter } from 'lucide-react';
-import { getAnalysis, getTenders, type TenderSummary } from '../lib/api';
-import { deriveStage, normalizeDecision, type Decision } from '../lib/crm-adapters';
-import { STAGES, type StageKey } from '../lib/stages';
+import { getAnalysis, getTenders, getUsers, setTenderStatus, type SafeUser, type TenderSummary } from '../lib/api';
+import { effectiveStage, normalizeDecision, type Decision } from '../lib/crm-adapters';
+import { canTransition } from '../lib/stage-machine';
+import { STAGES, STAGE_LABELS, type StageKey } from '../lib/stages';
 import { fmtCZK, fmtMil } from '../lib/format';
-import { Button } from '../components/ui';
+import { Avatar, Button, useToast } from '../components/ui';
 import { DecisionPill, DeadlineCountdown } from '../components/crm';
 
 export interface PipelinePageProps {
@@ -24,15 +25,29 @@ interface EnrichedTender {
   hodnota: number | null;
   lhuta: string | null;
   decision: Decision | null;
+  assignee: string | null;
 }
 
 /**
- * Pipeline (Kanban) — zakázky rozdělené dle odvozené fáze. Hodnota, zadavatel,
- * lhůta a doporučení se dotahují z analýzy (degraduje na „—", když chybí).
- * Přetažení karet mezi sloupci je vizuální, bez persistence (backend beze změn).
+ * Pipeline (Kanban) — zakázky rozdělené dle efektivní fáze (persistovaný `status`
+ * má přednost před fází odvozenou z pipeline kroků). Hodnota, zadavatel, lhůta
+ * a doporučení se dotahují z analýzy (degraduje na „—", když chybí).
+ *
+ * Přetažením karty mezi sloupci se mění fáze (M2). Cíl ověří frontend state-machine
+ * guard (canTransition); na zákaz se zobrazí toast a karta zůstane. Při povoleném
+ * přechodu se stav persistuje přes setTenderStatus — bez DB (dev) degraduje na toast.
  */
 export default function PipelinePage({ onOpen }: PipelinePageProps) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const { data: tenders = [] } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
+
+  // Řešitelé pro avatar na kartě (degraduje na holé ID / dashed kolečko, když chybí).
+  const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
+  const usersMap = new Map<string, SafeUser>(users.map((u) => [u.id, u]));
+
+  // Sloupec, nad kterým se právě vznáší tažená karta (drop-zone zvýraznění).
+  const [overCol, setOverCol] = useState<StageKey | null>(null);
 
   // Per-tender analýza — paralelně, bez retry; 404 (nezanalyzováno) → degradace.
   const analysisQueries = useQueries({
@@ -50,13 +65,52 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
     return {
       tender,
       nazev: analysis?.zakazka.nazev || tender.name || tender.id,
-      stage: deriveStage(tender.steps),
+      stage: effectiveStage({ status: tender.status, steps: tender.steps }),
       zadavatel: analysis?.zakazka.zadavatel.nazev ?? null,
       hodnota: analysis?.zakazka.predpokladana_hodnota ?? null,
       lhuta: analysis?.terminy.lhuta_nabidek ?? null,
       decision: normalizeDecision(analysis?.doporuceni.rozhodnuti),
+      assignee: tender.assignee ?? null,
     };
   });
+
+  async function handleDrop(e: DragEvent<HTMLDivElement>, target: StageKey) {
+    e.preventDefault();
+    setOverCol(null);
+    const raw = e.dataTransfer.getData('application/json');
+    if (!raw) return;
+    let payload: { id: string; from: StageKey };
+    try {
+      payload = JSON.parse(raw) as { id: string; from: StageKey };
+    } catch {
+      return;
+    }
+    const { id, from } = payload;
+    if (!id || !from || target === from) return;
+
+    const dragged = enriched.find((x) => x.tender.id === id);
+    const check = canTransition(from, target, dragged?.tender.steps);
+    if (!check.ok) {
+      toast(check.reason ?? 'Tuto změnu stavu nelze provést.', 'danger');
+      return;
+    }
+
+    try {
+      await setTenderStatus(id, target);
+      await queryClient.invalidateQueries({ queryKey: ['tenders'] });
+      toast(`Přesunuto do ${STAGE_LABELS[target]}`, 'success');
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Chyba';
+      toast(
+        m === 'db_unavailable'
+          ? 'Perzistence stavu vyžaduje databázi (běží jen na hlavním serveru).'
+          : m,
+        'danger',
+      );
+      // Invalidace i při chybě — karta se vrátí (snap back) na svou původní fázi.
+      queryClient.invalidateQueries({ queryKey: ['tenders'] });
+    }
+  }
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto' }}>
@@ -64,7 +118,7 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
         <div>
           <h1 style={{ fontSize: 'var(--font-size-xl)', fontWeight: 700, color: 'var(--text-primary)' }}>Pipeline</h1>
           <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', marginTop: 2 }}>
-            Zakázky dle fáze · přetažení bude doplněno
+            Přetažením karty změníte fázi · platí stavové guardy
           </p>
         </div>
         <Button variant="ghost" size="sm" iconLeft={<Filter size={15} strokeWidth={2} />}>
@@ -81,6 +135,7 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
           const vals = items.map((e) => e.hodnota).filter((v): v is number => v != null);
           const sum = vals.length ? vals.reduce((a, b) => a + b, 0) : null;
           const label = STAGES.find((s) => s.key === key)?.label ?? key;
+          const isOver = overCol === key;
           return (
             <div key={key} style={{ width: 280, flexShrink: 0 }}>
               <div
@@ -104,7 +159,22 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
                 </span>
               </div>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (overCol !== key) setOverCol(key);
+                }}
+                onDrop={(e) => handleDrop(e, key)}
+                style={{
+                  display: 'flex', flexDirection: 'column', gap: 10, minHeight: 64, padding: 4,
+                  borderRadius: 'var(--radius-lg)',
+                  outline: isOver ? '2px dashed var(--accent)' : '2px dashed transparent',
+                  outlineOffset: -2,
+                  background: isOver ? 'var(--surface-selected)' : 'transparent',
+                  transition: 'background var(--duration-fast) var(--ease-standard)',
+                }}
+              >
                 {items.length === 0 ? (
                   <div
                     style={{
@@ -116,7 +186,15 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
                     Žádné zakázky v této fázi
                   </div>
                 ) : (
-                  items.map((e) => <PipelineCard key={e.tender.id} item={e} onOpen={onOpen} />)
+                  items.map((e) => (
+                    <PipelineCard
+                      key={e.tender.id}
+                      item={e}
+                      onOpen={onOpen}
+                      usersMap={usersMap}
+                      onDragEndClear={() => setOverCol(null)}
+                    />
+                  ))
                 )}
               </div>
             </div>
@@ -127,18 +205,49 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
   );
 }
 
-function PipelineCard({ item, onOpen }: { item: EnrichedTender; onOpen?: (id: string) => void }) {
+function PipelineCard({
+  item,
+  onOpen,
+  usersMap,
+  onDragEndClear,
+}: {
+  item: EnrichedTender;
+  onOpen?: (id: string) => void;
+  usersMap: Map<string, SafeUser>;
+  onDragEndClear: () => void;
+}) {
   const [hover, setHover] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const assignee = item.assignee;
   const css: CSSProperties = {
     textAlign: 'left', width: '100%', display: 'block',
     background: 'var(--surface-card)', border: '1px solid var(--border-default)',
-    borderRadius: 'var(--radius-lg)', padding: 12, cursor: 'pointer',
-    boxShadow: hover ? 'var(--shadow-md)' : 'none',
-    transition: 'box-shadow var(--duration-fast) var(--ease-standard)',
+    borderRadius: 'var(--radius-lg)', padding: 12, cursor: 'grab',
+    opacity: dragging ? 0.5 : 1,
+    boxShadow: hover && !dragging ? 'var(--shadow-md)' : 'none',
+    transition: 'box-shadow var(--duration-fast) var(--ease-standard), opacity var(--duration-fast) var(--ease-standard)',
   };
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/json', JSON.stringify({ id: item.tender.id, from: item.stage }));
+        e.dataTransfer.effectAllowed = 'move';
+        setDragging(true);
+      }}
+      onDragEnd={() => {
+        setDragging(false);
+        onDragEndClear();
+      }}
       onClick={() => onOpen?.(item.tender.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen?.(item.tender.id);
+        }
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={css}
@@ -172,14 +281,18 @@ function PipelineCard({ item, onOpen }: { item: EnrichedTender; onOpen?: (id: st
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <DeadlineCountdown date={item.lhuta} />
-        <span
-          title="Nepřiřazeno"
-          style={{
-            width: 24, height: 24, borderRadius: 'var(--radius-full)', flexShrink: 0,
-            border: '1px dashed var(--border-strong)',
-          }}
-        />
+        {assignee ? (
+          <Avatar name={usersMap.get(assignee)?.name ?? assignee} size={24} />
+        ) : (
+          <span
+            title="Nepřiřazeno"
+            style={{
+              width: 24, height: 24, borderRadius: 'var(--radius-full)', flexShrink: 0,
+              border: '1px dashed var(--border-strong)',
+            }}
+          />
+        )}
       </div>
-    </button>
+    </div>
   );
 }

@@ -1,10 +1,13 @@
 import type { ReactNode } from 'react';
 import { useQuery, useQueries } from '@tanstack/react-query';
-import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell } from 'lucide-react';
-import { getTenders, getAnalysis, getCost, type TenderSummary, type CostSummary } from '../lib/api';
+import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History } from 'lucide-react';
+import {
+  getTenders, getAnalysis, getCost, getRecentActivity, getUsers,
+  type TenderSummary, type CostSummary,
+} from '../lib/api';
 import type { TenderAnalysis } from '../types/tender';
-import { deriveStage, deadlineDays } from '../lib/crm-adapters';
-import { STAGES, STAGE_PROBABILITY, isTerminalStage, type StageKey } from '../lib/stages';
+import { effectiveStage, deadlineDays } from '../lib/crm-adapters';
+import { STAGES, STAGE_PROBABILITY, STAGE_LABELS, isTerminalStage, type StageKey } from '../lib/stages';
 import { fmtCZK } from '../lib/format';
 import { KpiCard, DeadlineCountdown } from '../components/crm';
 import { Card } from '../components/ui';
@@ -54,12 +57,23 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
     })),
   });
 
+  const { data: activity = [] } = useQuery({
+    queryKey: ['recent-activity'], queryFn: getRecentActivity, retry: false, staleTime: 30_000,
+  });
+  const { data: users = [] } = useQuery({
+    queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 5 * 60_000,
+  });
+
   const rows: Row[] = tenders.map((t, i) => ({
     tender: t,
     analysis: analysisQueries[i]?.data,
     cost: costQueries[i]?.data,
-    stage: deriveStage(t.steps),
+    stage: effectiveStage({ status: t.status, steps: t.steps }),
   }));
+
+  const tenderName = (id: string): string => tenders.find((t) => t.id === id)?.name ?? id;
+  const userName = (id: string | null | undefined): string | null =>
+    id ? users.find((u) => u.id === id)?.name ?? id : null;
 
   // --- KPI agregace (jen z reálných dat) ---
   let pipelineSum = 0;
@@ -221,8 +235,50 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
         <Card title="Moje úkoly">
           <EmptyState icon={<ListChecks size={20} strokeWidth={2} />}>Zatím žádné úkoly.</EmptyState>
         </Card>
-        <Card title="Nedávná aktivita">
-          <EmptyState icon={<Bell size={20} strokeWidth={2} />}>Zatím žádná aktivita.</EmptyState>
+        <Card title="Nedávná aktivita" padding={activity.length ? 0 : 16}>
+          {activity.length === 0 ? (
+            <EmptyState icon={<Bell size={20} strokeWidth={2} />}>Zatím žádná aktivita.</EmptyState>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {activity.slice(0, 8).map((a, i) => {
+                const p = (a.payload ?? {}) as Record<string, unknown>;
+                const actor = typeof p.actor_name === 'string' && p.actor_name ? p.actor_name : 'Systém';
+                return (
+                  <div
+                    key={a.id}
+                    onClick={() => onOpen?.(a.tender_id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter') onOpen?.(a.tender_id); }}
+                    style={{
+                      display: 'flex', gap: 11, padding: '11px 16px', cursor: 'pointer',
+                      borderTop: i ? '1px solid var(--border-subtle)' : 'none',
+                    }}
+                  >
+                    <span style={{
+                      width: 28, height: 28, borderRadius: 'var(--radius-md)', flexShrink: 0,
+                      background: 'var(--surface-sunken)', color: 'var(--text-secondary)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <ActivityIcon type={a.type} />
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)', lineHeight: 1.4 }}>
+                        <b style={{ fontWeight: 'var(--weight-semibold)' }}>{actor}</b> {activityText(a.type, p, userName)}{' '}
+                        <span style={{ color: 'var(--text-secondary)' }}>· {tenderName(a.tender_id)}</span>
+                      </div>
+                      <div
+                        title={new Date(a.created_at).toLocaleString('cs-CZ')}
+                        style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)', marginTop: 1 }}
+                      >
+                        {relativeTime(a.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </Card>
       </div>
     </div>
@@ -233,6 +289,44 @@ function EmptyText({ children }: { children: ReactNode }) {
   return (
     <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', margin: 0 }}>{children}</p>
   );
+}
+
+// Relativní český čas z ISO (app-side, běží v prohlížeči).
+function relativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return 'právě teď';
+  if (min < 60) return `před ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `před ${h} h`;
+  const d = Math.floor(h / 24);
+  if (d === 1) return 'včera';
+  if (d < 7) return `před ${d} dny`;
+  return new Date(iso).toLocaleDateString('cs-CZ');
+}
+
+function activityText(
+  type: string,
+  p: Record<string, unknown>,
+  userName: (id: string | null | undefined) => string | null,
+): string {
+  if (type === 'status_change') {
+    const label = typeof p.new === 'string' ? STAGE_LABELS[p.new as StageKey] ?? p.new : '';
+    const reason = typeof p.reason === 'string' && p.reason ? ` — ${p.reason}` : '';
+    return `změnil(a) stav na ${label}${reason}`;
+  }
+  if (type === 'assignment') {
+    const a = typeof p.assignee === 'string' ? p.assignee : null;
+    return a ? `přiřadil(a) řešitele ${userName(a) ?? ''}`.trim() : 'odebral(a) řešitele';
+  }
+  return type;
+}
+
+function ActivityIcon({ type }: { type: string }) {
+  if (type === 'status_change') return <GitBranch size={15} />;
+  if (type === 'assignment') return <UserPlus size={15} />;
+  return <History size={15} />;
 }
 
 function EmptyState({ icon, children }: { icon: ReactNode; children: ReactNode }) {

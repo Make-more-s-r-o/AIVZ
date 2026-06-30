@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft,
   Sparkles,
@@ -8,15 +8,24 @@ import {
   History,
   MessageSquare,
   CalendarClock,
+  ArrowLeftRight,
+  UserPlus,
 } from 'lucide-react';
 import {
   getTenderStatus,
   getTenders,
   getAnalysis,
   getValidation,
+  setTenderStatus,
+  setTenderAssignee,
+  getActivity,
+  getUsers,
   type PipelineSteps,
+  type ActivityEntry,
 } from '../lib/api';
-import { deriveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
+import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
+import { allowedNextStages } from '../lib/stage-machine';
+import { STAGE_LABELS, type StageKey } from '../lib/stages';
 import { fmtCZK } from '../lib/format';
 import type { TenderAnalysis } from '../types/tender';
 import {
@@ -25,7 +34,7 @@ import {
   DeadlineCountdown,
   StageStepper,
 } from '../components/crm';
-import { Button, Card, Tabs, Badge } from '../components/ui';
+import { Button, Card, Tabs, Badge, Avatar, Select, useToast, type SelectOption } from '../components/ui';
 import AnalysisView from '../components/AnalysisView';
 import ProductMatchView from '../components/ProductMatchView';
 import DocumentList from '../components/DocumentList';
@@ -73,6 +82,11 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
     },
   });
   const steps: PipelineSteps = statusData?.steps ?? EMPTY_STEPS;
+
+  // Efektivní lifecycle fáze: persistovaný stav má přednost, jinak odvození z pipeline.
+  const currentStage: StageKey = statusData?.effectiveStatus ?? effectiveStage({ status: statusData?.status, steps });
+  // Povolené cílové fáze pro „Změnit stav" (backend je stejně znovu ověří, případně vrátí 409).
+  const allowedNext: StageKey[] = statusData?.allowedNext ?? allowedNextStages(currentStage, steps);
 
   // Seznam zakázek pro název + vstupní soubory (zdroj).
   const { data: tenders } = useQuery({ queryKey: ['tenders'], queryFn: getTenders, staleTime: 30000 });
@@ -124,7 +138,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <StageBadge status={deriveStage(steps)} />
+            <StageBadge status={currentStage} />
             {decision && (
               <Badge tone={decision === 'GO' ? 'success' : decision === 'NOGO' ? 'danger' : 'warning'}>
                 {decision === 'ZVAZIT' ? 'ZVÁŽIT' : decision}
@@ -142,9 +156,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
           <Button variant="secondary" iconLeft={<Sparkles size={16} />} onClick={() => setTab('analyza')}>
             Analyzovat
           </Button>
-          <Button variant="primary" iconRight={<ChevronDown size={16} />} disabled title="Brzy">
-            Změnit stav
-          </Button>
+          <StatusChangeButton tenderId={tenderId} allowedNext={allowedNext} />
         </div>
       </div>
 
@@ -166,9 +178,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
               <EmptyState icon={<ListChecks size={28} />} title="Zatím žádné úkoly" hint="Správa úkolů k zakázce přibude v dalším kroku." />
             )}
             {tab === 'terminy' && <TerminyTab analysis={analysis} />}
-            {tab === 'historie' && (
-              <EmptyState icon={<History size={28} />} title="Zatím žádná aktivita" hint="Historie změn stavu a akcí přibude v dalším kroku." />
-            )}
+            {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
             {tab === 'komentare' && (
               <EmptyState icon={<MessageSquare size={28} />} title="Zatím žádné komentáře" hint="Týmové komentáře přibudou v dalším kroku." />
             )}
@@ -180,6 +190,8 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
           sourceFormats={sourceFormats}
           ready={validation?.ready_to_submit ?? null}
           score={validation?.overall_score ?? null}
+          tenderId={tenderId}
+          assignee={statusData?.assignee ?? null}
         />
       </div>
     </div>
@@ -268,12 +280,14 @@ function TerminyTab({ analysis }: { analysis: TenderAnalysis | undefined }) {
 }
 
 function MetadataRail({
-  analysis, sourceFormats, ready, score,
+  analysis, sourceFormats, ready, score, tenderId, assignee,
 }: {
   analysis: TenderAnalysis | undefined;
   sourceFormats: string[];
   ready: boolean | null;
   score: number | null;
+  tenderId: string;
+  assignee: string | null;
 }) {
   const z = analysis?.zakazka;
   const lhuta = analysis?.terminy?.lhuta_nabidek ?? null;
@@ -327,7 +341,7 @@ function MetadataRail({
         </RailField>
 
         <RailField label="Řešitel">
-          <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Nepřiřazeno</span>
+          <AssigneePicker tenderId={tenderId} assignee={assignee} />
         </RailField>
       </div>
     </Card>
@@ -373,5 +387,318 @@ function EmptyState({ icon, title, hint }: { icon: ReactNode; title: string; hin
       <div style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-secondary)' }}>{title}</div>
       {hint && <div style={{ marginTop: 4, fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)', maxWidth: 320 }}>{hint}</div>}
     </div>
+  );
+}
+
+// --- M2 interakce: změna stavu, přiřazení řešitele, historie aktivity -------
+
+/** Společná hláška pro selhání persistované akce (DB nedostupná → 503, jinak guard důvod). */
+function statusErrorMessage(e: unknown): string {
+  const m = e instanceof Error ? e.message : 'Chyba';
+  return m === 'db_unavailable'
+    ? 'Perzistence stavu vyžaduje databázi (běží jen na hlavním serveru).'
+    : m;
+}
+
+/** Bezpečné čtení textového pole z volného payloadu aktivity. */
+function asString(v: unknown): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+const menuSurfaceStyle: CSSProperties = {
+  position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 224,
+  padding: '6px 0', background: 'var(--surface-card)', border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-lg)',
+};
+
+function StageMenuItem({ stage, onSelect }: { stage: StageKey; onSelect: (s: StageKey) => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => onSelect(stage)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left',
+        padding: '7px 12px', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+        fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)',
+        background: hover ? 'var(--surface-hover)' : 'transparent',
+      }}
+    >
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: `var(--stage-${stage}-dot)`, flexShrink: 0 }} />
+      {STAGE_LABELS[stage]}
+    </button>
+  );
+}
+
+/**
+ * Tlačítko „Změnit stav" — dropdown povolených cílových fází. Volba „Nepodáno"
+ * otevře popover s povinným důvodem. Po úspěchu invaliduje stav + seznam + historii.
+ */
+function StatusChangeButton({ tenderId, allowedNext }: { tenderId: string; allowedNext: StageKey[] }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open && !reasonOpen) return;
+    function onDocClick(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setReasonOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open, reasonOpen]);
+
+  async function invalidate() {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['tender-status', tenderId] }),
+      qc.invalidateQueries({ queryKey: ['tenders'] }),
+      qc.invalidateQueries({ queryKey: ['activity', tenderId] }),
+    ]);
+  }
+
+  async function apply(stage: StageKey, reasonText?: string) {
+    setBusy(true);
+    try {
+      await setTenderStatus(tenderId, stage, reasonText);
+      await invalidate();
+      toast(`Stav změněn na ${STAGE_LABELS[stage]}`, 'success');
+      setOpen(false);
+      setReasonOpen(false);
+      setReason('');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleSelect(stage: StageKey) {
+    if (stage === 'nepodano') {
+      setOpen(false);
+      setReasonOpen(true);
+    } else {
+      void apply(stage);
+    }
+  }
+
+  const disabled = allowedNext.length === 0;
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <Button
+        variant="primary"
+        iconRight={<ChevronDown size={16} />}
+        disabled={disabled}
+        title={disabled ? 'Žádné dostupné přechody' : 'Změnit stav zakázky'}
+        onClick={() => { setReasonOpen(false); setOpen((o) => !o); }}
+      >
+        Změnit stav
+      </Button>
+
+      {open && !disabled && (
+        <div style={menuSurfaceStyle} role="menu">
+          {allowedNext.map((s) => (
+            <StageMenuItem key={s} stage={s} onSelect={handleSelect} />
+          ))}
+        </div>
+      )}
+
+      {reasonOpen && (
+        <div style={{ ...menuSurfaceStyle, width: 288, padding: 14 }}>
+          <div style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)', marginBottom: 8 }}>
+            Důvod nepodání
+          </div>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={3}
+            autoFocus
+            placeholder="Uveďte důvod, proč zakázka nebude podána…"
+            style={{
+              width: '100%', boxSizing: 'border-box', resize: 'vertical', padding: '8px 10px',
+              fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)',
+              background: 'var(--surface-card)', border: '1px solid var(--border-strong)',
+              borderRadius: 'var(--radius-md)', outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+            <Button variant="secondary" size="sm" onClick={() => { setReasonOpen(false); setReason(''); }}>
+              Zrušit
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={busy || reason.trim().length === 0}
+              onClick={() => void apply('nepodano', reason.trim())}
+            >
+              Označit jako nepodané
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Výběr řešitele v metadatové liště — Avatar+jméno + Select (vč. „Nepřiřazeno"). */
+function AssigneePicker({ tenderId, assignee }: { tenderId: string; assignee: string | null }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const { data: users } = useQuery({ queryKey: ['users'], queryFn: getUsers, staleTime: 60000 });
+  const [busy, setBusy] = useState(false);
+  const current = users?.find((u) => u.id === assignee) ?? null;
+
+  async function change(userId: string | null) {
+    setBusy(true);
+    try {
+      await setTenderAssignee(tenderId, userId);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['tender-status', tenderId] }),
+        qc.invalidateQueries({ queryKey: ['tenders'] }),
+        qc.invalidateQueries({ queryKey: ['activity', tenderId] }),
+      ]);
+      toast('Řešitel upraven', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const options: SelectOption[] = [
+    { value: '', label: 'Nepřiřazeno' },
+    ...(users ?? []).map((u) => ({ value: u.id, label: u.name || u.email })),
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {current ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <Avatar name={current.name || current.email} size={24} />
+          <span style={{
+            fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {current.name || current.email}
+          </span>
+        </div>
+      ) : (
+        <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Nepřiřazeno</span>
+      )}
+      <Select
+        size="sm"
+        value={assignee ?? ''}
+        options={options}
+        disabled={busy}
+        onChange={(e) => void change(e.target.value || null)}
+      />
+    </div>
+  );
+}
+
+const activityIconTileStyle: CSSProperties = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  width: 30, height: 30, borderRadius: 'var(--radius-md)', background: 'var(--surface-sunken)',
+  color: 'var(--text-tertiary)',
+};
+
+/** Relativní čas: „před X min/h", „včera", jinak absolutní datum (cs-CZ). */
+function relativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const min = Math.round((Date.now() - t) / 60000);
+  if (min < 1) return 'právě teď';
+  if (min < 60) return `před ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `před ${h} h`;
+  const d = new Date(iso);
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startThen = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  if (Math.round((startToday - startThen) / 86400000) === 1) return 'včera';
+  return d.toLocaleDateString('cs-CZ');
+}
+
+function ActivityRow({ entry, userName }: { entry: ActivityEntry; userName: (id: string | undefined) => string }) {
+  const p = entry.payload ?? {};
+  const actor = asString(p.actor_name) ?? 'Systém';
+
+  let Icon = History;
+  let action: ReactNode = entry.type;
+
+  if (entry.type === 'status_change') {
+    Icon = ArrowLeftRight;
+    const newKey = asString(p.new);
+    const label = newKey && newKey in STAGE_LABELS ? STAGE_LABELS[newKey as StageKey] : (newKey ?? '—');
+    const reasonText = asString(p.reason);
+    action = (
+      <>
+        změnil(a) stav na{' '}
+        <strong style={{ color: 'var(--text-primary)', fontWeight: 'var(--weight-semibold)' }}>{label}</strong>
+        {reasonText ? ` — ${reasonText}` : ''}
+      </>
+    );
+  } else if (entry.type === 'assignment') {
+    Icon = UserPlus;
+    const assigneeId = asString(p.assignee);
+    action = assigneeId ? `přiřadil(a) řešitele ${userName(assigneeId)}` : 'odebral(a) řešitele';
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: 10, padding: '10px 8px', alignItems: 'flex-start' }}>
+      <span style={activityIconTileStyle}>
+        <Icon size={15} />
+      </span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+          <strong style={{ color: 'var(--text-primary)', fontWeight: 'var(--weight-semibold)' }}>{actor}</strong>{' '}{action}
+        </div>
+        <div
+          title={new Date(entry.created_at).toLocaleString('cs-CZ')}
+          style={{ marginTop: 2, fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}
+        >
+          {relativeTime(entry.created_at)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Záložka Historie — reálná aktivita (změny stavu, přiřazení) seřazená od nejnovější. */
+function HistorieTab({ tenderId }: { tenderId: string }) {
+  const { data: activity } = useQuery({ queryKey: ['activity', tenderId], queryFn: () => getActivity(tenderId) });
+  const { data: users } = useQuery({ queryKey: ['users'], queryFn: getUsers, staleTime: 60000 });
+
+  const entries = [...(activity ?? [])].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+
+  function userName(id: string | undefined): string {
+    if (!id) return '';
+    const u = users?.find((x) => x.id === id);
+    return u?.name || u?.email || id;
+  }
+
+  if (entries.length === 0) {
+    return <EmptyState icon={<History size={28} />} title="Zatím žádná aktivita." />;
+  }
+
+  return (
+    <Card padding={8}>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {entries.map((e) => (
+          <ActivityRow key={e.id} entry={e} userName={userName} />
+        ))}
+      </div>
+    </Card>
   );
 }

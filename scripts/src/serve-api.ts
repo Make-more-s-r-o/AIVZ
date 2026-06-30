@@ -29,6 +29,12 @@ import type { DocSlotType } from './lib/doc-slots.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
+  getStatus, getAllStatuses, setStatus, setAssignee, logActivity, getActivity, getRecentActivity,
+} from './lib/crm-store.js';
+import {
+  canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, type StageKey, type StepFlags,
+} from './lib/stage-machine.js';
+import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
   getDataSources, getManufacturers, getProductPrices, getPriceHistory,
@@ -310,6 +316,17 @@ async function getPipelineStatus(tenderId: string) {
   return { tenderId, steps };
 }
 
+// CRM (M2): převod pipeline steps → boolean flags + výpočet efektivní fáze (persistovaná ?? odvozená).
+function stepsDone(steps: { extract: string; analyze: string; match: string; generate: string; validate: string }): StepFlags {
+  return {
+    extract: steps.extract === 'done',
+    analyze: steps.analyze === 'done',
+    match: steps.match === 'done',
+    generate: steps.generate === 'done',
+    validate: steps.validate === 'done',
+  };
+}
+
 // GET /api/health - health check (no auth required)
 app.get('/api/health', async (_req, res) => {
   let gotenberg: 'ok' | 'unreachable' | 'not_configured' = 'not_configured';
@@ -505,23 +522,27 @@ app.get('/api/tenders', async (_req, res) => {
   try {
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = await readdir(INPUT_DIR);
+    const crmStatuses = await getAllStatuses();
     const tenders = await Promise.all(
       dirs
         .filter((d) => !d.startsWith('.'))
         .map(async (tenderId) => {
           const inputFiles = await readdir(join(INPUT_DIR, tenderId));
-          const status = await getPipelineStatus(tenderId);
+          const pipeline = await getPipelineStatus(tenderId);
           // Read tender display name from meta
           let name: string | undefined;
           try {
             const meta = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'tender-meta.json'), 'utf-8'));
             name = meta.name;
           } catch {}
+          const crm = crmStatuses.get(tenderId);
           return {
             id: tenderId,
             name,
             inputFiles: inputFiles.filter((f) => !f.startsWith('.')),
-            ...status,
+            ...pipeline,
+            status: crm?.status ?? null,
+            assignee: crm?.assignee ?? null,
           };
         })
     );
@@ -731,7 +752,18 @@ app.get('/api/tenders/:id/status', async (req, res) => {
     } catch {
       // output dir may not exist yet
     }
-    res.json({ ...status, pdfAvailable });
+    // CRM lifecycle stav (persistovaný ?? odvozený) + povolené přechody pro „Změnit stav".
+    const done = stepsDone(status.steps);
+    const crm = await getStatus(req.params.id);
+    const effectiveStatus = crm?.status ?? deriveStageFromSteps(done);
+    res.json({
+      ...status,
+      pdfAvailable,
+      status: crm?.status ?? null,
+      assignee: crm?.assignee ?? null,
+      effectiveStatus,
+      allowedNext: allowedTransitions(effectiveStatus, done),
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1476,6 +1508,85 @@ app.post('/api/tenders/:id/output', express.json({ limit: '50mb' }), async (req,
     res.json({ success: true, filename: safeName, size: buffer.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// --- CRM: lifecycle status + aktivita (M2) ---
+
+// PATCH /api/tenders/:id/status — změna fáze přes state-machine guardy.
+app.patch('/api/tenders/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status: target, reason } = req.body ?? {};
+  if (!target || typeof target !== 'string' || !ALL_STAGES.includes(target as StageKey)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  if (!(await isDbAvailable())) {
+    return res.status(503).json({ error: 'db_unavailable' });
+  }
+  try {
+    const pipeline = await getPipelineStatus(id);
+    const done = stepsDone(pipeline.steps);
+    const crm = await getStatus(id);
+    const current = crm?.status ?? deriveStageFromSteps(done);
+    if (target === 'nepodano' && (!reason || !String(reason).trim())) {
+      return res.status(409).json({ error: 'reason_required', reason: 'Vyžadován důvod' });
+    }
+    const check = canTransition(current, target as StageKey, done);
+    if (!check.ok) {
+      return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+    }
+    await setStatus(id, target as StageKey);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await logActivity(id, 'status_change', actor, {
+      old: current, new: target, reason: reason ?? null, actor_name: actorName,
+    });
+    res.json({ success: true, status: target });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/tenders/:id/assignee — přiřazení řešitele.
+app.put('/api/tenders/:id/assignee', async (req, res) => {
+  const { id } = req.params;
+  const { assignee } = req.body ?? {};
+  if (!(await isDbAvailable())) {
+    return res.status(503).json({ error: 'db_unavailable' });
+  }
+  try {
+    const pipeline = await getPipelineStatus(id);
+    const done = stepsDone(pipeline.steps);
+    const crm = await getStatus(id);
+    const current = crm?.status ?? deriveStageFromSteps(done);
+    const value = assignee && typeof assignee === 'string' ? assignee : null;
+    await setAssignee(id, value, current);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await logActivity(id, 'assignment', actor, { assignee: value, actor_name: actorName });
+    res.json({ success: true, assignee: value });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/tenders/:id/activity — historie zakázky.
+app.get('/api/tenders/:id/activity', async (req, res) => {
+  try {
+    const activity = await getActivity(req.params.id);
+    res.json({ activity });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/activity/recent — nedávná aktivita napříč zakázkami (dashboard).
+app.get('/api/activity/recent', async (_req, res) => {
+  try {
+    const activity = await getRecentActivity(20);
+    res.json({ activity });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
   }
 });
 

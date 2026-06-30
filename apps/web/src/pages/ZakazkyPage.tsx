@@ -4,7 +4,7 @@ import { Search, Plus, SlidersHorizontal, Inbox } from 'lucide-react';
 import { Button, Input, Select, Checkbox } from '../components/ui';
 import { StageBadge, DeadlineCountdown } from '../components/crm';
 import { getTenders, getAnalysis } from '../lib/api';
-import { deriveStage, deadlineDays, normalizeDecision, type Decision } from '../lib/crm-adapters';
+import { effectiveStage, deadlineDays, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { fmtCZK } from '../lib/format';
 import type { StageKey } from '../lib/stages';
 
@@ -83,7 +83,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
         const lhuta = a?.terminy?.lhuta_nabidek ?? null;
         return {
           id: t.id,
-          stage: deriveStage(t.steps),
+          stage: effectiveStage({ status: t.status, steps: t.steps }),
           nazev: a?.zakazka?.nazev || t.name || t.tenderId || t.id,
           evidence: a?.zakazka?.evidencni_cislo || t.tenderId || t.id,
           zadavatel: a?.zakazka?.zadavatel?.nazev || '',
