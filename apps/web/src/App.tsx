@@ -1,35 +1,48 @@
 import { useState, useEffect } from 'react';
-import TenderList from './components/TenderList';
-import TenderDetail from './components/TenderDetail';
 import LoginForm from './components/LoginForm';
-import UserManagement from './components/UserManagement';
-import ChangePasswordForm from './components/ChangePasswordForm';
-import CompanySettings from './components/CompanySettings';
 import WarehouseDashboard from './components/warehouse/WarehouseDashboard';
 import ProductDetailPage from './components/warehouse/ProductDetailPage';
+import { AppShell, type NavKey } from './components/layout/AppShell';
+import PrehledPage from './pages/PrehledPage';
+import MonitoringPage from './pages/MonitoringPage';
+import PipelinePage from './pages/PipelinePage';
+import ZakazkyPage from './pages/ZakazkyPage';
+import KalendarPage from './pages/KalendarPage';
+import TenderDetailPage from './pages/TenderDetailPage';
+import NastaveniPage, { type SettingsSection } from './pages/NastaveniPage';
+import RegistraceFirmyPage from './pages/RegistraceFirmyPage';
 import { getStoredUser, clearAuth, isAuthenticated, type AuthUser } from './lib/auth';
 import { getAuthToken } from './lib/api';
 
 type WarehouseTab = 'dashboard' | 'products' | 'import' | 'scraping' | 'sources';
 
 type Route =
-  | { view: 'tenders'; tenderId: null }
-  | { view: 'tenders'; tenderId: string }
+  | { view: 'prehled' }
+  | { view: 'monitoring' }
+  | { view: 'pipeline' }
+  | { view: 'zakazky' }
+  | { view: 'kalendar' }
+  | { view: 'tender'; tenderId: string }
   | { view: 'warehouse'; tab: WarehouseTab }
   | { view: 'warehouse-product'; productId: string }
-  | { view: 'companies' }
-  | { view: 'users' }
-  | { view: 'change-password' };
+  | { view: 'registrace' }
+  | { view: 'settings'; section: SettingsSection };
+
+const WAREHOUSE_TAB_LABELS: Record<WarehouseTab, string> = {
+  dashboard: 'Přehled', products: 'Produkty', import: 'Import', scraping: 'Scraping', sources: 'Zdroje',
+};
+const SETTINGS_LABELS: Record<SettingsSection, string> = {
+  firmy: 'Firmy', uzivatele: 'Uživatelé a role', heslo: 'Heslo',
+};
 
 function parseHash(): Route {
   const hash = window.location.hash.slice(1) || '/';
-  // Oddělení path od query params
   const qIdx = hash.indexOf('?');
   const path = qIdx === -1 ? hash : hash.slice(0, qIdx);
 
   if (path.startsWith('/tender/')) {
     const tenderId = path.split('/')[2];
-    if (tenderId) return { view: 'tenders', tenderId };
+    if (tenderId) return { view: 'tender', tenderId };
   }
   if (path.startsWith('/warehouse/product/')) {
     const productId = path.split('/')[3];
@@ -41,40 +54,67 @@ function parseHash(): Route {
   if (path === '/warehouse/scraping') return { view: 'warehouse', tab: 'scraping' };
   if (path === '/warehouse/sources') return { view: 'warehouse', tab: 'sources' };
   if (path === '/warehouse/dashboard') return { view: 'warehouse', tab: 'dashboard' };
-  if (path === '/settings/companies') return { view: 'companies' };
-  if (path === '/settings/users') return { view: 'users' };
-  if (path === '/settings/password') return { view: 'change-password' };
-  return { view: 'tenders', tenderId: null };
+  if (path === '/settings/companies') return { view: 'settings', section: 'firmy' };
+  if (path === '/settings/users') return { view: 'settings', section: 'uzivatele' };
+  if (path === '/settings/password') return { view: 'settings', section: 'heslo' };
+  if (path === '/registrace') return { view: 'registrace' };
+  if (path === '/monitoring') return { view: 'monitoring' };
+  if (path === '/pipeline') return { view: 'pipeline' };
+  if (path === '/zakazky') return { view: 'zakazky' };
+  if (path === '/kalendar') return { view: 'kalendar' };
+  if (path === '/prehled') return { view: 'prehled' };
+  return { view: 'prehled' };
 }
 
 function navigate(path: string) {
   window.location.hash = path;
 }
 
+function navKeyForRoute(route: Route): NavKey {
+  switch (route.view) {
+    case 'prehled': return 'prehled';
+    case 'monitoring': return 'monitoring';
+    case 'pipeline': return 'pipeline';
+    case 'zakazky':
+    case 'tender': return 'zakazky';
+    case 'kalendar': return 'kalendar';
+    case 'warehouse':
+    case 'warehouse-product': return 'sklad';
+    case 'settings':
+    case 'registrace': return 'nastaveni';
+  }
+}
+
+function breadcrumbsForRoute(route: Route): string[] {
+  switch (route.view) {
+    case 'prehled': return ['Přehled'];
+    case 'monitoring': return ['Monitoring'];
+    case 'pipeline': return ['Pipeline'];
+    case 'zakazky': return ['Zakázky'];
+    case 'tender': return ['Zakázky', route.tenderId];
+    case 'kalendar': return ['Kalendář'];
+    case 'warehouse': return ['Cenový sklad', WAREHOUSE_TAB_LABELS[route.tab]];
+    case 'warehouse-product': return ['Cenový sklad', 'Produkt'];
+    case 'settings': return ['Nastavení', SETTINGS_LABELS[route.section]];
+    case 'registrace': return ['Nastavení', 'Registrace firmy'];
+  }
+}
+
+const NAV_HASH: Record<NavKey, string> = {
+  prehled: '/', monitoring: '/monitoring', pipeline: '/pipeline', zakazky: '/zakazky',
+  kalendar: '/kalendar', sklad: '/warehouse', nastaveni: '/settings/companies',
+};
+
 export default function App() {
   const [route, setRoute] = useState<Route>(parseHash);
   const [user, setUser] = useState<AuthUser | null>(getStoredUser());
   const [loggedIn, setLoggedIn] = useState(isAuthenticated() || !!getAuthToken());
-  const [showUserMenu, setShowUserMenu] = useState(false);
 
   useEffect(() => {
     const onHashChange = () => setRoute(parseHash());
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
-
-  // Close user menu on outside click
-  useEffect(() => {
-    if (!showUserMenu) return;
-    const handler = () => setShowUserMenu(false);
-    document.addEventListener('click', handler);
-    return () => document.removeEventListener('click', handler);
-  }, [showUserMenu]);
-
-  const view = route.view;
-  const selectedTenderId = route.view === 'tenders' ? route.tenderId : null;
-  const warehouseProductId = route.view === 'warehouse-product' ? route.productId : null;
-  const warehouseTab = route.view === 'warehouse' ? route.tab : 'dashboard';
 
   const handleLogin = (loginUser: AuthUser) => {
     setUser(loginUser);
@@ -88,8 +128,7 @@ export default function App() {
     window.location.hash = '/';
   };
 
-  // Not authenticated: show login form
-  // On localhost without JWT, allow skipping (legacy behavior via getAuthToken check)
+  // Not authenticated: show login form (localhost without JWT keeps legacy skip).
   if (!loggedIn && window.location.hostname !== 'localhost') {
     return <LoginForm onLogin={handleLogin} />;
   }
@@ -97,120 +136,55 @@ export default function App() {
     return <LoginForm onLogin={handleLogin} />;
   }
 
-  return (
-    <div className="min-h-screen">
-      <header className="border-b bg-white px-6 py-4">
-        <div className="mx-auto flex max-w-7xl items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1
-              className="cursor-pointer text-xl font-bold text-gray-900"
-              onClick={() => navigate('/')}
-            >
-              VZ AI Tool
-            </h1>
-            <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
-              Mini MVP
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate('/warehouse')}
-              className={`text-sm ${view === 'warehouse' || view === 'warehouse-product' ? 'font-medium text-blue-600' : 'text-gray-500 hover:text-gray-900'}`}
-            >
-              Cenový sklad
-            </button>
-            {selectedTenderId && view === 'tenders' && (
-              <button
-                onClick={() => navigate('/')}
-                className="text-sm text-gray-500 hover:text-gray-900"
-              >
-                &larr; Zpět na seznam
-              </button>
-            )}
-            {view !== 'tenders' && view !== 'warehouse' && (
-              <button
-                onClick={() => navigate('/')}
-                className="text-sm text-gray-500 hover:text-gray-900"
-              >
-                &larr; Zakázky
-              </button>
-            )}
-            {user ? (
-              <div className="relative">
-                <button
-                  onClick={(e) => { e.stopPropagation(); setShowUserMenu(!showUserMenu); }}
-                  className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100"
-                >
-                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-xs font-medium text-blue-700">
-                    {user.name.charAt(0).toUpperCase()}
-                  </span>
-                  <span className="hidden sm:inline">{user.name}</span>
-                </button>
-                {showUserMenu && (
-                  <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-white py-1 shadow-lg">
-                    <button
-                      onClick={() => { navigate('/settings/companies'); setShowUserMenu(false); }}
-                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
-                    >
-                      Správa firem
-                    </button>
-                    <button
-                      onClick={() => { navigate('/settings/users'); setShowUserMenu(false); }}
-                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
-                    >
-                      Správa uživatelů
-                    </button>
-                    <button
-                      onClick={() => { navigate('/settings/password'); setShowUserMenu(false); }}
-                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
-                    >
-                      Změnit heslo
-                    </button>
-                    <hr className="my-1" />
-                    <button
-                      onClick={handleLogout}
-                      className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-gray-100"
-                    >
-                      Odhlásit se
-                    </button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <button
-                onClick={handleLogout}
-                className="text-xs text-gray-400 hover:text-gray-600"
-              >
-                Token: ***
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
+  let content: React.ReactNode;
+  switch (route.view) {
+    case 'prehled':
+      content = <PrehledPage onOpen={(id) => navigate('/tender/' + id)} />;
+      break;
+    case 'monitoring':
+      content = <MonitoringPage />;
+      break;
+    case 'pipeline':
+      content = <PipelinePage onOpen={(id) => navigate('/tender/' + id)} />;
+      break;
+    case 'zakazky':
+      content = <ZakazkyPage onOpen={(id) => navigate('/tender/' + id)} />;
+      break;
+    case 'kalendar':
+      content = <KalendarPage />;
+      break;
+    case 'tender':
+      content = <TenderDetailPage tenderId={route.tenderId} onBack={() => navigate('/zakazky')} />;
+      break;
+    case 'warehouse':
+      content = <WarehouseDashboard initialTab={route.tab} />;
+      break;
+    case 'warehouse-product':
+      content = <ProductDetailPage productId={route.productId} onBack={() => window.history.back()} />;
+      break;
+    case 'registrace':
+      content = <RegistraceFirmyPage onDone={() => navigate('/settings/companies')} />;
+      break;
+    case 'settings':
+      content = (
+        <NastaveniPage
+          section={route.section}
+          currentUserId={user?.id}
+          onNavSection={(s) => navigate(s === 'firmy' ? '/settings/companies' : s === 'uzivatele' ? '/settings/users' : '/settings/password')}
+        />
+      );
+      break;
+  }
 
-      <main className="mx-auto max-w-7xl px-6 py-8">
-        {view === 'warehouse' && <WarehouseDashboard initialTab={warehouseTab} />}
-        {view === 'warehouse-product' && warehouseProductId && (
-          <ProductDetailPage
-            productId={warehouseProductId}
-            onBack={() => window.history.back()}
-          />
-        )}
-        {view === 'companies' && <CompanySettings />}
-        {view === 'users' && user && (
-          <UserManagement currentUserId={user.id} />
-        )}
-        {view === 'change-password' && (
-          <ChangePasswordForm />
-        )}
-        {view === 'tenders' && (
-          selectedTenderId ? (
-            <TenderDetail tenderId={selectedTenderId} />
-          ) : (
-            <TenderList onSelect={(id) => navigate('/tender/' + id)} />
-          )
-        )}
-      </main>
-    </div>
+  return (
+    <AppShell
+      active={navKeyForRoute(route)}
+      onNav={(key) => navigate(NAV_HASH[key])}
+      breadcrumbs={breadcrumbsForRoute(route)}
+      user={user ? { name: user.name } : null}
+      onLogout={handleLogout}
+    >
+      {content}
+    </AppShell>
   );
 }

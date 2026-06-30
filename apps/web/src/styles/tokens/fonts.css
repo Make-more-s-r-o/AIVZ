@@ -1,0 +1,7 @@
+/* ============================================================
+   VZ CRM — Webfonts
+   IBM Plex Sans + IBM Plex Mono, loaded from Google Fonts with
+   the latin-ext subset so all Czech diacritics (ě š č ř ž ý á
+   í é ú ů ó ť ď ň) render correctly. Both have full CS support.
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap&subset=latin,latin-ext');
