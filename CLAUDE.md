@@ -2,89 +2,83 @@
 
 ## Co tento projekt dělá
 
-AI nástroj pro české veřejné zakázky. Automaticky monitoruje nové zakázky, AI analyzuje zadávací dokumentaci, oceňuje položky z interního cenového skladu a generuje kompletní nabídkové dokumenty (krycí list, technický návrh, čestné prohlášení, cenovou nabídku).
+AI nástroj pro české veřejné zakázky. Automaticky monitoruje nové zakázky, AI analyzuje zadávací dokumentaci, oceňuje položky z interního cenového skladu a generuje kompletní nabídkové dokumenty (krycí list, technický návrh, čestné prohlášení, cenovou nabídku). Nad tím běží CRM vrstva pro řízení zakázek (stavy, úkoly, termíny, notifikace, komentáře, štítky).
 
 Cílový zákazník: malá/střední IT firma, která chce podávat nabídky do veřejných zakázek ale nemá kapacitu na manuální přípravu (40-80 hodin → 4-8 hodin).
 
 ## Architektura
 
 ```
-Frontend (React + TS + Tailwind + shadcn/ui)
-    ↓ Supabase Auth + PostgREST
-Supabase (PostgreSQL + pgvector + Edge Functions + Storage + Realtime)
-    ↓ Database webhooks
-n8n (self-hosted Docker, async workflow engine)
-    ↓ HTTP requests
-AI APIs (Claude Sonnet 4.5 pro analýzu/psaní, Gemini 2.0 Flash pro triáž/scoring)
+Frontend (React 18 + TS + Vite SPA, vlastní design systém)
+    ↓ fetch /api/* (JWT Bearer)
+Jeden Express server (scripts/src/serve-api.ts, TypeScript přes tsx)
+    servíruje API i vybuildovanou SPA (apps/web/dist) + SPA fallback
     ↓
-Hlídač státu API (data o zakázkách)
+PostgreSQL (vz_warehouse, pgvector/pgvector image) přes node-pg
+    ↓ (pomocné procesy volané z Express endpointů / CLI)
+Claude (Anthropic, ai-client.ts) — analýza ZD, matching, psaní dokumentů
+Gotenberg (LibreOffice route) — DOCX → PDF
+LibreOffice (soffice v Docker image) — .doc → .docx tenderových šablon
+OpenAI Embeddings (volitelné, OPENAI_API_KEY) — vektorové dohledávání v cenovém skladu
 ```
 
+Žádné Supabase, žádné n8n jako runtime součást aplikace, žádný Vercel, žádné Carbone.io. Vše běží jako jeden Node.js proces v jednom Docker image, nasazený na Hetzner VPS.
+
 ### Klíčové rozhodnutí
-- **n8n NIKDY neslouží jako API server** pro frontend. n8n = async background processing (AI analýza, generování dokumentů, notifikace). Frontend vždy komunikuje přes Supabase Edge Functions nebo PostgREST.
-- **Supabase Edge Functions** = synchronní user-facing endpointy (<2s response)
-- **Dokumenty** se generují přes Carbone.io (DOCX šablony) + Gotenberg (PDF konverze)
-- **Multi-tenant ready** od začátku: tenant_id na všech business tabulkách
+- **Jeden Express proces** je zároveň API server (`/api/*`) i statický file server pro SPA (`express.static` + `app.get('*')` fallback na `index.html`). Frontend a backend se buildí a nasazují společně v jednom Docker image.
+- **Case-sensitive routing** v Expressu je záměrně zapnuté (`app.set('case sensitive routing', true)`) — jinak by `/API/...` obešel case-sensitive auth/RBAC guardy (`startsWith('/api/')`) a prošel bez ověření. Bez tohoto nastavení jde o auth-bypass.
+- **Migrace se aplikují automaticky při startu** (`runMigrations()` v `db-migrate.ts`), transakčně, sledované v tabulce `_migrations`. Nejde o "manuální krok" — nový SQL soubor v `scripts/migrations/` se aplikuje sám při dalším startu kontejneru.
+- **Graceful degradace bez DB**: `getPool()` vrátí `null`, pokud `DATABASE_URL` není nastavena. Čtecí endpointy pak vrací prázdno (`[]`/`null`), zápisy vyhazují a endpoint to překládá na `503`. Appka nespadne, jen ztratí CRM/warehouse funkce.
+- **Auth**: JWT (`jwt-auth.ts`, `JWT_SECRET`) + role `admin` / `analytik` / `viewer` (`user-store.ts`). Globální middleware vyžaduje JWT (nebo legacy statický `API_TOKEN`) na všech non-GET `/api/*` cestách kromě whitelisted public paths; druhý globální middleware blokuje mutace pro roli `viewer`. Same-origin bypass existuje jen v dev (JWT vypnutý) a jen z loopbacku — v produkci je vypnutý, protože Origin/Referer/Host jsou klientem ovladatelné.
+- **Single-tenant zatím** — žádný `tenant_id` na tabulkách, multi-tenant je odloženo (DEFER), ne "od začátku multi-tenant ready".
+- **Dokumenty**: DOCX se generuje/plní vlastním engine (`docxtemplater` + `reconstruct-engine.ts` + `template-engine.ts` + `doc-slots.ts`), PDF konverze přes Gotenberg (LibreOffice route). LibreOffice (`soffice`) je navíc zabalené přímo v Docker image pro `.doc → .docx` konverzi vstupních tenderových šablon (smlouvy apod.), viz `document-parser.ts`.
 
 ## Multi-agent pravidla
 
-Když dostaneš komplexní úkol s 3+ nezávislými částmi:
-1. Rozlož na sub-tasky
-2. Každý sub-task řeš jako samostatný sub-agent
-3. Každý sub-agent commitne do vlastní větve (feature/nazev-subtask)
-4. Na konci: merge všech větví přes PR
-```
-
-A do Claude Code **memory** (persistentní, přežije restart):
-```
-/memory add "Pro komplexní úkoly používej sub-agenty. Každý sub-agent = vlastní větev."
+Komplexní úkol s více nezávislými částmi rozlož na sub-tasky, každý řeš jako samostatný sub-agent na vlastní feature větvi (`feature/nazev-subtask`), na konci merge přes PR do `main`.
 
 ## Tech stack
 
 | Vrstva | Technologie | Poznámka |
 |--------|------------|----------|
-| Frontend | React 18 + TypeScript + Vite | Vytvořeno v Lovable, rozšiřováno v Claude Code |
-| UI knihovna | shadcn/ui + Tailwind CSS | Konzistentní design system |
-| Backend DB | Supabase PostgreSQL | RLS pro izolaci dat |
-| Vector search | pgvector extension | Pro RAG (fáze 2) |
-| Auth | Supabase Auth | Email + heslo, JWT |
-| Storage | Supabase Storage | PDF dokumentace, vygenerované nabídky |
-| Realtime | Supabase Realtime | WebSocket updates pro dashboard |
-| Edge Functions | Supabase Edge Functions (Deno/TS) | Synchronní API endpointy |
-| Workflow engine | n8n (self-hosted Docker) | Async: AI analýza, generování, notifikace |
-| AI - analýza | Claude Sonnet 4.5 | Analýza ZD, psaní technických návrhů |
-| AI - triáž | Gemini 2.0 Flash | Scoring relevance, rychlá klasifikace |
-| Doc generation | Carbone.io + Gotenberg | DOCX šablony → PDF |
-| Data zdroj | Hlídač státu API | Veřejné zakázky ČR |
-| Hosting frontend | Vercel | Auto-deploy z GitHub |
-| Hosting n8n | Hostinger VPS | Docker Compose |
-| CI/CD | GitHub Actions | Path-based triggers |
-| Email (fáze 2) | Resend | React Email templates |
-| Billing (fáze 2) | Stripe | Subscription management |
+| Frontend | React 18 + TypeScript + Vite | Buildí se do statického `apps/web/dist`, servíruje ho Express |
+| Design systém | Vlastní — CSS proměnné v `apps/web/src/styles/tokens/*.css` + ručně psané primitivy v `components/ui/` (inline styly řízené tokeny) + Tailwind utility třídy pro layout | NENÍ shadcn/ui (žádný `components.json`), Tailwind config jen mapuje utility na tokeny |
+| Backend | Express (Node.js/TypeScript, `scripts/src/serve-api.ts`), spouští se přes `tsx` | Jeden proces, servíruje API i SPA, port 3001 |
+| DB | PostgreSQL (`vz_warehouse`), image `pgvector/pgvector:pg16` | Přístup přes `pg` (node-pg), žádné ORM |
+| Migrace | Timestamped SQL v `scripts/migrations/`, auto-aplikace při startu | Sledováno v tabulce `_migrations`, transakčně |
+| Auth | JWT (`jsonwebtoken`) + RBAC role admin/analytik/viewer | Legacy statický `API_TOKEN` pro curl/skripty |
+| AI — analýza/generování | Claude (Anthropic SDK, `ai-client.ts`) | Modely sonnet/haiku/opus přes `AI_MODEL` env, streaming volání |
+| Vektorové vyhledávání | pgvector sloupec `embedding vector(1536)` + OpenAI `text-embedding-3-small` | Volitelné — bez `OPENAI_API_KEY` matcher vektorovou vrstvu přeskočí (spadne na text/exact tier) |
+| Doc generation (DOCX) | `docxtemplater` + vlastní reconstruct/fill engine | `reconstruct-engine.ts`, `template-engine.ts`, `doc-slots.ts` |
+| Doc konverze (PDF) | Gotenberg (Docker, LibreOffice route) | `pdf-converter.ts`, `GOTENBERG_URL` |
+| .doc → .docx konverze | LibreOffice (`soffice`) přímo v Docker image | `document-parser.ts` |
+| Data zdroj zakázek | Hlídač státu API | Veřejné zakázky ČR |
+| Scraping cenového skladu | Apify actors + přímé HTTP scrapery | `apify-client.ts`, `scripts/src/scrapers/` |
+| Hosting | Hetzner VPS, Docker Compose | `docker/docker-compose.hetzner.yml`, doména vz.ludone.cz |
+| Registry image | GitHub Container Registry (GHCR) | `ghcr.io/make-more-s-r-o/aivz` |
+| CI/CD | GitHub Actions | `.github/workflows/deploy.yml`: build → push GHCR → SSH deploy na Hetzner |
+| Monorepo | Turborepo (`turbo.json`) | Workspaces: `apps/web`, `scripts`, `packages/shared` |
 
 ## Konvence
 
 ### Kód
 - TypeScript VŽDY (nikdy plain JavaScript)
-- Supabase client z `@supabase/supabase-js`
-- Edge Functions v Deno TypeScript (`supabase/functions/`)
-- Auto-generated typy: `supabase gen types typescript --local > packages/shared/types.ts`
+- Backend: `pg` Pool z `scripts/src/lib/db.ts` (query/queryOne helpery), žádné ORM
+- Store moduly v `scripts/src/lib/*-store.ts` zapouzdřují SQL pro danou doménu (crm-store, warehouse-store, terminy-store, notif-store, comments-store, views-store, tags-store, user-store, company-store)
 - Importy: absolutní cesty kde možné, relativní v rámci modulu
-- Error handling: vždy try/catch, vracet strukturované chyby `{error: string, code: number}`
+- Error handling: try/catch, strukturované chyby; DB nedostupnost → 503, ne pád procesu
 
 ### Databáze
-- **KAŽDÁ business tabulka** má sloupce `tenant_id UUID` a `user_id UUID`
-- RLS policies na VŠECH tabulkách (i pro development)
-- Indexy na KAŽDÉM sloupci referencovaném v RLS policy
-- `(SELECT ...)` wrapper na subqueries v RLS pro optimalizaci
-- Migrace v `supabase/migrations/` jako timestamped SQL
-- NIKDY neměnit produkční DB přímo — vždy přes migrace
+- Single-tenant (žádný `tenant_id`) — multi-tenant je záměrně odložen
+- Migrace v `scripts/migrations/` jako číslované SQL (`001_...` až `010_...`), aplikují se automaticky při startu (`runMigrations`)
+- Store funkce testují dostupnost DB (`getPool() !== null`) a degradují gracefully (čtení → prázdno, zápis → chyba → 503)
+- NIKDY neměnit produkční DB přímo — vždy přes nový migrační soubor
 
 ### Jazyk
 - UI texty: **česky** (čeština je primární jazyk aplikace)
-- Kód, komentáře, commit messages: **anglicky**
+- Kód, komentáře, commit messages: dle globálních pravidel — komentáře česky, commit messages anglicky
 - Proměnné a funkce: anglicky (`fetchTenders`, `analyzeDocument`)
-- DB tabulky a sloupce: anglicky (`tenders`, `analyses`, `bid_documents`)
+- DB tabulky a sloupce: většinou anglicky (warehouse) i česky (CRM vrstva: `crm_tasks`, `crm_terminy`, `crm_notifikace`, `crm_komentare`, `crm_stitky`)
 
 ### Git
 - Commit messages: anglicky, stručně, conventional commits (`feat:`, `fix:`, `chore:`)
@@ -96,139 +90,113 @@ A do Claude Code **memory** (persistentní, přežije restart):
 
 ```
 vz-ai-tool/
-├── CLAUDE.md                      # TENTO SOUBOR
-├── .mcp.json                      # MCP server konfigurace (sdílená)
+├── CLAUDE.md
 ├── turbo.json                     # Turborepo config
-├── package.json                   # Root workspace
-├── .github/
-│   └── workflows/
-│       ├── deploy-web.yml         # Vercel deploy (apps/web/**)
-│       ├── deploy-supabase.yml    # DB push + functions (supabase/**)
-│       └── deploy-n8n.yml         # SSH workflow import (n8n-workflows/**)
+├── package.json                   # Root workspace (npm workspaces: apps/*, packages/*, scripts)
+├── Dockerfile                     # Multi-stage: frontend build → api build → runtime (+ LibreOffice)
+├── docker-entrypoint.sh           # Seeduje config/company.json a users.json do volume při prvním startu
+├── .github/workflows/
+│   └── deploy.yml                 # Build → GHCR push → SSH deploy (Hostinger legacy + Hetzner)
 ├── apps/
-│   └── web/                       # React frontend (z Lovable)
+│   └── web/                       # React frontend
 │       ├── src/
-│       │   ├── components/        # React komponenty
-│       │   ├── pages/             # Stránky (dashboard, feed, detail, ...)
-│       │   ├── hooks/             # Custom hooks (useSupabase, useTenders, ...)
-│       │   ├── lib/               # Utility funkce, Supabase client
-│       │   └── types/             # Frontend-specific typy
-│       ├── index.html
-│       ├── vite.config.ts
+│       │   ├── components/        # Komponenty + components/ui/ (vlastní primitivy)
+│       │   ├── pages/             # PrehledPage, ZakazkyPage, PipelinePage, KalendarPage, MonitoringPage, NastaveniPage, TenderDetailPage, ...
+│       │   ├── hooks/, lib/, types/
+│       │   └── styles/tokens/     # CSS proměnné design systému (palette, semantic, stages, typography, ...)
+│       ├── tailwind.config.js     # Tailwind namapovaný na CSS proměnné, ne shadcn theme
 │       └── package.json
 ├── packages/
 │   └── shared/                    # Sdílené TypeScript typy
-│       ├── types.ts               # Auto-generated Supabase types
-│       └── constants.ts           # Sdílené konstanty
-├── supabase/
-│   ├── config.toml                # Supabase project config
-│   ├── migrations/                # Timestamped SQL migrace
-│   │   ├── 00001_initial_schema.sql
-│   │   ├── 00002_price_warehouse.sql
-│   │   └── ...
-│   └── functions/                 # Edge Functions (Deno/TS)
-│       ├── extract-pdf/
-│       │   └── index.ts
-│       ├── match-product/
-│       │   └── index.ts
-│       ├── analyze-tender/
-│       │   └── index.ts
-│       └── generate-bid/
-│           └── index.ts
-├── n8n-workflows/                 # Exportované JSON workflows
-│   ├── vz_monitor_hlidac.json
-│   ├── vz_filter_score.json
-│   ├── vz_analyze_tender.json
-│   ├── vz_price_items.json
-│   └── vz_generate_bid.json
-├── templates/                     # DOCX šablony pro Carbone
-│   ├── kryci_list.docx
-│   ├── cenova_nabidka.docx
-│   ├── technicky_navrh.docx
-│   └── cestne_prohlaseni.docx
-└── docker/
-    └── docker-compose.yml         # n8n + Gotenberg + Redis (pro VPS)
+├── scripts/                       # Backend: pipeline + Express API server
+│   ├── migrations/                # 001_warehouse_schema.sql ... 010_crm_stitky.sql
+│   ├── src/
+│   │   ├── serve-api.ts           # Express app — API + statický SPA server (jeden proces)
+│   │   ├── extract-tender.ts / analyze-tender.ts / match-product.ts / generate-bid.ts / validate-bid.ts
+│   │   ├── full-flow.ts           # Orchestrace celého pipeline jako sekvence CLI kroků
+│   │   ├── prompts/                # Prompty pro AI kroky (analyze-tender, product-match, technical-proposal, ...)
+│   │   ├── scrapers/               # Scraping cenového skladu (Apify + přímé HTTP scrapery)
+│   │   └── lib/                    # db.ts, db-migrate.ts, ai-client.ts, jwt-auth.ts, user-store.ts,
+│   │                                # crm-store.ts, terminy-store.ts, notif-store.ts, comments-store.ts,
+│   │                                # views-store.ts, tags-store.ts, warehouse-store.ts, warehouse-matcher.ts,
+│   │                                # stage-machine.ts, submit-gate.ts, template-engine.ts, reconstruct-engine.ts,
+│   │                                # doc-slots.ts, pdf-converter.ts, apify-client.ts, icecat-client.ts, ...
+│   └── package.json
+├── config/                        # company.json (výchozí firemní údaje), companies/ (per-firma data)
+├── templates/                     # DOCX šablony (krycí list, čestné prohlášení, seznam poddodavatelů, ...)
+├── docker/
+│   ├── docker-compose.hetzner.yml # Prod: vz-api + vz-postgres (pgvector image) + vz-gotenberg
+│   └── docker-compose.prod.yml    # Legacy Hostinger deploy cesta
+├── input/                         # Vstupní zadávací dokumentace jednotlivých zakázek
+└── output/                        # Vygenerované nabídkové dokumenty
 ```
 
 ## Klíčové příkazy
 
 ```bash
-# Frontend
-cd apps/web && npm run dev              # Dev server (localhost:5173)
-cd apps/web && npm run build            # Production build
-cd apps/web && npm run lint             # ESLint
+# Monorepo (root)
+npm run dev                             # turbo dev — spustí web (vite) i scripts (tsx serve-api) souběžně
+npm run build                           # turbo build
+npm run lint                            # turbo lint
+npm run test:e2e                        # Playwright E2E testy
 
-# Supabase (lokální)
-supabase start                          # Start local Supabase (Docker)
-supabase stop                           # Stop local Supabase
-supabase status                         # Ukáže URL a klíče
+# Frontend samostatně
+cd apps/web && npm run dev              # Vite dev server
+cd apps/web && npm run build            # tsc -b && vite build → dist/
 
-# Supabase (databáze)
-supabase db diff -f migration_name      # Vygeneruj migraci z lokálních změn
-supabase db push                        # Aplikuj migrace na remote
-supabase db reset                       # Reset lokální DB + replay migrací
+# Backend API server samostatně
+cd scripts && npm run dev               # tsx src/serve-api.ts (port 3001)
+# POZOR: serve-api.ts se nereloaduje sám při změně kódu — po editaci ručně restartovat
 
-# Supabase (Edge Functions)
-supabase functions serve                # Lokální Edge Functions server
-supabase functions deploy nazev         # Deploy jedné funkce
-supabase functions deploy               # Deploy všech funkcí
+# Pipeline kroky (CLI, per zakázka)
+cd scripts && npm run extract -- --tender-id=<id>
+cd scripts && npm run analyze -- --tender-id=<id>
+cd scripts && npm run match -- --tender-id=<id>
+cd scripts && npm run generate -- --tender-id=<id>
+cd scripts && npm run validate -- --tender-id=<id>
+cd scripts && npm run full-flow -- --tender-id=<id>   # všech 5 kroků za sebou
 
-# Supabase (typy)
-supabase gen types typescript --local > packages/shared/types.ts
+# Databáze — migrace se aplikují AUTOMATICKY při startu serve-api.ts, není potřeba ruční příkaz
+# Lokální Postgres: DATABASE_URL v scripts/.env nebo root .env
 
-# n8n (na VPS)
-docker compose -f docker/docker-compose.yml up -d    # Start
-docker compose -f docker/docker-compose.yml logs -f   # Logs
-
-# n8n (export workflows)
-# V n8n GUI: menu → Export → Download as JSON → uložit do n8n-workflows/
+# Docker (produkce, na Hetzneru — /opt/vz)
+docker compose -f docker-compose.hetzner.yml up -d
+docker compose -f docker-compose.hetzner.yml logs -f vz-api
+docker compose -f docker-compose.hetzner.yml pull      # bývá pomalé/timeoutuje, viz níže
 ```
 
 ## MCP servery
 
-Projekt používá tyto MCP servery (konfigurace v `.mcp.json`):
+`.mcp.json` je v `.gitignore` (per-vývojářská lokální konfigurace, není součást repa) — v tomto worktree ani neexistuje. Na hlavním checkoutu (`/Users/dan/Dev/ClaudeCode/VZ/.mcp.json`) je aktuálně nakonfigurováno:
 
-1. **Supabase** — přímý přístup k DB, vytváření migrací, testování dotazů
-2. **Hlídač státu** — vyhledávání veřejných zakázek, detail zakázky, smlouvy
-3. **n8n** — správa workflows, spouštění, monitoring executions
-4. **n8n-mcp (node knowledge)** — dokumentace 1000+ n8n nodů pro psaní workflow JSONů
-5. **GitHub** — issues, PRs, repo management
+1. **hostinger-mcp** — správa Hostinger VPS/DNS (Hetzner je samostatný VPS, ne přes tohle)
+2. **n8n-mcp** — knowledge/tooling pro psaní n8n workflow JSONů (Hostinger n8n instance); v aplikaci samotné n8n neběží jako runtime součást
+3. **apify** — scraping actors pro cenový sklad
+
+Supabase MCP a GitHub MCP nejsou nakonfigurované — GitHub operace jdou přes `gh` CLI.
 
 ## Na čem právě pracuji
 
-**AKTUÁLNÍ FÁZE: Mini MVP (proof-of-concept)**
+**CRM vrstva (M1–M9) je hotová a NASAZENÁ na vz.ludone.cz** (Express + Postgres, GHCR image, Hetzner VPS): stavy zakázek + state machine + drag&drop pipeline (crm_tender_status, crm_activity), úkoly a checklisty (crm_tasks), termíny a reminder sweep (crm_terminy), notifikace (crm_notifikace), komentáře s @mention (crm_komentare), uložené pohledy (crm_ulozene_pohledy), štítky (crm_stitky, zakazka_stitky), RBAC role admin/analytik/viewer.
 
-Cíl: Vzít konkrétní zakázku (3D tiskárna pro tisk termoplastů) a demonstrovat celý flow od analýzy po vygenerování nabídkových dokumentů.
-
-### Hotové:
-1. ✅ Strategická analýza a technický blueprint
-2. ✅ Založení projektu (monorepo, scripts, web app)
-3. ✅ Pipeline scripts: extract → analyze → match → generate → validate
-4. ✅ API server (Express) + React dashboard s pipeline vizualizací
-5. ✅ AI pricing improvements: confidence rating, budget comparison, cenový komentář
-6. ✅ User price review: cenová kalkulace panel, marže, potvrzení před generováním
-7. ✅ DOCX quality: inline bold, markdown tabulky, numbered lists, Calibri font, borders
-8. ✅ 2× úspěšný end-to-end průchod zakázkou (TEST, TEST 2 složky)
-
-### Další kroky (příští session):
-9. → **Opravit vyplňování template DOCX** — Krycí list, Čestné prohlášení, Seznam poddodavatelů používají volný text "doplní účastník" / "[účastník vyplní]" místo `{{placeholder}}`. Docxtemplater je nedokáže nahradit. Řešení: AI identifikuje placeholder texty v šablonách a nahradí je daty firmy.
-10. → **Validace a opravy** — re-run celého pipeline, kontrola všech dokumentů
-11. → Automatizace přes n8n workflows
+**AKTUÁLNÍ FÁZE**: reálné testování průchodnosti celého pipeline (extract → analyze → match → generate → validate) na skutečných zakázkách z `input/`, ladění kvality AI výstupů a vyplňování dokumentů.
 
 ## Známé problémy a workaroundy
 
-- Lovable a Claude Code NESMÍ editovat stejné soubory současně (git konflikty)
-- n8n Sustainable Use License zakazuje hosting n8n jako služby pro zákazníky — API musí jít přes Supabase Edge Functions
-- Supabase Edge Functions CPU limit 2s (I/O wait se nepočítá) — dlouhé AI volání řešit přes n8n
-- Carbone.io community node v n8n (`n8n-nodes-carbone`) nebo alternativa docxtemplater v Code node
-- **Template DOCX z tendrů** mají free-text placeholdery ("doplní účastník"), ne `{{}}` — docxtemplater je nenahradí
-- **API server (serve-api.ts)** se nereloaduje automaticky — po změnách restartovat ručně
-- **hodnotici_kriteria** v TenderAnalysisSchema — AI občas vynechá, řešeno `.optional().default([])`
+- **Template DOCX z tendrů** mají free-text placeholdery ("doplní účastník", "[účastník vyplní]"), ne `{{}}` — `docxtemplater` je nenahradí, řeší se vlastním reconstruct/fill engine (`reconstruct-engine.ts`, `template-engine.ts`)
+- **`serve-api.ts` se nereloaduje automaticky** — po změnách backend kódu nutný ruční restart (`npm run dev` v `scripts/`)
+- **Graceful degradace bez DB**: pokud `DATABASE_URL` chybí nebo Postgres nejede, appka neshodí — čtecí endpointy vrací prázdno, zápisy 503. Užitečné pro lokální vývoj bez DB, ale může maskovat skutečný výpadek v produkci
+- **`docker compose pull` na Hetzneru** občas timeoutuje (image ~386 MB, `command_timeout` 10 min v deploy workflow) — při selhání GitHub Actions jobu stačí re-run
+- **Case-sensitive routing** v Expressu je nutné mít zapnuté (`app.set('case sensitive routing', true)`) — bez toho `/API/...` obchází auth/RBAC middleware (case-sensitive `startsWith('/api/')` guard)
+- **Vektorové vyhledávání v cenovém skladu** (pgvector) vyžaduje `OPENAI_API_KEY`; v produkčním `docker-compose.hetzner.yml` není nastaven, takže matcher aktuálně padá zpět na text/exact tier místo vector tier
+- **LibreOffice** (`soffice`) je zabalené přímo v Docker image (`apk add libreoffice-writer`) kvůli konverzi `.doc → .docx` u vstupních tenderových šablon (např. kupní smlouva) — bez něj `document-parser.ts` tyto soubory tiše zahazuje
+- **`hodnotici_kriteria`** v `TenderAnalysisSchema` — AI občas vynechá, řešeno `.optional().default([])`
 
 ## Referenční dokumenty
 
-Kompletní technická analýza, business case a diagramy jsou v těchto souborech:
-- `docs/technicka-implementace-v2.md` — architektura, DB schéma, AI stack, všechny sekce
+- `docs/technicka-implementace-v2.md` — architektura, DB schéma, AI stack (historický dokument, část je zastaralá — viz tento CLAUDE.md pro aktuální stav)
 - `docs/strategicka-mapa.md` — business case, trh, příjmový model
-- `docs/architektura-diagramy.html` — 10 interaktivních Mermaid diagramů
-- `docs/todo-implementace-v3.md` — krok-za-krokem implementační plán
+- `docs/todo-implementace-v3.md` — implementační plán
+- `docs/design-brief-vz-crm.md` — design brief CRM vrstvy
+- `docs/bugs-and-todos.md` — průběžný seznam bugů a TODO
+- `docs/e2e-report-N485400.md` — E2E report pipeline na konkrétní zakázce
