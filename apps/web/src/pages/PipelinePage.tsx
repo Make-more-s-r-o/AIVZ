@@ -1,12 +1,12 @@
 import { useState, type CSSProperties, type DragEvent } from 'react';
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, Filter } from 'lucide-react';
+import { Building2, Filter, ListChecks } from 'lucide-react';
 import { getAnalysis, getTenders, getUsers, setTenderStatus, type SafeUser, type TenderSummary } from '../lib/api';
 import { effectiveStage, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { canTransition } from '../lib/stage-machine';
 import { STAGES, STAGE_LABELS, type StageKey } from '../lib/stages';
 import { fmtCZK, fmtMil } from '../lib/format';
-import { Avatar, Button, useToast } from '../components/ui';
+import { Avatar, Badge, Button, useToast } from '../components/ui';
 import { DecisionPill, DeadlineCountdown } from '../components/crm';
 
 export interface PipelinePageProps {
@@ -26,6 +26,7 @@ interface EnrichedTender {
   lhuta: string | null;
   decision: Decision | null;
   assignee: string | null;
+  tasks: { done: number; total: number } | null;
 }
 
 /**
@@ -71,6 +72,7 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
       lhuta: analysis?.terminy.lhuta_nabidek ?? null,
       decision: normalizeDecision(analysis?.doporuceni.rozhodnuti),
       assignee: tender.assignee ?? null,
+      tasks: tender.tasks ?? null,
     };
   });
 
@@ -274,6 +276,12 @@ function PipelineCard({
         </span>
         {item.decision && (
           <DecisionPill decision={item.decision} style={{ padding: '2px 8px', fontSize: 'var(--font-size-xs)' }} />
+        )}
+        {item.tasks && item.tasks.total > 0 && (
+          <Badge tone="primary" size="sm">
+            <ListChecks size={12} strokeWidth={2} style={{ marginRight: 4, verticalAlign: '-2px' }} />
+            Úkoly {item.tasks.done}/{item.tasks.total}
+          </Badge>
         )}
       </div>
 

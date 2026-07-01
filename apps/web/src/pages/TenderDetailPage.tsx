@@ -10,6 +10,8 @@ import {
   CalendarClock,
   ArrowLeftRight,
   UserPlus,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import {
   getTenderStatus,
@@ -20,8 +22,17 @@ import {
   setTenderAssignee,
   getActivity,
   getUsers,
+  getTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+  seedChecklist,
   type PipelineSteps,
   type ActivityEntry,
+  type Task,
+  type TaskStav,
+  type TaskPriorita,
+  type CreateTaskInput,
 } from '../lib/api';
 import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
 import { allowedNextStages } from '../lib/stage-machine';
@@ -34,7 +45,7 @@ import {
   DeadlineCountdown,
   StageStepper,
 } from '../components/crm';
-import { Button, Card, Tabs, Badge, Avatar, Select, useToast, type SelectOption } from '../components/ui';
+import { Button, Card, Tabs, Badge, Avatar, Select, Checkbox, Input, useToast, type SelectOption, type BadgeTone } from '../components/ui';
 import AnalysisView from '../components/AnalysisView';
 import ProductMatchView from '../components/ProductMatchView';
 import DocumentList from '../components/DocumentList';
@@ -174,9 +185,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
             {tab === 'analyza' && <AnalysisView tenderId={tenderId} />}
             {tab === 'oceneni' && <ProductMatchView tenderId={tenderId} />}
             {tab === 'dokumenty' && <DocumentList tenderId={tenderId} />}
-            {tab === 'ukoly' && (
-              <EmptyState icon={<ListChecks size={28} />} title="Zatím žádné úkoly" hint="Správa úkolů k zakázce přibude v dalším kroku." />
-            )}
+            {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
             {tab === 'terminy' && <TerminyTab analysis={analysis} />}
             {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
             {tab === 'komentare' && (
@@ -700,5 +709,236 @@ function HistorieTab({ tenderId }: { tenderId: string }) {
         ))}
       </div>
     </Card>
+  );
+}
+
+// --- M3 záložka: Úkoly + checklist kvalifikace -----------------------------
+
+const STAV_LABEL: Record<TaskStav, string> = {
+  k_vyrizeni: 'K vyřízení',
+  probiha: 'Probíhá',
+  hotovo: 'Hotovo',
+  blokovano: 'Blokováno',
+};
+const STAV_TONE: Record<TaskStav, BadgeTone> = {
+  k_vyrizeni: 'outline',
+  probiha: 'primary',
+  hotovo: 'success',
+  blokovano: 'danger',
+};
+const PRIORITA_LABEL: Record<TaskPriorita, string> = {
+  nizka: 'Nízká',
+  stredni: 'Střední',
+  vysoka: 'Vysoká',
+};
+const PRIORITA_TONE: Record<TaskPriorita, BadgeTone> = {
+  nizka: 'neutral',
+  stredni: 'warning',
+  vysoka: 'danger',
+};
+
+const PRIORITA_OPTIONS: SelectOption[] = [
+  { value: 'nizka', label: 'Nízká' },
+  { value: 'stredni', label: 'Střední' },
+  { value: 'vysoka', label: 'Vysoká' },
+];
+
+/**
+ * Záložka Úkoly — dvě karty: auto-seedovaný „Checklist kvalifikace" (z kvalifikačních
+ * požadavků analýzy) a volné „Úkoly" s inline přidávacím formulářem. Řádek úkolu je
+ * sdílený mezi oběma kartami (checkbox hotovo, priorita/stav odznak, termín, řešitel, smazání).
+ */
+function UkolyTab({ tenderId }: { tenderId: string }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+
+  const { data: tasks = [] } = useQuery({ queryKey: ['tasks', tenderId], queryFn: () => getTasks(tenderId) });
+  const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
+  const usersMap = new Map(users.map((u): [string, string] => [u.id, u.name || u.email]));
+
+  const [seeding, setSeeding] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [title, setTitle] = useState('');
+  const [assignee, setAssignee] = useState('');
+  const [due, setDue] = useState('');
+  const [priorita, setPriorita] = useState<TaskPriorita>('stredni');
+
+  const invalidate = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['tasks', tenderId] }),
+    qc.invalidateQueries({ queryKey: ['tenders'] }),
+    qc.invalidateQueries({ queryKey: ['my-tasks'] }),
+    qc.invalidateQueries({ queryKey: ['activity', tenderId] }),
+  ]);
+
+  const checklist = tasks.filter((t) => t.je_checklist);
+  const ukoly = tasks.filter((t) => !t.je_checklist);
+
+  async function handleSeed() {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const r = await seedChecklist(tenderId);
+      await invalidate();
+      toast(r.seeded > 0 ? `Checklist vygenerován (${r.seeded} položek)` : 'Checklist je aktuální — nic nového', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function handleAdd() {
+    const t = title.trim();
+    if (!t || adding) return;
+    setAdding(true);
+    try {
+      const input: CreateTaskInput = { title: t, assignee: assignee || null, due_date: due || null, priorita };
+      await createTask(tenderId, input);
+      await invalidate();
+      setTitle('');
+      setAssignee('');
+      setDue('');
+      setPriorita('stredni');
+      toast('Úkol přidán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleToggle(t: Task, checked: boolean) {
+    try {
+      await updateTask(t.id, { stav: checked ? 'hotovo' : 'k_vyrizeni' });
+      await invalidate();
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    }
+  }
+
+  async function handleDelete(t: Task) {
+    try {
+      await deleteTask(t.id);
+      await invalidate();
+      toast('Úkol smazán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    }
+  }
+
+  function renderRow(t: Task) {
+    const done = t.stav === 'hotovo';
+    return (
+      <div
+        key={t.id}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}
+      >
+        <Checkbox checked={done} onChange={(c) => void handleToggle(t, c)} />
+        <span
+          title={t.title}
+          style={{
+            flex: 1, minWidth: 0, fontSize: 'var(--font-size-sm)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            textDecoration: done ? 'line-through' : 'none',
+            color: done ? 'var(--text-tertiary)' : 'var(--text-primary)',
+          }}
+        >
+          {t.title}
+        </span>
+        <Badge tone={PRIORITA_TONE[t.priorita]} size="sm">{PRIORITA_LABEL[t.priorita]}</Badge>
+        {!done && <Badge tone={STAV_TONE[t.stav]} size="sm">{STAV_LABEL[t.stav]}</Badge>}
+        {t.due_date && (
+          <span style={{ flexShrink: 0, fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
+            {new Date(t.due_date).toLocaleDateString('cs-CZ')}
+          </span>
+        )}
+        {t.assignee && <Avatar name={usersMap.get(t.assignee) ?? t.assignee} size={22} />}
+        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat úkol">
+          <Trash2 size={14} />
+        </Button>
+      </div>
+    );
+  }
+
+  const assigneeOptions: SelectOption[] = [
+    { value: '', label: 'Nepřiřazeno' },
+    ...users.map((u) => ({ value: u.id, label: u.name || u.email })),
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Card
+        title="Checklist kvalifikace"
+        action={
+          <Button
+            variant="secondary"
+            size="sm"
+            iconLeft={<Sparkles size={14} />}
+            onClick={() => void handleSeed()}
+            disabled={seeding}
+          >
+            Vygenerovat checklist z analýzy
+          </Button>
+        }
+      >
+        {checklist.length === 0 ? (
+          <EmptyState
+            icon={<ListChecks size={28} />}
+            title="Zatím žádný checklist"
+            hint="Vygenerujte jej z kvalifikačních požadavků analýzy."
+          />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {checklist.map(renderRow)}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Úkoly">
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: ukoly.length > 0 ? 12 : 4 }}>
+          <div style={{ flex: '1 1 200px', minWidth: 160 }}>
+            <Input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleAdd(); } }}
+              placeholder="Nový úkol…"
+              size="sm"
+            />
+          </div>
+          <div style={{ width: 150 }}>
+            <Select
+              size="sm"
+              value={assignee}
+              options={assigneeOptions}
+              onChange={(e) => setAssignee(e.target.value)}
+            />
+          </div>
+          <div style={{ width: 150 }}>
+            <Input type="date" value={due} onChange={(e) => setDue(e.target.value)} size="sm" />
+          </div>
+          <div style={{ width: 130 }}>
+            <Select
+              size="sm"
+              value={priorita}
+              options={PRIORITA_OPTIONS}
+              onChange={(e) => setPriorita(e.target.value as TaskPriorita)}
+            />
+          </div>
+          <Button size="sm" iconLeft={<Plus size={14} />} onClick={() => void handleAdd()} disabled={!title.trim() || adding}>
+            Přidat
+          </Button>
+        </div>
+
+        {ukoly.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>
+            Zatím žádné úkoly. Přidejte první pomocí formuláře výše.
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {ukoly.map(renderRow)}
+          </div>
+        )}
+      </Card>
+    </div>
   );
 }

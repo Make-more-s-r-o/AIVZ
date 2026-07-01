@@ -12,7 +12,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
 import {
   getAllUsers, getUserByEmail, getUserById, createUser,
@@ -30,6 +30,7 @@ import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
   getStatus, getAllStatuses, setStatus, setAssignee, logActivity, getActivity, getRecentActivity,
+  getTask, getTasks, getMyTasks, getTaskCounts, createTask, updateTask, deleteTask, seedChecklist,
 } from './lib/crm-store.js';
 import {
   canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, type StageKey, type StepFlags,
@@ -523,6 +524,7 @@ app.get('/api/tenders', async (_req, res) => {
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = await readdir(INPUT_DIR);
     const crmStatuses = await getAllStatuses();
+    const taskCounts = await getTaskCounts();
     const tenders = await Promise.all(
       dirs
         .filter((d) => !d.startsWith('.'))
@@ -543,6 +545,7 @@ app.get('/api/tenders', async (_req, res) => {
             ...pipeline,
             status: crm?.status ?? null,
             assignee: crm?.assignee ?? null,
+            tasks: taskCounts.get(tenderId) ?? { done: 0, total: 0 },
           };
         })
     );
@@ -1585,6 +1588,143 @@ app.get('/api/activity/recent', async (_req, res) => {
   try {
     const activity = await getRecentActivity(20);
     res.json({ activity });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Úkoly + checklisty (M3) ---
+// Vzor = M2 status/aktivita: GET routy public (resilientní čtení), zápisy guardují isDbAvailable→503,
+// actor z JWT (req.user), na změny logActivity. tender_id = název složky (žádný FK).
+
+const TASK_STAVY = ['k_vyrizeni', 'probiha', 'hotovo', 'blokovano'];
+const TASK_PRIORITY = ['nizka', 'stredni', 'vysoka'];
+
+// Guard proti path traversal u endpointů, které z tender_id skládají cestu k souboru.
+// tender_id = název složky (může obsahovat mezery i „&", takže žádný striktní allowlist —
+// jen odmítnutí separátorů, „..", NUL a prázdna).
+function isSafeTenderId(id: string): boolean {
+  return !!id && !id.includes('..') && !id.includes('/') && !id.includes('\\') && !id.includes('\0');
+}
+
+// GET úkoly zakázky (public GET → degraduje na [] bez DB, neshazuje 401-loop)
+app.get('/api/tenders/:id/tasks', async (req, res) => {
+  try {
+    res.json({ tasks: await getTasks(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET „Moje úkoly" napříč zakázkami — assignee z query (GET nemá req.user).
+app.get('/api/tasks/mine', async (req, res) => {
+  const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : '';
+  if (!assignee) return res.json({ tasks: [] });
+  try {
+    res.json({ tasks: await getMyTasks(assignee) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST vytvoření úkolu
+app.post('/api/tenders/:id/tasks', async (req, res) => {
+  const { id } = req.params;
+  const { title, assignee, due_date, stav, priorita, je_checklist } = req.body ?? {};
+  if (!title || typeof title !== 'string' || !title.trim()) {
+    return res.status(400).json({ error: 'title_required' });
+  }
+  if (stav && !TASK_STAVY.includes(stav)) return res.status(400).json({ error: 'invalid_stav' });
+  if (priorita && !TASK_PRIORITY.includes(priorita)) return res.status(400).json({ error: 'invalid_priorita' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    const task = await createTask({
+      tender_id: id,
+      title: title.trim(),
+      assignee: assignee ?? null,
+      due_date: due_date || null,
+      stav,
+      priorita,
+      je_checklist: !!je_checklist,
+      created_by: actor,
+    });
+    await logActivity(id, 'task_created', actor, { task_id: task.id, title: task.title, actor_name: actorName });
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PATCH částečná aktualizace úkolu
+app.patch('/api/tasks/:taskId', async (req, res) => {
+  const { taskId } = req.params;
+  if (!/^\d+$/.test(taskId)) return res.status(400).json({ error: 'invalid_id' });
+  const body = req.body ?? {};
+  if (body.stav !== undefined && !TASK_STAVY.includes(body.stav)) return res.status(400).json({ error: 'invalid_stav' });
+  if (body.priorita !== undefined && !TASK_PRIORITY.includes(body.priorita)) return res.status(400).json({ error: 'invalid_priorita' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const before = await getTask(taskId);
+    if (!before) return res.status(404).json({ error: 'not_found' });
+    const task = await updateTask(taskId, body);
+    if (!task) return res.status(404).json({ error: 'not_found' });
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    // Aktivitu „dokončeno" logujeme jen při přechodu do 'hotovo' (ne při opakovaném uložení).
+    if (before.stav !== 'hotovo' && task.stav === 'hotovo') {
+      await logActivity(task.tender_id, 'task_completed', actor, {
+        task_id: task.id, title: task.title, actor_name: actorName,
+      });
+    }
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE úkol
+app.delete('/api/tasks/:taskId', async (req, res) => {
+  const { taskId } = req.params;
+  if (!/^\d+$/.test(taskId)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    res.json({ success: await deleteTask(taskId) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST auto-seed checklistu z analysis.kvalifikace[] (idempotentní).
+app.post('/api/tenders/:id/tasks/seed', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    let analysis: any;
+    try {
+      analysis = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8'));
+    } catch {
+      return res.status(400).json({
+        error: 'analysis_required',
+        reason: 'Nejprve spusťte AI analýzu — checklist se generuje z kvalifikačních požadavků.',
+      });
+    }
+    const kval: Array<{ typ?: string; popis?: string }> = Array.isArray(analysis?.kvalifikace) ? analysis.kvalifikace : [];
+    const items = kval
+      .filter((k) => k && typeof k.popis === 'string' && k.popis.trim())
+      .map((k) => ({
+        title: k.popis!.trim(),
+        seed_key: 'kval:' + createHash('sha1').update(`${k.typ ?? ''}\n${k.popis}`).digest('hex').slice(0, 16),
+      }));
+    const inserted = await seedChecklist(id, items);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    if (inserted > 0) {
+      await logActivity(id, 'checklist_seeded', actor, { count: inserted, actor_name: actorName });
+    }
+    res.json({ seeded: inserted, tasks: await getTasks(id) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
