@@ -139,7 +139,7 @@ export default function App() {
   let content: React.ReactNode;
   switch (route.view) {
     case 'prehled':
-      content = <PrehledPage onOpen={(id) => navigate('/tender/' + id)} />;
+      content = <PrehledPage onOpen={(id) => navigate('/tender/' + id)} currentUserId={user?.id} />;
       break;
     case 'monitoring':
       content = <MonitoringPage />;

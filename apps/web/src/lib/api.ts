@@ -43,6 +43,8 @@ export interface TenderSummary {
   // CRM (M2): persistovaný lifecycle stav + řešitel (null když není DB / není záznam).
   status?: StageKey | null;
   assignee?: string | null;
+  // CRM (M3): počty úkolů pro kanban chip „Úkoly {done}/{total}" (bez DB → {0,0}).
+  tasks?: { done: number; total: number };
 }
 
 export interface ActivityEntry {
@@ -363,6 +365,107 @@ export async function getActivity(id: string): Promise<ActivityEntry[]> {
 export async function getRecentActivity(): Promise<ActivityEntry[]> {
   const data = await fetchJson<{ activity: ActivityEntry[] }>(`/activity/recent`);
   return data.activity;
+}
+
+// --- Úkoly + checklisty (M3) ---
+
+export type TaskStav = 'k_vyrizeni' | 'probiha' | 'hotovo' | 'blokovano';
+export type TaskPriorita = 'nizka' | 'stredni' | 'vysoka';
+
+export interface Task {
+  id: string;
+  tender_id: string;
+  title: string;
+  assignee: string | null;
+  due_date: string | null; // 'YYYY-MM-DD'
+  stav: TaskStav;
+  priorita: TaskPriorita;
+  je_checklist: boolean;
+  seed_key: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface CreateTaskInput {
+  title: string;
+  assignee?: string | null;
+  due_date?: string | null;
+  stav?: TaskStav;
+  priorita?: TaskPriorita;
+  je_checklist?: boolean;
+}
+
+// Čtení úkolů je enrichment — 401/chyba NESMÍ spustit clearAuth+reload (jako getUsers).
+export async function getTasks(id: string): Promise<Task[]> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${id}/tasks`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).tasks ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** „Moje úkoly" — nedokončené úkoly přihlášeného uživatele napříč zakázkami. */
+export async function getMyTasks(assignee: string): Promise<Task[]> {
+  if (!assignee) return [];
+  try {
+    const res = await fetch(`${API_BASE}/tasks/mine?assignee=${encodeURIComponent(assignee)}`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).tasks ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function createTask(id: string, input: CreateTaskInput): Promise<Task> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se vytvořit úkol');
+  }
+  return res.json();
+}
+
+export async function updateTask(taskId: string, patch: Partial<CreateTaskInput>): Promise<Task> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se upravit úkol');
+  }
+  return res.json();
+}
+
+export async function deleteTask(taskId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se smazat úkol');
+  }
+  return res.json();
+}
+
+/** Auto-seed checklistu z kvalifikačních požadavků analýzy (idempotentní). */
+export async function seedChecklist(id: string): Promise<{ seeded: number; tasks: Task[] }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/tasks/seed`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se vygenerovat checklist');
+  }
+  return res.json();
 }
 
 // --- AI Cost ---

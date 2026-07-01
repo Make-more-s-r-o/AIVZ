@@ -2,18 +2,20 @@ import type { ReactNode } from 'react';
 import { useQuery, useQueries } from '@tanstack/react-query';
 import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History } from 'lucide-react';
 import {
-  getTenders, getAnalysis, getCost, getRecentActivity, getUsers,
-  type TenderSummary, type CostSummary,
+  getTenders, getAnalysis, getCost, getRecentActivity, getUsers, getMyTasks,
+  type TenderSummary, type CostSummary, type Task,
 } from '../lib/api';
 import type { TenderAnalysis } from '../types/tender';
+import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays } from '../lib/crm-adapters';
 import { STAGES, STAGE_PROBABILITY, STAGE_LABELS, isTerminalStage, type StageKey } from '../lib/stages';
 import { fmtCZK } from '../lib/format';
 import { KpiCard, DeadlineCountdown } from '../components/crm';
-import { Card } from '../components/ui';
+import { Card, Badge } from '../components/ui';
 
 export interface PrehledPageProps {
   onOpen?: (id: string) => void;
+  currentUserId?: string;
 }
 
 interface Row {
@@ -28,13 +30,21 @@ function milValue(n: number): string {
   return (n / 1e6).toLocaleString('cs-CZ', { maximumFractionDigits: 1 });
 }
 
+// Priorita úkolu → tón odznaku + český popisek.
+const priorityTone: Record<Task['priorita'], 'danger' | 'warning' | 'neutral'> = {
+  vysoka: 'danger', stredni: 'warning', nizka: 'neutral',
+};
+const priorityLabel: Record<Task['priorita'], string> = {
+  nizka: 'Nízká', stredni: 'Střední', vysoka: 'Vysoká',
+};
+
 /**
  * Přehled (Dashboard) — stav portfolia nabídek. KPI strip, trychtýř pipeline,
  * blížící se lhůty. Všechna čísla jsou počítána POUZE z reálných dat;
- * metriky bez zdroje (úspěšnost, win-rate, úkoly, aktivita) zobrazují '—' /
+ * metriky bez zdroje (úspěšnost, win-rate) zobrazují '—' /
  * poctivý prázdný stav, nikdy vymyšlená čísla.
  */
-export default function PrehledPage({ onOpen }: PrehledPageProps) {
+export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps) {
   const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
 
   const analysisQueries = useQueries({
@@ -62,6 +72,16 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
   });
   const { data: users = [] } = useQuery({
     queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 5 * 60_000,
+  });
+
+  // Aktuální uživatel: přednostně prop z App, jinak lokálně uložený uživatel.
+  const me = currentUserId ?? getStoredUser()?.id ?? '';
+  const { data: myTasks = [] } = useQuery({
+    queryKey: ['my-tasks', me || 'anon'],
+    queryFn: () => getMyTasks(me),
+    enabled: !!me,
+    retry: false,
+    staleTime: 30_000,
   });
 
   const rows: Row[] = tenders.map((t, i) => ({
@@ -230,10 +250,46 @@ export default function PrehledPage({ onOpen }: PrehledPageProps) {
         </Card>
       </div>
 
-      {/* Úkoly + Aktivita (zatím bez datového zdroje) */}
+      {/* Úkoly + Aktivita */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
-        <Card title="Moje úkoly">
-          <EmptyState icon={<ListChecks size={20} strokeWidth={2} />}>Zatím žádné úkoly.</EmptyState>
+        <Card title="Moje úkoly" padding={myTasks.length ? 0 : 16}>
+          {myTasks.length === 0 ? (
+            <EmptyState icon={<ListChecks size={20} strokeWidth={2} />}>Zatím žádné úkoly.</EmptyState>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {myTasks.slice(0, 8).map((task, i) => (
+                <div
+                  key={task.id}
+                  onClick={() => onOpen?.(task.tender_id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen?.(task.tender_id); }
+                  }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 11, padding: '11px 16px', cursor: 'pointer',
+                    borderTop: i ? '1px solid var(--border-subtle)' : 'none',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      title={task.title}
+                      style={{
+                        fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}
+                    >{task.title}</div>
+                    <div style={{
+                      fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', marginTop: 1,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>{tenderName(task.tender_id)}</div>
+                  </div>
+                  <Badge tone={priorityTone[task.priorita]} size="sm">{priorityLabel[task.priorita]}</Badge>
+                  {task.due_date && <DeadlineCountdown date={task.due_date} size="md" style={{ flexShrink: 0 }} />}
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
         <Card title="Nedávná aktivita" padding={activity.length ? 0 : 16}>
           {activity.length === 0 ? (
