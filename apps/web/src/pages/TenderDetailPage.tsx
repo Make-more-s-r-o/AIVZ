@@ -49,6 +49,7 @@ import { Button, Card, Tabs, Badge, Avatar, Select, Checkbox, Input, useToast, t
 import AnalysisView from '../components/AnalysisView';
 import ProductMatchView from '../components/ProductMatchView';
 import DocumentList from '../components/DocumentList';
+import PipelineStatus from '../components/PipelineStatus';
 
 export interface TenderDetailPageProps {
   tenderId: string;
@@ -82,6 +83,27 @@ const TABS = [
  */
 export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageProps) {
   const [tab, setTab] = useState<string>('prehled');
+  // Rozbalovací lišta „Zpracování" nad záložkami — spouštění kroků pipeline.
+  const [pipelineOpen, setPipelineOpen] = useState(true);
+  const qc = useQueryClient();
+
+  // Po dokončení kroku pipeline obnovíme stav i všechny odvozené záložky.
+  function handleStepComplete() {
+    const keys: string[][] = [
+      ['tender-status', tenderId],
+      ['analysis', tenderId],
+      ['parts', tenderId],
+      ['product-match', tenderId],
+      ['documents', tenderId],
+      ['attachments', tenderId],
+      ['generation-meta', tenderId],
+      ['field-validation', tenderId],
+      ['validation', tenderId],
+      ['cost', tenderId],
+      ['tenders'],
+    ];
+    for (const queryKey of keys) void qc.invalidateQueries({ queryKey });
+  }
 
   // Stav pipeline — refetch během běhu kroku.
   const { data: statusData } = useQuery({
@@ -174,6 +196,32 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
       {/* Krokovací proces */}
       <Card padding={20} style={{ marginTop: 16 }}>
         <StageStepper current={stepperCurrent(steps)} />
+      </Card>
+
+      {/* Zpracování — spuštění kroků pipeline (extrakce → analýza → produkty → dokumenty → validace) */}
+      <Card
+        title="Zpracování zakázky"
+        padding={pipelineOpen ? 20 : 0}
+        style={{ marginTop: 16 }}
+        action={
+          <Button
+            variant="ghost"
+            size="sm"
+            iconRight={
+              <ChevronDown
+                size={16}
+                style={{ transform: pipelineOpen ? 'rotate(180deg)' : undefined, transition: 'transform 120ms' }}
+              />
+            }
+            onClick={() => setPipelineOpen((o) => !o)}
+          >
+            {pipelineOpen ? 'Skrýt' : 'Spustit kroky'}
+          </Button>
+        }
+      >
+        {pipelineOpen && (
+          <PipelineStatus tenderId={tenderId} steps={steps} onStepComplete={handleStepComplete} />
+        )}
       </Card>
 
       {/* Tělo: obsah + metadatová lišta */}

@@ -19,6 +19,11 @@ COPY scripts/ scripts/
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
+# LibreOffice (Writer) for .doc -> .docx conversion of tender templates (kupní smlouva).
+# Without a local soffice binary, document-parser silently drops .doc contracts on prod.
+RUN apk add --no-cache libreoffice-writer ttf-dejavu fontconfig
+ENV SOFFICE_BIN=/usr/bin/soffice
+
 # Copy built frontend
 COPY --from=frontend-build /app/apps/web/dist apps/web/dist
 

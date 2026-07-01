@@ -7,6 +7,7 @@ import { logCost } from './lib/cost-tracker.js';
 import { ValidationReportSchema, type TenderAnalysis, type ProductMatch } from './lib/types.js';
 import { resolveDocumentData, type GenerationMeta } from './lib/data-resolver.js';
 import { validateAllDocuments, type ValidationResult } from './lib/doc-validator.js';
+import { computeSubmitGate } from './lib/submit-gate.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -247,37 +248,26 @@ Odpověz ve formátu:
     console.log(`  Programmatic validation skipped: ${err}`);
   }
 
-  // --- Deterministic gate (C3 cap + completeness): gate ready_to_submit on real checks,
-  // not only on the AI's self-assessment. ---
+  // --- Deterministický submit-gate: ready_to_submit na reálných kontrolách (cenový strop,
+  // úplnost nacenění, field-validace, zbytkové placeholdery), ne jen AI sebehodnocení.
+  // Sdílená logika s POST /finalize (lib/submit-gate.ts). ---
   try {
-    const pmGate: ProductMatch = JSON.parse(await readFile(join(outputDir, 'product-match.json'), 'utf-8'));
-    const gItems = pmGate.polozky_match || [];
-    const overCap = gItems.filter((i) => i.cena_max_s_dph != null && (i.cenova_uprava?.nabidkova_cena_s_dph ?? 0) > (i.cena_max_s_dph as number));
-    const unpriced = gItems.filter((i) => (i.cenova_uprava?.nabidkova_cena_s_dph ?? 0) <= 0);
-    let fieldPass = true;
-    try {
-      const fv = JSON.parse(await readFile(join(outputDir, 'field-validation.json'), 'utf-8'));
-      fieldPass = Array.isArray(fv) && fv.every((r: any) => r.overall === 'pass');
-    } catch { fieldPass = false; }
-    const gateProblems: string[] = [];
-    if (overCap.length) gateProblems.push(`${overCap.length} položek překračuje cenový strop (max 39 999 Kč s DPH): ${overCap.map((i) => `#${i.polozka_index + 1}`).join(', ')}`);
-    if (unpriced.length) gateProblems.push(`${unpriced.length} z ${gItems.length} položek nemá nabídkovou cenu.`);
+    const gate = await computeSubmitGate(outputDir);
+    const gateProblems = [...gate.problems];
     if (aiRecovered) gateProblems.push('Odpověď validace byla uříznuta a obnovena — nutná manuální kontrola.');
-    console.log(`\n--- Cenový gate ---`);
-    console.log(`  Položek: ${gItems.length} | nad stropem: ${overCap.length} | bez ceny: ${unpriced.length} | field-validace: ${fieldPass ? 'OK' : 'FAIL'}`);
-    if (gateProblems.length || !fieldPass) {
+    console.log(`\n--- Submit gate ---`);
+    if (gateProblems.length) {
       report.ready_to_submit = false;
       for (const gp of gateProblems) report.kriticke_problemy.push(gp);
-      if (overCap.length) report.checks.push({ kategorie: 'cenova_spravnost', kontrola: 'Dodržení cenového stropu za kus', status: 'fail', detail: gateProblems[0] });
-      if (unpriced.length) report.checks.push({ kategorie: 'kompletnost', kontrola: 'Všechny položky oceněny', status: 'fail', detail: `${unpriced.length} položek bez ceny` });
+      report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'fail', detail: gateProblems.join(' | ') });
       await writeFile(join(outputDir, 'validation-report.json'), JSON.stringify(report, null, 2), 'utf-8');
       console.log(`  ready_to_submit -> NO`);
       gateProblems.forEach((gp) => console.log(`    - ${gp}`));
     } else {
-      console.log(`  Gate OK (strop dodržen, vše oceněno).`);
+      console.log(`  Gate OK (strop dodržen, vše oceněno, žádné placeholdery).`);
     }
   } catch (err) {
-    console.log(`  Cenový gate skipped: ${err}`);
+    console.log(`  Submit gate skipped: ${err}`);
   }
 }
 

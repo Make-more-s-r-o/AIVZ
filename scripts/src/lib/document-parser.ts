@@ -1,4 +1,4 @@
-import { readFile, readdir, unlink } from 'fs/promises';
+import { readFile, readdir } from 'fs/promises';
 import { join, extname, basename } from 'path';
 import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
@@ -172,27 +172,38 @@ export async function extractDocuments(
       // is Linux, where the old hardcoded macOS path was always missing → .doc silently skipped.
       const libreoffice = findSoffice();
       if (libreoffice) {
-        console.log(`  Converting .doc → .docx (${libreoffice}): ${file}`);
-        try {
-          // execFile with an argument array (no shell) — filenames can't inject commands.
-          execFileSync(libreoffice, ['--headless', '--convert-to', 'docx', filePath, '--outdir', inputDir], { timeout: 60000 });
-          const docxPath = join(inputDir, basename(file, '.doc') + '.docx');
-          if (existsSync(docxPath)) {
-            const text = await parseDocx(docxPath);
-            // Remove the converted file to keep input clean
-            await unlink(docxPath).catch(() => {});
-            documents.push({
-              filename: file,
-              type: 'docx',
-              text,
-              isTemplate: isTemplate(file),
-              isSoupis: isSoupis(file),
-            });
-          } else {
-            console.log(`  Warning: .doc conversion produced no .docx for ${file}`);
+        // Cílový .docx: stejný základ názvu vedle zdrojového .doc (do vstupní složky tendru),
+        // aby ho discoverTemplates() ve fázi generování našel — skenuje jen .docx/.xls/.xlsx.
+        const docxName = basename(file, extname(file)) + '.docx';
+        const docxPath = join(inputDir, docxName);
+
+        // Idempotence + ochrana proti kolizi: pokud .docx se stejným názvem už na disku je
+        // (výsledek dřívějšího běhu NEBO původní soubor tendru), znovu nekonvertujeme ani
+        // nepřepisujeme — ten .docx zpracuje .docx větev tohoto běhu (readdir ho vrátil výše).
+        if (files.some((f) => f.toLowerCase() === docxName.toLowerCase())) {
+          console.log(`  Skipping .doc conversion — .docx already present: ${docxName}`);
+        } else {
+          console.log(`  Converting .doc → .docx (${libreoffice}): ${file}`);
+          try {
+            // execFile with an argument array (no shell) — filenames can't inject commands.
+            execFileSync(libreoffice, ['--headless', '--convert-to', 'docx', filePath, '--outdir', inputDir], { timeout: 60000 });
+            if (existsSync(docxPath)) {
+              const text = await parseDocx(docxPath);
+              // Konvertovaný .docx PONECHÁVÁME na disku vedle zdrojového .doc, aby ho
+              // discoverTemplates() ve fázi generování našel (dřív se hned mazal → smlouva chyběla).
+              documents.push({
+                filename: docxName,
+                type: 'docx',
+                text,
+                isTemplate: isTemplate(docxName),
+                isSoupis: isSoupis(docxName),
+              });
+            } else {
+              console.log(`  Warning: .doc conversion produced no .docx for ${file}`);
+            }
+          } catch (err) {
+            console.log(`  Warning: Failed to convert .doc ${file}: ${err}`);
           }
-        } catch (err) {
-          console.log(`  Warning: Failed to convert .doc ${file}: ${err}`);
         }
       } else {
         console.log(`  Skipping .doc file (LibreOffice not found — set SOFFICE_BIN or install libreoffice): ${file}`);

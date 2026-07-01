@@ -31,7 +31,7 @@ const DEFAULT_MODES: Record<string, DocMode> = {
   kryci_list: 'clean',
   cestne_prohlaseni: 'clean',
   seznam_poddodavatelu: 'clean',
-  kupni_smlouva: 'reconstruct',
+  kupni_smlouva: 'fill', // závazná smlouva → in-place fill (reconstruct by přepsal klauzule)
   technicka_specifikace: 'reconstruct',
 };
 
@@ -365,7 +365,7 @@ async function main() {
           console.log(`    Saved ${result.replacements.length} replacements to ${logName}`);
         }
       } else {
-        const result = await fillTemplateWithAI(template.path, company, tenderData);
+        const result = await fillTemplateWithAI(template.path, company, tenderData, template.type);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
         if (result.costCZK > 0) {
@@ -386,6 +386,21 @@ async function main() {
     } catch (err) {
       console.log(`    Error filling template: ${err}`);
     }
+  }
+
+  // Kontrola úplnosti smlouvy: je-li v podkladech EDITOVATELNÁ kupní smlouva (.doc/.docx/.xlsx),
+  // ale ve výstupu žádná není, UPOZORNI (ne throw — abort by zahodil ostatní hotové dokumenty).
+  // PDF smlouvy se nepočítají (nejdou vyplnit). Chytá i selhání .doc konverze (nepřevedený .doc
+  // zůstane v inputu). Reálný gate na kompletnost dělá validate-bid / finalize.
+  try {
+    const inputFiles = existsSync(inputDir) ? await readdir(inputDir) : [];
+    const editableContract = inputFiles.find((f) => /smlouv/i.test(f) && /\.(docx?|xlsx?)$/i.test(f));
+    const producedContract = Object.keys(generationMeta).some((n) => /smlouv/i.test(n));
+    if (editableContract && !producedContract) {
+      console.warn(`  ⚠ Editovatelná kupní smlouva "${editableContract}" je v podkladech, ale NENÍ ve vygenerovaných dokumentech — nabídka může být neúplná. Zkontrolujte konverzi .doc / šablonu smlouvy.`);
+    }
+  } catch {
+    // čtení inputu generování neblokuje
   }
 
   // 4D: Fill soupis XLSX files with matched prices
