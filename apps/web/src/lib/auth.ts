@@ -3,10 +3,13 @@ const JWT_KEY = 'vz_jwt';
 const USER_KEY = 'vz_user';
 const REMEMBER_KEY = 'vz_remember';
 
+export type UserRole = 'admin' | 'analytik' | 'viewer';
+
 export interface AuthUser {
   id: string;
   email: string;
   name: string;
+  role?: UserRole;
   createdAt: string;
   lastLoginAt: string | null;
 }

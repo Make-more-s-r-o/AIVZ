@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import type { SafeUser } from './user-store.js';
+import type { SafeUser, UserRole } from './user-store.js';
 
 // Read lazily so dotenv has time to load in serve-api.ts
 function getSecret(): string | undefined {
@@ -10,6 +10,7 @@ export interface JwtPayload {
   sub: string;
   email: string;
   name: string;
+  role?: UserRole;
 }
 
 export function isJwtEnabled(): boolean {
@@ -25,6 +26,7 @@ export function signToken(user: SafeUser, rememberMe?: boolean): string {
     sub: user.id,
     email: user.email,
     name: user.name,
+    role: user.role,
   };
   const expiresIn = rememberMe ? '30d' : '12h';
   return jwt.sign(payload, secret, { expiresIn });

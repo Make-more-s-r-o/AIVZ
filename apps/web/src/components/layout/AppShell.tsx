@@ -1,9 +1,12 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   LayoutDashboard, Radar, KanbanSquare, Table2, Calendar, Warehouse, Settings,
   Search, Bell, ChevronRight, LogOut,
 } from 'lucide-react';
 import { Avatar } from '../ui';
+import { getNotifications, markNotificationsRead, type Notification } from '../../lib/api';
+import { getStoredUser } from '../../lib/auth';
 
 export type NavKey = 'prehled' | 'monitoring' | 'pipeline' | 'zakazky' | 'kalendar' | 'sklad' | 'nastaveni';
 
@@ -47,6 +50,168 @@ function NavItem({ item, active, onClick }: { item: NavDef; active: boolean; onC
   );
 }
 
+/** Relativní čas v češtině (např. „před 5 min", „před 2 dny"). */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const s = Math.floor((Date.now() - then) / 1000);
+  if (s < 45) return 'právě teď';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `před ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `před ${h} h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `před ${d} ${d === 1 ? 'dnem' : 'dny'}`;
+  return new Date(then).toLocaleDateString('cs-CZ');
+}
+
+function NotificationRow({ n, onOpen }: { n: Notification; onOpen: () => void }) {
+  const [hover, setHover] = useState(false);
+  const clickable = !!n.url || !n.precteno;
+  return (
+    <div
+      role={clickable ? 'button' : undefined}
+      onClick={onOpen}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'flex', alignItems: 'flex-start', gap: 9, padding: '10px 14px',
+        cursor: clickable ? 'pointer' : 'default',
+        background: hover ? 'var(--surface-hover)' : n.precteno ? 'transparent' : 'var(--accent-soft-bg)',
+        borderTop: '1px solid var(--border-subtle)', transition: 'background var(--duration-fast)',
+      }}
+    >
+      <span style={{
+        flexShrink: 0, width: 7, height: 7, marginTop: 6, borderRadius: 'var(--radius-full)',
+        background: n.precteno ? 'transparent' : 'var(--accent)',
+      }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 'var(--font-size-sm)', lineHeight: 1.35, color: 'var(--text-primary)',
+          fontWeight: n.precteno ? 'var(--weight-regular)' : 'var(--weight-medium)',
+        }}>{n.text}</div>
+        <div style={{ marginTop: 2, fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+          {relativeTime(n.created_at)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * NotificationBell — zvonek v topbaru: nepřečtený badge + rozbalovací seznam,
+ * mark-as-read a deep-link navigace přes hash. Poll každých 45 s, resilientní
+ * (bez uživatele nebo při chybě = prázdno, žádný reload loop).
+ */
+function NotificationBell() {
+  const me = getStoredUser();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  const { data } = useQuery({
+    queryKey: ['notifications', me?.id ?? 'anon'],
+    queryFn: () => getNotifications(me?.id ?? ''),
+    enabled: !!me?.id,
+    refetchInterval: 45_000,
+    retry: false,
+    staleTime: 30_000,
+  });
+
+  const unread = data?.unread ?? 0;
+  const items = data?.items ?? [];
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const invalidate = () => { void qc.invalidateQueries({ queryKey: ['notifications'] }); };
+
+  const markAll = () => { void markNotificationsRead().then(invalidate).catch(() => {}); };
+
+  const openNotification = (n: Notification) => {
+    if (n.url) window.location.hash = n.url;
+    if (!n.precteno) void markNotificationsRead([n.id]).then(invalidate).catch(() => {});
+    setOpen(false);
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title="Upozornění"
+        aria-label="Upozornění"
+        style={{
+          position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 34, height: 34, background: open || hover ? 'var(--surface-hover)' : 'transparent',
+          border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', cursor: 'pointer',
+          color: open ? 'var(--text-primary)' : 'var(--text-secondary)', transition: 'background var(--duration-fast)',
+        }}
+      >
+        <Bell size={17} />
+        {unread > 0 && (
+          <span style={{
+            position: 'absolute', top: -5, right: -5, minWidth: 16, height: 16, padding: '0 4px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box',
+            background: 'var(--danger-solid)', color: '#fff', fontFamily: 'var(--font-sans)',
+            fontSize: 10, fontWeight: 'var(--weight-semibold)', lineHeight: 1, borderRadius: 'var(--radius-full)',
+            border: '2px solid var(--surface-card)',
+          }}>{unread > 99 ? '99+' : unread}</span>
+        )}
+      </button>
+
+      {open && (
+        <div role="menu" style={{
+          position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: 340, maxWidth: '90vw',
+          background: 'var(--surface-card)', border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-lg)', zIndex: 50, overflow: 'hidden',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '11px 14px',
+            borderBottom: '1px solid var(--border-subtle)',
+          }}>
+            <span style={{ flex: 1, fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+              Upozornění
+            </span>
+            {unread > 0 && (
+              <button
+                onClick={markAll}
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+                  fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-xs)', fontWeight: 'var(--weight-medium)',
+                  color: 'var(--text-link)',
+                }}
+              >Označit vše přečtené</button>
+            )}
+          </div>
+          <div className="vz-scroll" style={{ maxHeight: 360, overflowY: 'auto' }}>
+            {items.length === 0 ? (
+              <div style={{ padding: '28px 14px', textAlign: 'center', fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>
+                Žádná upozornění.
+              </div>
+            ) : (
+              items.map((n) => <NotificationRow key={n.id} n={n} onOpen={() => openNotification(n)} />)
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export interface AppShellProps {
   active: NavKey;
   onNav: (key: NavKey) => void;
@@ -58,7 +223,8 @@ export interface AppShellProps {
 
 /**
  * AppShell — persistent 240px sidebar + slim 56px top bar. The primary VZ CRM
- * chrome; wraps all routed content. Cmd+K and the bell are static placeholders.
+ * chrome; wraps all routed content. Cmd+K is a static placeholder; the bell is
+ * a live NotificationBell (badge + dropdown + mark-as-read + deep-link).
  */
 export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, children }: AppShellProps) {
   return (
@@ -142,12 +308,7 @@ export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, chil
               background: 'var(--surface-card)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)',
             }}>⌘K</kbd>
           </button>
-          <button
-            title="Upozornění (brzy)"
-            style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34, background: 'transparent', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', cursor: 'pointer', color: 'var(--text-secondary)' }}
-          >
-            <Bell size={17} />
-          </button>
+          <NotificationBell />
         </header>
         <main className="vz-scroll" style={{ flex: 1, overflow: 'auto', padding: 24 }}>{children}</main>
       </div>
