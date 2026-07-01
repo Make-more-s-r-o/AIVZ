@@ -31,6 +31,9 @@ import {
   createTermin,
   deleteTermin,
   seedTerminy,
+  getComments,
+  createComment,
+  deleteComment,
   type PipelineSteps,
   type ActivityEntry,
   type Task,
@@ -38,7 +41,9 @@ import {
   type TaskPriorita,
   type CreateTaskInput,
   type Termin,
+  type Comment,
 } from '../lib/api';
+import { getStoredUser } from '../lib/auth';
 import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
 import { allowedNextStages } from '../lib/stage-machine';
 import { STAGE_LABELS, type StageKey } from '../lib/stages';
@@ -58,6 +63,7 @@ import PipelineStatus from '../components/PipelineStatus';
 
 export interface TenderDetailPageProps {
   tenderId: string;
+  initialTab?: string;
   onBack: () => void;
 }
 
@@ -80,17 +86,39 @@ const TABS = [
   { value: 'komentare', label: 'Komentáře' },
 ] as const;
 
+const TAB_VALUES = new Set<string>(TABS.map((t) => t.value));
+
 /**
  * Detail zakázky — CRM přepracování. Hlavička se stavovým odznakem, GO/NOGO
  * branou a krokovacím procesem; vlevo záložky (Přehled · Analýza · Ocenění ·
  * Dokumenty · Úkoly · Termíny · Historie · Komentáře), vpravo metadatová lišta.
  * Záložky Analýza/Ocenění/Dokumenty znovupoužívají stávající komponenty.
  */
-export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageProps) {
-  const [tab, setTab] = useState<string>('prehled');
+export default function TenderDetailPage({ tenderId, initialTab, onBack }: TenderDetailPageProps) {
+  const [tab, setTab] = useState<string>(initialTab && TAB_VALUES.has(initialTab) ? initialTab : 'prehled');
+  // Deep-link na záložku (zvonek notifikace #/tender/<id>?tab=komentare): když se initialTab změní
+  // za běhu (klik na notifikaci u již otevřené zakázky), přepni na cílovou záložku. Manuální přepnutí
+  // tabů hash nemění → initialTab zůstává → efekt nepřebíjí volbu uživatele.
+  useEffect(() => {
+    if (initialTab && TAB_VALUES.has(initialTab)) setTab(initialTab);
+  }, [initialTab]);
   // Rozbalovací lišta „Zpracování" nad záložkami — spouštění kroků pipeline.
   const [pipelineOpen, setPipelineOpen] = useState(true);
   const qc = useQueryClient();
+
+  // Manuální přepnutí záložky promítni do hashe (bez zahlcení historie) a uvědom router, aby
+  // App.route.tab zůstal v souladu s viditelnou záložkou. Bez toho by deep-link ze zvonku na tutéž
+  // zakázku po ručním přepnutí záložky nevyvolal hashchange (shodný hash) → „mrtvý klik".
+  function selectTab(next: string) {
+    setTab(next);
+    const target = next === 'prehled' ? `#/tender/${tenderId}` : `#/tender/${tenderId}?tab=${next}`;
+    try {
+      if (window.location.hash !== target) {
+        window.history.replaceState(null, '', target);
+        window.dispatchEvent(new Event('hashchange'));
+      }
+    } catch {}
+  }
 
   // Po dokončení kroku pipeline obnovíme stav i všechny odvozené záložky.
   function handleStepComplete() {
@@ -232,7 +260,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
       {/* Tělo: obsah + metadatová lišta */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 20, marginTop: 20, alignItems: 'start' }}>
         <div style={{ minWidth: 0 }}>
-          <Tabs tabs={[...TABS]} value={tab} onChange={setTab} />
+          <Tabs tabs={[...TABS]} value={tab} onChange={selectTab} />
           <div style={{ marginTop: 16 }}>
             {tab === 'prehled' && <PrehledTab analysis={analysis} decision={decision} />}
             {tab === 'analyza' && <AnalysisView tenderId={tenderId} />}
@@ -241,9 +269,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
             {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
             {tab === 'terminy' && <TerminyTab tenderId={tenderId} />}
             {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
-            {tab === 'komentare' && (
-              <EmptyState icon={<MessageSquare size={28} />} title="Zatím žádné komentáře" hint="Týmové komentáře přibudou v dalším kroku." />
-            )}
+            {tab === 'komentare' && <CommentsTab tenderId={tenderId} />}
           </div>
         </div>
 
@@ -1168,6 +1194,165 @@ function UkolyTab({ tenderId }: { tenderId: string }) {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {ukoly.map(renderRow)}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function CommentsTab({ tenderId }: { tenderId: string }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const me = getStoredUser();
+  const isAdmin = me?.role === 'admin';
+
+  const { data: comments = [] } = useQuery({ queryKey: ['comments', tenderId], queryFn: () => getComments(tenderId) });
+  const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
+  const usersMap = new Map(users.map((u): [string, string] => [u.id, u.name || u.email]));
+
+  const [text, setText] = useState('');
+  const [mentions, setMentions] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  const invalidate = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['comments', tenderId] }),
+    qc.invalidateQueries({ queryKey: ['activity', tenderId] }),
+    qc.invalidateQueries({ queryKey: ['notifications'] }),
+  ]);
+
+  function toggleMention(id: string) {
+    setMentions((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function handleSubmit() {
+    const t = text.trim();
+    if (!t || saving) return;
+    setSaving(true);
+    try {
+      await createComment(tenderId, { text: t, mentions });
+      await invalidate();
+      setText('');
+      setMentions([]);
+      toast('Komentář přidán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(c: Comment) {
+    try {
+      await deleteComment(c.id);
+      await invalidate();
+      toast('Komentář smazán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    }
+  }
+
+  // Uživatelé k zmínění — bez sebe sama (self-notif se stejně na backendu přeskočí).
+  const mentionable = users.filter((u) => u.id !== me?.id);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Card title="Nový komentář">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Napište komentář týmu…"
+          rows={3}
+          style={{
+            width: '100%', boxSizing: 'border-box', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5,
+            fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)',
+            background: 'var(--surface-card)', border: '1px solid var(--border-strong)',
+            borderRadius: 'var(--radius-md)', outline: 'none',
+          }}
+        />
+        {mentionable.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)', marginBottom: 6 }}>
+              Zmínit (upozornit):
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {mentionable.map((u) => {
+                const on = mentions.includes(u.id);
+                const label = u.name || u.email;
+                return (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => toggleMention(u.id)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px 3px 4px', cursor: 'pointer',
+                      fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-xs)', fontWeight: 'var(--weight-medium)',
+                      color: on ? 'var(--accent)' : 'var(--text-secondary)',
+                      background: on ? 'var(--accent-soft-bg)' : 'var(--surface-page)',
+                      border: `1px solid ${on ? 'var(--accent)' : 'var(--border-default)'}`,
+                      borderRadius: 'var(--radius-full)',
+                    }}
+                  >
+                    <Avatar name={label} size={18} />
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+          <Button
+            variant="primary"
+            size="sm"
+            iconLeft={<MessageSquare size={14} />}
+            onClick={() => void handleSubmit()}
+            disabled={saving || !text.trim()}
+          >
+            Přidat komentář
+          </Button>
+        </div>
+      </Card>
+
+      <Card title={comments.length ? `Komentáře (${comments.length})` : 'Komentáře'}>
+        {comments.length === 0 ? (
+          <EmptyState icon={<MessageSquare size={28} />} title="Zatím žádné komentáře" hint="Napište první komentář týmu výše." />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {comments.map((c) => {
+              const authorName = (c.author_id && usersMap.get(c.author_id)) || c.author_name || 'Neznámý';
+              const canDelete = isAdmin || (!!me?.id && c.author_id === me.id);
+              return (
+                <div key={c.id} style={{ display: 'flex', gap: 10 }}>
+                  <Avatar name={authorName} size={30} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+                        {authorName}
+                      </span>
+                      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+                        {relativeTime(c.created_at)}
+                      </span>
+                      {canDelete && (
+                        <Button variant="ghost" size="sm" onClick={() => void handleDelete(c)} title="Smazat komentář" style={{ marginLeft: 'auto' }}>
+                          <Trash2 size={14} />
+                        </Button>
+                      )}
+                    </div>
+                    <div style={{ marginTop: 3, fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {c.text}
+                    </div>
+                    {c.mentions.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                        {c.mentions.map((mid) => (
+                          <Badge key={mid} tone="primary" size="sm">@{usersMap.get(mid) ?? mid}</Badge>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </Card>

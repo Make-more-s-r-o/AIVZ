@@ -40,6 +40,7 @@ import {
   getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy, getDueReminders, markReminded,
 } from './lib/terminy-store.js';
 import { notify, getNotifications, getUnreadCount, markRead } from './lib/notif-store.js';
+import { getComments, getComment, createComment, softDeleteComment } from './lib/comments-store.js';
 import { updateUserRole, USER_ROLES, type UserRole } from './lib/user-store.js';
 import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
@@ -1701,9 +1702,11 @@ app.get('/api/tenders/:id/tasks', async (req, res) => {
   }
 });
 
-// GET „Moje úkoly" napříč zakázkami — assignee z query (GET nemá req.user).
-app.get('/api/tasks/mine', async (req, res) => {
-  const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : '';
+// GET „Moje úkoly" napříč zakázkami — příjemce VÝHRADNĚ z JWT sub (requireJwt), NIKDY z ?assignee.
+// Jinak IDOR: GET obchází auth middleware → kdokoli by přes ?assignee=<cizí id> četl cizí úkoly.
+// Vzor /api/notifications; resilientní klient si 401 přeloží na prázdno (žádný reload loop).
+app.get('/api/tasks/mine', requireJwt, async (req, res) => {
+  const assignee = (req as any).user?.sub as string | undefined;
   if (!assignee) return res.json({ tasks: [] });
   try {
     res.json({ tasks: await getMyTasks(assignee) });
@@ -1956,6 +1959,95 @@ app.post('/api/tenders/:id/terminy/seed', async (req, res) => {
     const actorName = (req as any).user?.name ?? null;
     if (inserted > 0) await logActivity(id, 'terminy_seeded', actor, { count: inserted, actor_name: actorName });
     res.json({ seeded: inserted, terminy: await getTerminy(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Komentáře + @mention (M8) ---
+const MAX_COMMENT_LEN = 5000;
+const MAX_MENTIONS = 50;
+
+// GET komentáře zakázky (public GET → [] bez DB, neshazuje 401-loop, vzor /tasks).
+app.get('/api/tenders/:id/comments', async (req, res) => {
+  try {
+    res.json({ comments: await getComments(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST komentář — text povinný (cap). mentions se NEDŮVĚŘUJÍ z klienta: filtrují se na reálné
+// uživatele (anti-IDOR/spam), dedup a cap. notify: každý zmíněný ('mention') + řešitel zakázky
+// ('comment'); self a duplicity (assignee už zmíněný) se přeskočí. Autor z JWT (global auth mw).
+app.post('/api/tenders/:id/comments', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const body = req.body ?? {};
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'text_required' });
+  if (text.length > MAX_COMMENT_LEN) return res.status(400).json({ error: 'text_too_long' });
+  const rawMentions: string[] = Array.isArray(body.mentions)
+    ? body.mentions.filter((m: unknown): m is string => typeof m === 'string')
+    : [];
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    // mentions ověř proti reálným uživatelům (nedůvěřuj klientovi) + dedup + cap.
+    const users = await getAllUsers().catch(() => [] as Array<{ id: string }>);
+    const validIds = new Set(users.map((u) => u.id));
+    const mentions = Array.from(new Set(rawMentions)).filter((m) => validIds.has(m)).slice(0, MAX_MENTIONS);
+    const comment = await createComment({ tender_id: id, text, mentions, author_id: actor, author_name: actorName });
+    await logActivity(id, 'comment_added', actor, { comment_id: comment.id, actor_name: actorName });
+    const notified = new Set<string>();
+    for (const uid of mentions) {
+      if (uid === actor) continue;
+      notified.add(uid);
+      await notify({
+        user_id: uid, typ: 'mention', text: `${actorName ?? 'Někdo'} vás zmínil v komentáři.`,
+        url: `#/tender/${id}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
+        actor_id: actor, dedup_key: `mention:${comment.id}:${uid}`,
+      });
+    }
+    // řešitel zakázky (pokud existuje, není autor ani už zmíněný).
+    const crm = await getStatus(id).catch(() => null);
+    if (crm?.assignee && crm.assignee !== actor && !notified.has(crm.assignee)) {
+      await notify({
+        user_id: crm.assignee, typ: 'comment', text: 'Nový komentář u přiřazené zakázky.',
+        url: `#/tender/${id}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
+        actor_id: actor, dedup_key: `comment:${comment.id}`,
+      });
+    }
+    res.json(comment);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE komentář — soft-delete; jen autor NEBO admin (role z user-store dle sub, ne JWT claim).
+app.delete('/api/comments/:commentId', async (req, res) => {
+  const { commentId } = req.params;
+  // \d{1,18} — vejde se do bigintu (jinak ::bigint cast hodí 22003 → 500), vzor markRead v notif-store.
+  if (!/^\d{1,18}$/.test(commentId)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const comment = await getComment(commentId);
+    if (!comment) return res.status(404).json({ error: 'not_found' });
+    const sub = (req as any).user?.sub ?? null;
+    let isAdmin = false;
+    if (sub) {
+      const u = await getUserById(sub);
+      isAdmin = u?.role === 'admin';
+    } else if (!isJwtEnabled()) {
+      isAdmin = true; // dev bez JWT = single-user, smí mazat
+    }
+    if (!isAdmin && (!comment.author_id || comment.author_id !== sub)) {
+      return res.status(403).json({ error: 'forbidden', reason: 'Smazat komentář může jen autor nebo administrátor.' });
+    }
+    const ok = await softDeleteComment(commentId);
+    if (ok) await logActivity(comment.tender_id, 'comment_deleted', sub, { comment_id: comment.id });
+    res.json({ success: ok });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

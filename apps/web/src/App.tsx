@@ -22,7 +22,7 @@ type Route =
   | { view: 'pipeline' }
   | { view: 'zakazky' }
   | { view: 'kalendar' }
-  | { view: 'tender'; tenderId: string }
+  | { view: 'tender'; tenderId: string; tab?: string }
   | { view: 'warehouse'; tab: WarehouseTab }
   | { view: 'warehouse-product'; productId: string }
   | { view: 'registrace' }
@@ -42,7 +42,12 @@ function parseHash(): Route {
 
   if (path.startsWith('/tender/')) {
     const tenderId = path.split('/')[2];
-    if (tenderId) return { view: 'tender', tenderId };
+    if (tenderId) {
+      // Deep-link na konkrétní záložku, např. #/tender/<id>?tab=komentare (zvonek notifikace).
+      const q = qIdx === -1 ? '' : hash.slice(qIdx + 1);
+      const tab = new URLSearchParams(q).get('tab') || undefined;
+      return { view: 'tender', tenderId, tab };
+    }
   }
   if (path.startsWith('/warehouse/product/')) {
     const productId = path.split('/')[3];
@@ -154,7 +159,9 @@ export default function App() {
       content = <KalendarPage />;
       break;
     case 'tender':
-      content = <TenderDetailPage tenderId={route.tenderId} onBack={() => navigate('/zakazky')} />;
+      // key={tenderId} → remount při přepnutí zakázky, aby se initialTab (deep-link) čistě
+      // aplikoval na novou zakázku a nezůstala „zděděná" záložka z předchozí.
+      content = <TenderDetailPage key={route.tenderId} tenderId={route.tenderId} initialTab={route.tab} onBack={() => navigate('/zakazky')} />;
       break;
     case 'warehouse':
       content = <WarehouseDashboard initialTab={route.tab} />;
