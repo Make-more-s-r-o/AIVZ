@@ -1,9 +1,10 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
-import { Search, Plus, SlidersHorizontal, Inbox } from 'lucide-react';
-import { Button, Input, Select, Checkbox } from '../components/ui';
-import { StageBadge, DeadlineCountdown } from '../components/crm';
-import { getTenders, getAnalysis } from '../lib/api';
+import { Search, Plus, Inbox } from 'lucide-react';
+import { Button, Input, Select, Avatar } from '../components/ui';
+import { StageBadge, DecisionPill, DeadlineCountdown } from '../components/crm';
+import { getTenders, getAnalysis, getUsers } from '../lib/api';
+import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { fmtCZK } from '../lib/format';
 import type { StageKey } from '../lib/stages';
@@ -16,9 +17,6 @@ export interface ZakazkyPageProps {
 const VIEWS = ['Všechny', 'Přiřazeno mně', 'Blížící se lhůty', 'GO rozhodnuto', 'Vyhráno letos'] as const;
 type View = (typeof VIEWS)[number];
 
-// Region je čistě vizuální filtr — zdroj dat o kraji zatím neexistuje.
-const REGIONS = ['Všechny kraje', 'Praha', 'Středočeský', 'Jihomoravský', 'Moravskoslezský', 'Ostatní'];
-
 const DECISION_OPTIONS = [
   { value: '', label: 'Všechna rozhodnutí' },
   { value: 'GO', label: 'GO' },
@@ -27,8 +25,9 @@ const DECISION_OPTIONS = [
 ];
 
 // Mřížka sloupců — sdílená hlavičkou i řádky pro přesné zarovnání.
-const GRID = '40px minmax(220px, 2.4fr) minmax(170px, 1.7fr) 150px 132px 138px 76px 60px';
-const MIN_WIDTH = 980;
+// Název · Zadavatel · Hodnota · Lhůta · Stav · Skóre · Řeší.
+const GRID = 'minmax(220px, 2.4fr) minmax(170px, 1.7fr) 150px 132px 138px 96px 64px';
+const MIN_WIDTH = 940;
 
 interface Row {
   id: string;
@@ -41,16 +40,16 @@ interface Row {
   lhuta: string | null | undefined;
   decision: Decision | null;
   days: number | null;
+  assignee: string | null;
 }
 
 const HEAD: { label: string; align?: 'right' }[] = [
-  { label: '' },
   { label: 'Název' },
   { label: 'Zadavatel' },
   { label: 'Hodnota', align: 'right' },
   { label: 'Lhůta' },
   { label: 'Stav' },
-  { label: 'Skóre' },
+  { label: 'Doporučení' },
   { label: 'Řeší' },
 ];
 
@@ -59,10 +58,14 @@ const mono: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 'var(--f
 export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('Všechny');
-  const [region, setRegion] = useState('Všechny kraje');
   const [decision, setDecision] = useState('');
 
+  const currentUserId = getStoredUser()?.id ?? null;
+
   const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
+  // Řešitel = jméno z user-store; enrichment, degraduje na prázdno (getUsers je resilientní).
+  const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
+  const usersMap = useMemo(() => new Map(users.map((u): [string, string] => [u.id, u.name || u.email])), [users]);
 
   // Lazy per-row obohacení (zadavatel, hodnota, lhůta, rozhodnutí) z analysis.json.
   const analyses = useQueries({
@@ -92,6 +95,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           lhuta,
           decision: normalizeDecision(a?.doporuceni?.rozhodnuti),
           days: deadlineDays(lhuta),
+          assignee: t.assignee ?? null,
         };
       }),
     [tenders, analyses],
@@ -107,7 +111,9 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
       if (decision && r.decision !== decision) return false;
       switch (view) {
         case 'Přiřazeno mně':
-          return false; // řešitel zatím není napojen → poctivě prázdné
+          // Reálné: zakázky přiřazené přihlášenému uživateli (bez přihlášení → prázdné).
+          if (!currentUserId || r.assignee !== currentUserId) return false;
+          break;
         case 'Blížící se lhůty':
           if (r.days == null || r.days < 0 || r.days > 7) return false;
           break;
@@ -115,20 +121,19 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           if (r.decision !== 'GO') return false;
           break;
         case 'Vyhráno letos':
-          if (r.stage !== 'vyhrano') return false; // stav „vyhráno" zatím není dosažitelný → prázdné
+          if (r.stage !== 'vyhrano') return false;
           break;
         default:
           break;
       }
       return true;
     });
-  }, [rows, query, decision, view]);
+  }, [rows, query, decision, view, currentUserId]);
 
-  const hasFilters = query.trim() !== '' || view !== 'Všechny' || decision !== '' || region !== 'Všechny kraje';
+  const hasFilters = query.trim() !== '' || view !== 'Všechny' || decision !== '';
   const resetFilters = () => {
     setQuery('');
     setView('Všechny');
-    setRegion('Všechny kraje');
     setDecision('');
   };
 
@@ -144,7 +149,8 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
             {filtered.length} z {rows.length} {plural(rows.length)}
           </p>
         </div>
-        <Button variant="primary" iconLeft={<Plus size={15} />} onClick={() => { /* TODO: ruční import zakázky */ }}>
+        {/* Ruční import = nahrání zadávací dokumentace v ingest inboxu (Monitoring). */}
+        <Button variant="primary" iconLeft={<Plus size={15} />} onClick={() => { window.location.hash = '/monitoring'; }}>
           Ruční import
         </Button>
       </div>
@@ -182,15 +188,9 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
             iconLeft={<Search size={15} />}
           />
         </div>
-        <div style={{ width: 180 }}>
-          <Select value={region} onChange={(e) => setRegion(e.target.value)} options={REGIONS} />
-        </div>
         <div style={{ width: 190 }}>
           <Select value={decision} onChange={(e) => setDecision(e.target.value)} options={DECISION_OPTIONS} />
         </div>
-        <Button variant="ghost" iconLeft={<SlidersHorizontal size={15} />} onClick={() => { /* TODO: rozšířené filtry */ }}>
-          Více filtrů
-        </Button>
       </div>
 
       {/* Tabulka */}
@@ -210,10 +210,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
                 background: 'var(--surface-sunken)', borderBottom: '1px solid var(--border-default)',
               }}
             >
-              <span style={{ display: 'flex' }}>
-                <Checkbox checked={false} disabled />
-              </span>
-              {HEAD.slice(1).map((h) => (
+              {HEAD.map((h) => (
                 <span
                   key={h.label}
                   style={{
@@ -233,7 +230,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
             ) : filtered.length === 0 ? (
               <EmptyState hasFilters={hasFilters} onReset={resetFilters} />
             ) : (
-              filtered.map((r) => <TableRow key={r.id} row={r} onOpen={onOpen} />)
+              filtered.map((r) => <TableRow key={r.id} row={r} usersMap={usersMap} onOpen={onOpen} />)
             )}
           </div>
         </div>
@@ -248,7 +245,7 @@ function plural(n: number): string {
   return 'zakázek';
 }
 
-function TableRow({ row, onOpen }: { row: Row; onOpen?: (id: string) => void }) {
+function TableRow({ row, usersMap, onOpen }: { row: Row; usersMap: Map<string, string>; onOpen?: (id: string) => void }) {
   const [hover, setHover] = useState(false);
   const dash = <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
 
@@ -265,11 +262,6 @@ function TableRow({ row, onOpen }: { row: Row; onOpen?: (id: string) => void }) 
         transition: 'background var(--duration-fast)',
       }}
     >
-      {/* Checkbox (vizuální) */}
-      <span style={{ display: 'flex' }} onClick={(e) => e.stopPropagation()}>
-        <Checkbox checked={false} onChange={() => { /* výběr řádků: TODO */ }} />
-      </span>
-
       {/* Název */}
       <div style={{ minWidth: 0, padding: '8px 0' }}>
         <div style={{
@@ -321,11 +313,23 @@ function TableRow({ row, onOpen }: { row: Row; onOpen?: (id: string) => void }) 
         <StageBadge status={row.stage} size="sm" />
       </div>
 
-      {/* Skóre — zdroj relevance zatím neexistuje */}
-      <div>{dash}</div>
+      {/* Doporučení — GO/NOGO/ZVÁŽIT z AI analýzy (dokud není analýza, prázdné). */}
+      <div>
+        {row.decision ? (
+          <DecisionPill decision={row.decision} style={{ padding: '3px 10px', fontSize: 'var(--font-size-2xs)' }} />
+        ) : (
+          dash
+        )}
+      </div>
 
-      {/* Řeší — přiřazení zatím neexistuje */}
-      <div>{dash}</div>
+      {/* Řeší — přiřazený řešitel (avatar), jinak prázdné. */}
+      <div>
+        {row.assignee ? (
+          <Avatar name={usersMap.get(row.assignee) ?? row.assignee} size={26} />
+        ) : (
+          dash
+        )}
+      </div>
     </div>
   );
 }
@@ -341,7 +345,6 @@ function SkeletonRows() {
             padding: '0 16px', minHeight: 52, borderBottom: '1px solid var(--border-subtle)',
           }}
         >
-          <Bar w={16} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' }}>
             <Bar w="70%" />
             <Bar w="40%" h={8} />
@@ -350,8 +353,8 @@ function SkeletonRows() {
           <div style={{ justifySelf: 'end', width: '50%' }}><Bar w="100%" /></div>
           <Bar w="55%" />
           <Bar w={80} h={18} />
-          <Bar w={28} />
-          <Bar w={28} />
+          <Bar w={56} h={18} />
+          <Bar w={26} h={26} />
         </div>
       ))}
     </>
