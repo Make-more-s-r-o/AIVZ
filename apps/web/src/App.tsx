@@ -147,7 +147,7 @@ export default function App() {
       content = <PrehledPage onOpen={(id) => navigate('/tender/' + id)} currentUserId={user?.id} />;
       break;
     case 'monitoring':
-      content = <MonitoringPage />;
+      content = <MonitoringPage onOpen={(id) => navigate('/tender/' + id)} />;
       break;
     case 'pipeline':
       content = <PipelinePage onOpen={(id) => navigate('/tender/' + id)} />;
