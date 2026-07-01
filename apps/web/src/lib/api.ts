@@ -357,6 +357,24 @@ export async function setTenderAssignee(
   return res.json();
 }
 
+/**
+ * Finalizace nabídky — gate na kompletní podatelný balík, pak přechod pripravena→odeslana.
+ * Na nepřipravenou nabídku (409) vyhodí Error s výčtem problémů (pro toast).
+ * Po úspěchu FE stáhne kompletní balík přes getBundleZipUrl.
+ */
+export async function finalizeTender(id: string): Promise<{ success: boolean; status: StageKey }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/finalize`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const problems = Array.isArray(err.problems) && err.problems.length ? ' · ' + err.problems.join(' · ') : '';
+    throw new Error((err.reason || err.error || 'Finalizace selhala') + problems);
+  }
+  return res.json();
+}
+
 export async function getActivity(id: string): Promise<ActivityEntry[]> {
   const data = await fetchJson<{ activity: ActivityEntry[] }>(`/tenders/${id}/activity`);
   return data.activity;

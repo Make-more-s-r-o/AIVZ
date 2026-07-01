@@ -54,6 +54,25 @@ Odpověz POUZE validním JSON polem (bez markdown, bez komentářů):
   ...
 ]`;
 
+/**
+ * System prompt pro vyplňování NÁVRHU KUPNÍ SMLOUVY. Vychází z obecného prompt výše,
+ * ale přidává role-aware pravidla: doplnit VÝHRADNĚ prodávajícího (naši firmu), kupujícího
+ * (zadavatele) nechat beze změny, celková cena = cena z cenové nabídky. Jde o závaznou
+ * smlouvu — klauzule se nemění, doplňují se jen prázdná/placeholder pole.
+ */
+export const CONTRACT_FILL_SYSTEM = TEMPLATE_FILL_SYSTEM + `
+
+--- SPECIFICKÁ PRAVIDLA PRO KUPNÍ SMLOUVU (závazný dokument) ---
+Toto je NÁVRH KUPNÍ SMLOUVY. Navíc dodržuj:
+- Doplňuj VÝHRADNĚ údaje PRODÁVAJÍCÍHO (dodavatel / uchazeč) z DAT FIRMY: obchodní firma, IČO, DIČ,
+  sídlo, bankovní účet / IBAN, datová schránka, jednající osoba a její funkce, kontaktní údaje.
+- Údaje KUPUJÍCÍHO (zadavatel) jsou předvyplněné v šabloně — NIKDY je neměň, nepřepisuj ani nemaž.
+- Celková kupní cena = nabídková cena z DAT ZAKÁZKY (cena bez DPH / DPH / cena s DPH). Doplň ji
+  konzistentně do polí kupní ceny / ceny plnění (bez DPH, DPH i s DPH, kde to smlouva rozlišuje).
+- Místo a datum uzavření: "V Praha dne DD.MM.YYYY" (nebo dle sídla prodávajícího).
+- Podpisové pole prodávajícího: jméno a funkce jednající osoby.
+- NEMĚŇ žádný text klauzulí smlouvy — pouze doplň prázdná / placeholder pole.`;
+
 export interface TemplateFillTenderData {
   nazev_zakazky: string;
   evidencni_cislo?: string;

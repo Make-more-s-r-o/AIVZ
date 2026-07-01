@@ -35,6 +35,7 @@ import {
 import {
   canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, type StageKey, type StepFlags,
 } from './lib/stage-machine.js';
+import { computeSubmitGate } from './lib/submit-gate.js';
 import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
@@ -1725,6 +1726,35 @@ app.post('/api/tenders/:id/tasks/seed', async (req, res) => {
       await logActivity(id, 'checklist_seeded', actor, { count: inserted, actor_name: actorName });
     }
     res.json({ seeded: inserted, tasks: await getTasks(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST finalize — gate na kompletní podatelnou nabídku, pak přechod pripravena→odeslana.
+// FE po úspěchu stáhne kompletní balík přes existující GET /download/bundle.
+app.post('/api/tenders/:id/finalize', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const gate = await computeSubmitGate(join(OUTPUT_DIR, id));
+    if (!gate.ready) {
+      return res.status(409).json({ error: 'not_ready', reason: 'Nabídka není připravená k podání.', problems: gate.problems });
+    }
+    const pipeline = await getPipelineStatus(id);
+    const done = stepsDone(pipeline.steps);
+    const crm = await getStatus(id);
+    const current = crm?.status ?? deriveStageFromSteps(done);
+    const check = canTransition(current, 'odeslana' as StageKey, done);
+    if (!check.ok) {
+      return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+    }
+    await setStatus(id, 'odeslana' as StageKey);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await logActivity(id, 'finalized', actor, { actor_name: actorName });
+    res.json({ success: true, status: 'odeslana' });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

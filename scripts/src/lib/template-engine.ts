@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { callClaude } from './ai-client.js';
-import { TEMPLATE_FILL_SYSTEM, buildTemplateFillUserMessage } from '../prompts/template-fill.js';
+import { TEMPLATE_FILL_SYSTEM, CONTRACT_FILL_SYSTEM, buildTemplateFillUserMessage } from '../prompts/template-fill.js';
 import {
   Document,
   Packer,
@@ -467,6 +467,14 @@ function normalizeRPr(rPr: string): string {
  */
 function mergeRunsInParagraphs(xml: string): string {
   return xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (para) => {
+    // Scoped merge: consolidate runs ONLY in paragraphs that actually contain a placeholder.
+    // Clean paragraphs stay byte-identical, which protects rich formatting (bold defined terms
+    // in contracts) that Case-2 merging would otherwise flatten to the first run's rPr.
+    const paraText = (para.match(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g) || [])
+      .map((t) => t.replace(/<[^>]+>/g, ''))
+      .join('');
+    if (!hasPlaceholders(paraText)) return para;
+
     interface Segment {
       type: 'run' | 'other';
       content: string;
@@ -1157,9 +1165,12 @@ export async function fillTemplateWithAI(
     lhuta_nabidek?: string;
     produkt_nazev?: string;
     produkt_popis?: string;
-  }
+  },
+  docType?: string
 ): Promise<FillTemplateWithAIResult> {
   const debugMode = process.env.DEBUG_TEMPLATES === '1';
+  // Kupní smlouva = závazný dokument → role-aware prompt (doplnit jen prodávajícího).
+  const systemPrompt = docType === 'kupni_smlouva' ? CONTRACT_FILL_SYSTEM : TEMPLATE_FILL_SYSTEM;
   const outputDir = dirname(templatePath);
   const content = await readFile(templatePath);
   const zip = new PizZip(content);
@@ -1201,7 +1212,7 @@ export async function fillTemplateWithAI(
 
   // Call AI to identify placeholders — now with paragraph-segmented text
   const aiResult = await callClaude(
-    TEMPLATE_FILL_SYSTEM,
+    systemPrompt,
     buildTemplateFillUserMessage(plainText, templateName, companyData, tenderData, paragraphTexts),
     { maxTokens: 4096, temperature: 0.1 }
   );
@@ -1264,7 +1275,7 @@ export async function fillTemplateWithAI(
     const plainText2 = stripXmlTags(modifiedXml);
 
     const retryResult = await callClaude(
-      TEMPLATE_FILL_SYSTEM,
+      systemPrompt,
       buildTemplateFillUserMessage(plainText2, `${templateName} (second pass)`, companyData, tenderData, paragraphTexts2),
       { maxTokens: 4096, temperature: 0.0 }
     );
@@ -1378,10 +1389,31 @@ function classifyByContent(text: string): DiscoveredTemplate['type'] | null {
 /**
  * Check if text contains placeholder patterns that signal "needs manual input".
  */
-function hasPlaceholders(text: string): boolean {
+export function hasPlaceholders(text: string): boolean {
   const lower = text.toLowerCase();
   return UNFILLED_PATTERNS.some(p => lower.includes(p.toLowerCase()))
     || /_{3,}|\.{4,}|…{2,}|\[vyplnit\]|\[doplnit\]|\[účastník vyplní\]/i.test(text);
+}
+
+/**
+ * Read a generated .docx and report whether it still contains unfilled placeholders
+ * ("doplní účastník", "______", …). Used by the submit-gate to block ready_to_submit
+ * when a required document was not fully filled. Best-effort: on read error returns false
+ * (don't block on a parse failure — other checks still apply).
+ */
+export async function docHasResidualPlaceholders(docxPath: string): Promise<boolean> {
+  try {
+    const content = await readFile(docxPath);
+    const zip = new PizZip(content);
+    const xml = zip.file('word/document.xml')?.asText() ?? '';
+    const text = stripXmlTags(xml).toLowerCase();
+    // JEN explicitní textové placeholdery ("doplní účastník", "[vyplnit]"…). ZÁMĚRNĚ NE
+    // podtržítka / tečkové linky (_{3,}, ....) — ty jsou legitimní podpisové a datové řádky
+    // v HOTOVÝCH dokumentech; jinak by gate blokoval ~46 % reálných nabídek (false positive).
+    return UNFILLED_PATTERNS.some((p) => text.includes(p.toLowerCase()));
+  } catch {
+    return false;
+  }
 }
 
 /**

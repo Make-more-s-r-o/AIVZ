@@ -12,9 +12,11 @@ import {
   getGenerationMeta,
   getFieldValidation,
   setDocumentMode,
+  finalizeTender,
   type FieldValidationResult,
 } from '../lib/api';
-import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, Send } from 'lucide-react';
+import { Button, useToast } from './ui';
 
 interface DocumentListProps {
   tenderId: string;
@@ -92,8 +94,10 @@ function ValidationChecklist({ result }: { result: FieldValidationResult }) {
 
 export default function DocumentList({ tenderId }: DocumentListProps) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const { data: documents, isLoading, error } = useQuery({
@@ -158,6 +162,23 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     }
   }, [tenderId, queryClient]);
 
+  const handleFinalize = useCallback(async () => {
+    setFinalizing(true);
+    try {
+      await finalizeTender(tenderId);
+      toast('Nabídka označena jako odeslaná', 'success');
+      // Stažení kompletního balíku spustí prohlížeč (Content-Disposition: attachment),
+      // stránka se neodnaviguje, takže invalidace stavu proběhne.
+      window.location.href = getBundleZipUrl(tenderId);
+      queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
+    } catch (err) {
+      // Zpráva z API už obsahuje výčet problémů brány (cenový strop, placeholdery, chybějící ceny).
+      toast((err as Error).message, 'danger');
+    } finally {
+      setFinalizing(false);
+    }
+  }, [tenderId, queryClient, toast]);
+
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok "Dokumenty".</div>;
 
@@ -172,6 +193,8 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
   // Overall readiness
   const allDocsPass = fieldValidation?.every(r => r.overall === 'pass');
   const hasValidation = fieldValidation && fieldValidation.length > 0;
+  // Připraveno k odeslání = máme validaci a všechny dokumenty prošly (stejný signál jako banner).
+  const readyToSubmit = Boolean(hasValidation && allDocsPass);
 
   return (
     <div className="space-y-6">
@@ -190,6 +213,25 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
             ? <><ShieldCheck className="h-5 w-5" /> <span className="font-medium">Dokumenty jsou připraveny k odeslání</span></>
             : <><ShieldAlert className="h-5 w-5" /> <span className="font-medium">Některé dokumenty vyžadují kontrolu</span></>
           }
+        </div>
+      )}
+
+      {/* Finalizace — brána na kompletní podatelný balík, pak označení zakázky jako odeslané */}
+      {documents && documents.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-white px-4 py-3">
+          <Button
+            variant="primary"
+            iconLeft={<Send className="h-4 w-4" />}
+            disabled={!readyToSubmit || finalizing}
+            onClick={handleFinalize}
+          >
+            {finalizing ? 'Odesílám...' : 'Označit odeslanou a stáhnout kompletní nabídku'}
+          </Button>
+          {!readyToSubmit && (
+            <span className="text-xs text-gray-500">
+              Nejprve doplňte cenu a dokumenty a spusťte validaci.
+            </span>
+          )}
         </div>
       )}
 
