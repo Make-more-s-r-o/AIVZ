@@ -486,6 +486,111 @@ export async function seedChecklist(id: string): Promise<{ seeded: number; tasks
   return res.json();
 }
 
+// --- Termíny + kalendář (M6) ---
+
+export type TerminTyp = 'lhuta_nabidek' | 'otevirani_obalek' | 'doba_plneni' | 'prohlidka' | 'vlastni';
+
+export interface Termin {
+  id: string;
+  tender_id: string;
+  typ: TerminTyp;
+  datum: string | null; // 'YYYY-MM-DD'
+  cas: string | null;
+  popis: string | null;
+  pripominka: number | null;
+  seed_key: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CalendarItem {
+  id: string;
+  tender_id: string;
+  typ: TerminTyp;
+  datum: string | null;
+  cas: string | null;
+  popis: string | null;
+  kind: 'termin';
+}
+
+export interface CreateTerminInput {
+  typ: TerminTyp;
+  datum: string;
+  cas?: string | null;
+  popis?: string | null;
+  pripominka?: number | null;
+}
+
+// Resilientní GETy (vzor getTasks) — 401/chyba → prázdno, ne reload.
+export async function getTerminy(id: string): Promise<Termin[]> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${id}/terminy`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).terminy ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getCalendar(from?: string, to?: string): Promise<CalendarItem[]> {
+  try {
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to) qs.set('to', to);
+    const res = await fetch(`${API_BASE}/calendar${qs.toString() ? '?' + qs.toString() : ''}`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).items ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function createTermin(id: string, input: CreateTerminInput): Promise<Termin> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/terminy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se vytvořit termín');
+  }
+  return res.json();
+}
+
+export async function updateTermin(terminId: string, patch: Partial<CreateTerminInput>): Promise<Termin> {
+  const res = await fetch(`${API_BASE}/terminy/${terminId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se upravit termín');
+  }
+  return res.json();
+}
+
+export async function deleteTermin(terminId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/terminy/${terminId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se smazat termín');
+  }
+  return res.json();
+}
+
+/** Seed termínů z analysis.terminy (idempotentní). */
+export async function seedTerminy(id: string): Promise<{ seeded: number; terminy: Termin[] }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/terminy/seed`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se vygenerovat termíny');
+  }
+  return res.json();
+}
+
 // --- AI Cost ---
 
 export interface CostSummary {

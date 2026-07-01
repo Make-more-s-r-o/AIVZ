@@ -37,6 +37,9 @@ import {
 } from './lib/stage-machine.js';
 import { computeSubmitGate } from './lib/submit-gate.js';
 import {
+  getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy,
+} from './lib/terminy-store.js';
+import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
   getDataSources, getManufacturers, getProductPrices, getPriceHistory,
@@ -1755,6 +1758,120 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
     const actorName = (req as any).user?.name ?? null;
     await logActivity(id, 'finalized', actor, { actor_name: actorName });
     res.json({ success: true, status: 'odeslana' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Termíny + Kalendář (M6) ---
+const TERMIN_TYPY = ['lhuta_nabidek', 'otevirani_obalek', 'doba_plneni', 'prohlidka', 'vlastni'];
+
+// GET termíny zakázky (public GET → resilientní)
+app.get('/api/tenders/:id/terminy', async (req, res) => {
+  try {
+    res.json({ terminy: await getTerminy(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET kalendář — termíny napříč zakázkami v rozsahu (resilientní)
+app.get('/api/calendar', async (req, res) => {
+  const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+  const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+  try {
+    const terminy = await getAllTerminy(from, to);
+    const items = terminy.map((t) => ({
+      id: t.id, tender_id: t.tender_id, typ: t.typ, datum: t.datum, cas: t.cas, popis: t.popis, kind: 'termin' as const,
+    }));
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST vytvoření termínu
+app.post('/api/tenders/:id/terminy', async (req, res) => {
+  const { id } = req.params;
+  const { typ, datum, cas, popis, pripominka } = req.body ?? {};
+  if (!typ || !TERMIN_TYPY.includes(typ)) return res.status(400).json({ error: 'invalid_typ' });
+  if (!datum || typeof datum !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(datum)) return res.status(400).json({ error: 'invalid_datum' });
+  if (pripominka != null && (typeof pripominka !== 'number' || pripominka < 0)) return res.status(400).json({ error: 'invalid_pripominka' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    const termin = await createTermin({ tender_id: id, typ, datum, cas: cas ?? null, popis: popis ?? null, pripominka: pripominka ?? null, created_by: actor });
+    await logActivity(id, 'termin_created', actor, { termin_id: termin.id, typ, datum, actor_name: actorName });
+    res.json(termin);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PATCH úprava termínu
+app.patch('/api/terminy/:terminId', async (req, res) => {
+  const { terminId } = req.params;
+  if (!/^\d+$/.test(terminId)) return res.status(400).json({ error: 'invalid_id' });
+  const body = req.body ?? {};
+  if (body.typ !== undefined && !TERMIN_TYPY.includes(body.typ)) return res.status(400).json({ error: 'invalid_typ' });
+  if (body.datum !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(body.datum)) return res.status(400).json({ error: 'invalid_datum' });
+  if (body.pripominka !== undefined && body.pripominka !== null && (typeof body.pripominka !== 'number' || body.pripominka < 0)) return res.status(400).json({ error: 'invalid_pripominka' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const termin = await updateTermin(terminId, body);
+    if (!termin) return res.status(404).json({ error: 'not_found' });
+    res.json(termin);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE termín
+app.delete('/api/terminy/:terminId', async (req, res) => {
+  const { terminId } = req.params;
+  if (!/^\d+$/.test(terminId)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    res.json({ success: await deleteTermin(terminId) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST seed termínů z analysis.terminy (idempotentní)
+app.post('/api/tenders/:id/terminy/seed', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    let analysis: any;
+    try {
+      analysis = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8'));
+    } catch {
+      return res.status(400).json({ error: 'analysis_required', reason: 'Nejprve spusťte AI analýzu — termíny se generují z analýzy.' });
+    }
+    const src = analysis?.terminy ?? {};
+    const mapping: Array<{ field: string; typ: string }> = [
+      { field: 'lhuta_nabidek', typ: 'lhuta_nabidek' },
+      { field: 'otevirani_obalek', typ: 'otevirani_obalek' },
+      { field: 'doba_plneni_od', typ: 'doba_plneni' },
+      { field: 'doba_plneni_do', typ: 'doba_plneni' },
+      { field: 'prohlidka_mista', typ: 'prohlidka' },
+    ];
+    const items = mapping
+      .map((m) => ({ raw: src[m.field], typ: m.typ, field: m.field }))
+      .filter((x) => typeof x.raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(x.raw))
+      .map((x) => {
+        const raw = x.raw as string;
+        const timeMatch = raw.match(/T(\d{2}:\d{2})/); // zachovat čas (lhůta 10:00 = submission cutoff)
+        return { typ: x.typ, datum: raw.slice(0, 10), cas: timeMatch ? timeMatch[1] : null, seed_key: `analysis:${x.field}` };
+      });
+    const inserted = await seedTerminy(id, items);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    if (inserted > 0) await logActivity(id, 'terminy_seeded', actor, { count: inserted, actor_name: actorName });
+    res.json({ seeded: inserted, terminy: await getTerminy(id) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -27,12 +27,17 @@ import {
   updateTask,
   deleteTask,
   seedChecklist,
+  getTerminy,
+  createTermin,
+  deleteTermin,
+  seedTerminy,
   type PipelineSteps,
   type ActivityEntry,
   type Task,
   type TaskStav,
   type TaskPriorita,
   type CreateTaskInput,
+  type Termin,
 } from '../lib/api';
 import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
 import { allowedNextStages } from '../lib/stage-machine';
@@ -234,7 +239,7 @@ export default function TenderDetailPage({ tenderId, onBack }: TenderDetailPageP
             {tab === 'oceneni' && <ProductMatchView tenderId={tenderId} />}
             {tab === 'dokumenty' && <DocumentList tenderId={tenderId} />}
             {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
-            {tab === 'terminy' && <TerminyTab analysis={analysis} />}
+            {tab === 'terminy' && <TerminyTab tenderId={tenderId} />}
             {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
             {tab === 'komentare' && (
               <EmptyState icon={<MessageSquare size={28} />} title="Zatím žádné komentáře" hint="Týmové komentáře přibudou v dalším kroku." />
@@ -313,25 +318,204 @@ function PrehledTab({ analysis, decision }: { analysis: TenderAnalysis | undefin
   );
 }
 
-function TerminyTab({ analysis }: { analysis: TenderAnalysis | undefined }) {
-  const t = analysis?.terminy;
-  const rows: Array<{ label: string; value?: string | null }> = [
-    { label: 'Lhůta pro podání nabídek', value: t?.lhuta_nabidek },
-    { label: 'Otevírání obálek', value: t?.otevirani_obalek },
-    { label: 'Plnění od', value: t?.doba_plneni_od },
-    { label: 'Plnění do', value: t?.doba_plneni_do },
-  ];
-  const hasAny = rows.some((r) => !!r.value);
+const TERMIN_LABEL: Record<Termin['typ'], string> = {
+  lhuta_nabidek: 'Lhůta pro nabídky',
+  otevirani_obalek: 'Otevírání obálek',
+  doba_plneni: 'Doba plnění',
+  prohlidka: 'Prohlídka místa',
+  vlastni: 'Vlastní',
+};
 
-  if (!hasAny) {
-    return <EmptyState icon={<CalendarClock size={28} />} title="Zatím žádné termíny" hint="Termíny se doplní po AI analýze zadávací dokumentace." />;
+const TERMIN_OPTIONS: SelectOption[] = [
+  { value: 'lhuta_nabidek', label: 'Lhůta pro nabídky' },
+  { value: 'otevirani_obalek', label: 'Otevírání obálek' },
+  { value: 'doba_plneni', label: 'Doba plnění' },
+  { value: 'prohlidka', label: 'Prohlídka místa' },
+  { value: 'vlastni', label: 'Vlastní' },
+];
+
+const PRIPOMINKA_OPTIONS: SelectOption[] = [
+  { value: '', label: 'Bez připomínky' },
+  { value: '1', label: '1 den předem' },
+  { value: '3', label: '3 dny předem' },
+  { value: '7', label: '7 dní předem' },
+];
+
+/** Český tvar „X dní/dny/den" pro připomínku. */
+function dayLabel(n: number): string {
+  if (n === 1) return 'den';
+  if (n >= 2 && n <= 4) return 'dny';
+  return 'dní';
+}
+
+/**
+ * Záložka Termíny — persistované lhůty zakázky (M6). Tlačítko „Načíst z analýzy"
+ * naseeduje termíny z analysis.terminy (idempotentně), inline formulář přidává
+ * ruční termíny. Změny invalidují i kalendář. Řádek: typ · datum · popis ·
+ * připomínka · smazání.
+ */
+function TerminyTab({ tenderId }: { tenderId: string }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+
+  const { data: terminy = [] } = useQuery({ queryKey: ['terminy', tenderId], queryFn: () => getTerminy(tenderId) });
+
+  const [seeding, setSeeding] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [typ, setTyp] = useState<Termin['typ']>('lhuta_nabidek');
+  const [datum, setDatum] = useState('');
+  const [popis, setPopis] = useState('');
+  const [pripominka, setPripominka] = useState('');
+
+  const invalidate = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['terminy', tenderId] }),
+    qc.invalidateQueries({ queryKey: ['calendar'] }),
+  ]);
+
+  // Řazení vzestupně dle data ('YYYY-MM-DD' → string compare); bez data na konec.
+  const sorted = [...terminy].sort((a, b) => (a.datum ?? '9999-99-99').localeCompare(b.datum ?? '9999-99-99'));
+
+  async function handleSeed() {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const r = await seedTerminy(tenderId);
+      await invalidate();
+      toast(r.seeded > 0 ? `Načteno ${r.seeded} termínů` : 'Termíny jsou aktuální', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function handleAdd() {
+    if (!datum || adding) return;
+    setAdding(true);
+    try {
+      await createTermin(tenderId, {
+        typ,
+        datum,
+        popis: popis.trim() || null,
+        pripominka: pripominka ? Number(pripominka) : null,
+      });
+      await invalidate();
+      setTyp('lhuta_nabidek');
+      setDatum('');
+      setPopis('');
+      setPripominka('');
+      toast('Termín přidán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleDelete(t: Termin) {
+    try {
+      await deleteTermin(t.id);
+      await invalidate();
+      toast('Termín smazán', 'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    }
+  }
+
+  function renderRow(t: Termin) {
+    return (
+      <div
+        key={t.id}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}
+      >
+        <Badge tone="outline" size="sm">{TERMIN_LABEL[t.typ]}</Badge>
+        <span style={{
+          flexShrink: 0, fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)',
+          color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+        }}>
+          {t.datum ? new Date(t.datum + 'T00:00:00').toLocaleDateString('cs-CZ') : '—'}{t.cas ? ` · ${t.cas}` : ''}
+        </span>
+        <span
+          title={t.popis ?? undefined}
+          style={{
+            flex: 1, minWidth: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}
+        >
+          {t.popis ?? ''}
+        </span>
+        {t.pripominka != null && (
+          <span style={{ flexShrink: 0, fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
+            připomínka {t.pripominka} {dayLabel(t.pripominka)} předem
+          </span>
+        )}
+        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat termín">
+          <Trash2 size={14} />
+        </Button>
+      </div>
+    );
   }
 
   return (
-    <Card title="Termíny">
-      {rows.map((r) => (
-        <InfoRow key={r.label} label={r.label} value={r.value} />
-      ))}
+    <Card
+      title="Termíny"
+      action={
+        <Button
+          variant="secondary"
+          size="sm"
+          iconLeft={<Sparkles size={14} />}
+          onClick={() => void handleSeed()}
+          disabled={seeding}
+        >
+          Načíst z analýzy
+        </Button>
+      }
+    >
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: sorted.length > 0 ? 12 : 4 }}>
+        <div style={{ width: 170 }}>
+          <Select
+            size="sm"
+            value={typ}
+            options={TERMIN_OPTIONS}
+            onChange={(e) => setTyp(e.target.value as Termin['typ'])}
+          />
+        </div>
+        <div style={{ width: 150 }}>
+          <Input type="date" value={datum} onChange={(e) => setDatum(e.target.value)} size="sm" />
+        </div>
+        <div style={{ flex: '1 1 180px', minWidth: 150 }}>
+          <Input
+            value={popis}
+            onChange={(e) => setPopis(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleAdd(); } }}
+            placeholder="Popis (nepovinné)…"
+            size="sm"
+          />
+        </div>
+        <div style={{ width: 150 }}>
+          <Select
+            size="sm"
+            value={pripominka}
+            options={PRIPOMINKA_OPTIONS}
+            onChange={(e) => setPripominka(e.target.value)}
+          />
+        </div>
+        <Button size="sm" iconLeft={<Plus size={14} />} onClick={() => void handleAdd()} disabled={!datum || adding}>
+          Přidat
+        </Button>
+      </div>
+
+      {sorted.length === 0 ? (
+        <EmptyState
+          icon={<CalendarClock size={28} />}
+          title="Zatím žádné termíny"
+          hint="Načtěte je z analýzy nebo přidejte ručně."
+        />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {sorted.map(renderRow)}
+        </div>
+      )}
     </Card>
   );
 }
