@@ -26,7 +26,9 @@ export interface BadgeProps {
  * sub-status sets (povinné Ano/Ne, zdroj chips, counts, etc.).
  */
 export function Badge({ children, tone = 'neutral', size = 'md', pill = true, dot = false, style }: BadgeProps) {
-  const t = tones[tone];
+  // Fallback na neutral pro neznámý tone (např. barva štítku z DB mimo známé tokeny) — jinak by
+  // t.fg/t.bg shodily render celého chipu.
+  const t = tones[tone] ?? tones.neutral;
   const pad = size === 'sm' ? '2px 7px' : '3px 9px';
   const fs = size === 'sm' ? 'var(--font-size-2xs)' : 'var(--font-size-xs)';
   return (

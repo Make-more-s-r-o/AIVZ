@@ -1,9 +1,10 @@
 import CompanySettings from '../components/CompanySettings';
 import UserManagement from '../components/UserManagement';
 import ChangePasswordForm from '../components/ChangePasswordForm';
+import TagManager from '../components/TagManager';
 import { Tabs } from '../components/ui';
 
-export type SettingsSection = 'firmy' | 'uzivatele' | 'heslo';
+export type SettingsSection = 'firmy' | 'uzivatele' | 'heslo' | 'stitky';
 
 export interface NastaveniPageProps {
   section: SettingsSection;
@@ -30,12 +31,14 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
           { value: 'firmy', label: 'Firmy' },
           { value: 'uzivatele', label: 'Uživatelé a role' },
           { value: 'heslo', label: 'Heslo' },
+          { value: 'stitky', label: 'Štítky' },
         ]}
         style={{ marginBottom: 20 }}
       />
       {section === 'firmy' && <CompanySettings />}
       {section === 'uzivatele' && currentUserId && <UserManagement currentUserId={currentUserId} />}
       {section === 'heslo' && <ChangePasswordForm />}
+      {section === 'stitky' && <TagManager />}
     </div>
   );
 }

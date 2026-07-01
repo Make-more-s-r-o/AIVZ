@@ -1,9 +1,13 @@
-import { useMemo, useState, type CSSProperties } from 'react';
-import { useQueries, useQuery } from '@tanstack/react-query';
-import { Search, Plus, Inbox } from 'lucide-react';
-import { Button, Input, Select, Avatar } from '../components/ui';
+import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Search, Plus, Inbox, Save, Trash2 } from 'lucide-react';
+import { Button, Input, Select, Avatar, Badge, useToast } from '../components/ui';
 import { StageBadge, DecisionPill, DeadlineCountdown } from '../components/crm';
-import { getTenders, getAnalysis, getUsers } from '../lib/api';
+import {
+  getTenders, getAnalysis, getUsers,
+  getViews, createView, deleteView, getTags,
+  type SavedView, type Stitek,
+} from '../lib/api';
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { fmtCZK } from '../lib/format';
@@ -41,6 +45,7 @@ interface Row {
   decision: Decision | null;
   days: number | null;
   assignee: string | null;
+  stitky: Stitek[];
 }
 
 const HEAD: { label: string; align?: 'right' }[] = [
@@ -59,13 +64,25 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('Všechny');
   const [decision, setDecision] = useState('');
+  const [tagId, setTagId] = useState('');
+  const [savingView, setSavingView] = useState(false);
+  const [viewName, setViewName] = useState('');
 
   const currentUserId = getStoredUser()?.id ?? null;
+  const qc = useQueryClient();
+  const { toast } = useToast();
 
   const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
   // Řešitel = jméno z user-store; enrichment, degraduje na prázdno (getUsers je resilientní).
   const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
   const usersMap = useMemo(() => new Map(users.map((u): [string, string] => [u.id, u.name || u.email])), [users]);
+  // Štítky (M9b) — číselník pro filtr + uložená zobrazení pro rychlou lištu.
+  const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: getTags });
+  const { data: savedViews = [] } = useQuery({ queryKey: ['views'], queryFn: getViews });
+  const tagOptions = useMemo(
+    () => [{ value: '', label: 'Všechny štítky' }, ...allTags.map((t) => ({ value: t.id, label: t.nazev }))],
+    [allTags],
+  );
 
   // Lazy per-row obohacení (zadavatel, hodnota, lhůta, rozhodnutí) z analysis.json.
   const analyses = useQueries({
@@ -96,6 +113,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           decision: normalizeDecision(a?.doporuceni?.rozhodnuti),
           days: deadlineDays(lhuta),
           assignee: t.assignee ?? null,
+          stitky: t.stitky ?? [],
         };
       }),
     [tenders, analyses],
@@ -109,6 +127,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
         if (!hay.includes(q)) return false;
       }
       if (decision && r.decision !== decision) return false;
+      if (tagId && !r.stitky.some((s) => s.id === tagId)) return false;
       switch (view) {
         case 'Přiřazeno mně':
           // Reálné: zakázky přiřazené přihlášenému uživateli (bez přihlášení → prázdné).
@@ -128,14 +147,58 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
       }
       return true;
     });
-  }, [rows, query, decision, view, currentUserId]);
+  }, [rows, query, decision, tagId, view, currentUserId]);
 
-  const hasFilters = query.trim() !== '' || view !== 'Všechny' || decision !== '';
+  const hasFilters = query.trim() !== '' || view !== 'Všechny' || decision !== '' || tagId !== '';
   const resetFilters = () => {
     setQuery('');
     setView('Všechny');
     setDecision('');
+    setTagId('');
   };
+
+  // Aplikuje uložený pohled (M9b) — definice nese jen query/decision/view (bez štítku).
+  function applySavedView(v: SavedView) {
+    const def = v.definice || {};
+    setQuery(def.query ?? '');
+    setDecision(def.decision ?? '');
+    setTagId(def.tag ?? '');
+    if (def.view && (VIEWS as readonly string[]).includes(def.view)) {
+      setView(def.view as View);
+    }
+  }
+
+  async function handleDeleteView(id: string) {
+    try {
+      await deleteView(id);
+      qc.invalidateQueries({ queryKey: ['views'] });
+      toast('Pohled smazán', 'success');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Nepodařilo se smazat pohled', 'danger');
+    }
+  }
+
+  async function handleSaveView() {
+    const nazev = viewName.trim();
+    if (!nazev) return;
+    try {
+      await createView({ nazev, definice: { query: query || undefined, decision: decision || undefined, view, tag: tagId || undefined } });
+      qc.invalidateQueries({ queryKey: ['views'] });
+      toast('Pohled uložen', 'success');
+      setViewName('');
+      setSavingView(false);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Nepodařilo se uložit pohled', 'danger');
+    }
+  }
+
+  function handleSaveViewKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') void handleSaveView();
+    if (e.key === 'Escape') {
+      setSavingView(false);
+      setViewName('');
+    }
+  }
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto' }}>
@@ -156,7 +219,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
       </div>
 
       {/* Uložená zobrazení (saved views) */}
-      <div className="vz-scroll" style={{ display: 'flex', gap: 2, borderBottom: '1px solid var(--border-default)', overflowX: 'auto', marginTop: 16 }}>
+      <div className="vz-scroll" style={{ display: 'flex', gap: 2, alignItems: 'center', borderBottom: '1px solid var(--border-default)', overflowX: 'auto', marginTop: 16 }}>
         {VIEWS.map((v) => {
           const active = v === view;
           return (
@@ -176,6 +239,37 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
             </button>
           );
         })}
+        {savedViews.map((v) => {
+          const isOwn = v.user_id === currentUserId;
+          return (
+            <div key={v.id} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+              <button
+                onClick={() => applySavedView(v)}
+                title={v.nazev}
+                style={{
+                  position: 'relative', padding: '10px 4px 10px 12px', background: 'transparent', border: 'none', cursor: 'pointer',
+                  fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-sm)', whiteSpace: 'nowrap',
+                  fontWeight: 'var(--weight-medium)', color: 'var(--text-secondary)',
+                  transition: 'color var(--duration-fast)',
+                }}
+              >
+                {v.nazev}
+              </button>
+              {isOwn && (
+                <button
+                  onClick={() => handleDeleteView(v.id)}
+                  title="Smazat pohled"
+                  style={{
+                    display: 'flex', alignItems: 'center', padding: '6px 12px 6px 4px', background: 'transparent',
+                    border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)',
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Filtr bar */}
@@ -190,6 +284,35 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
         </div>
         <div style={{ width: 190 }}>
           <Select value={decision} onChange={(e) => setDecision(e.target.value)} options={DECISION_OPTIONS} />
+        </div>
+        <div style={{ width: 190 }}>
+          <Select value={tagId} onChange={(e) => setTagId(e.target.value)} options={tagOptions} />
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {savingView ? (
+            <>
+              <div style={{ width: 180 }}>
+                <Input
+                  value={viewName}
+                  onChange={(e) => setViewName(e.target.value)}
+                  onKeyDown={handleSaveViewKeyDown}
+                  placeholder="Název pohledu…"
+                  size="sm"
+                  autoFocus
+                />
+              </div>
+              <Button variant="primary" size="sm" onClick={handleSaveView} disabled={!viewName.trim()}>
+                Uložit
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => { setSavingView(false); setViewName(''); }}>
+                Zrušit
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" size="sm" iconLeft={<Save size={14} />} onClick={() => setSavingView(true)}>
+              Uložit pohled
+            </Button>
+          )}
         </div>
       </div>
 
@@ -273,6 +396,14 @@ function TableRow({ row, usersMap, onOpen }: { row: Row; usersMap: Map<string, s
         <div style={{ ...mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
           {row.evidence}
         </div>
+        {row.stitky.length > 0 && (
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, overflow: 'hidden' }}>
+            {row.stitky.slice(0, 4).map((s) => (
+              <Badge key={s.id} tone={s.barva as any} size="sm">{s.nazev}</Badge>
+            ))}
+            {row.stitky.length > 4 && <Badge tone="neutral" size="sm">+{row.stitky.length - 4}</Badge>}
+          </div>
+        )}
       </div>
 
       {/* Zadavatel */}

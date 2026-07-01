@@ -45,6 +45,8 @@ export interface TenderSummary {
   assignee?: string | null;
   // CRM (M3): počty úkolů pro kanban chip „Úkoly {done}/{total}" (bez DB → {0,0}).
   tasks?: { done: number; total: number };
+  // CRM (M9b): štítky zakázky (chips na řádcích Zakázek); bez DB → [].
+  stitky?: Stitek[];
 }
 
 export interface ActivityEntry {
@@ -679,6 +681,128 @@ export async function deleteComment(commentId: string): Promise<{ success: boole
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.reason || err.error || 'Nepodařilo se smazat komentář');
+  }
+  return res.json();
+}
+
+// --- Uložené pohledy (M9b, saved views) ---
+
+export interface SavedView {
+  id: string;
+  user_id: string;
+  nazev: string;
+  definice: { query?: string; decision?: string; view?: string; tag?: string };
+  je_sdileny: boolean;
+  created_at: string;
+}
+
+/** Pohledy přihlášeného uživatele (vlastní + sdílené) — resilientní GET (401/chyba → []). */
+export async function getViews(): Promise<SavedView[]> {
+  try {
+    const res = await fetch(`${API_BASE}/views`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).views ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function createView(input: { nazev: string; definice: SavedView['definice']; je_sdileny?: boolean }): Promise<SavedView> {
+  const res = await fetch(`${API_BASE}/views`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se uložit pohled');
+  }
+  return res.json();
+}
+
+export async function deleteView(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/views/${id}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se smazat pohled');
+  }
+  return res.json();
+}
+
+// --- Štítky (M9b, tags) ---
+
+export type TagColor = 'neutral' | 'primary' | 'success' | 'warning' | 'danger';
+
+export interface Stitek {
+  id: string;
+  nazev: string;
+  barva: TagColor | string;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** Globální číselník štítků — resilientní GET (401/chyba → []). */
+export async function getTags(): Promise<Stitek[]> {
+  try {
+    const res = await fetch(`${API_BASE}/stitky`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).stitky ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function createTag(nazev: string, barva: TagColor): Promise<Stitek> {
+  const res = await fetch(`${API_BASE}/stitky`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ nazev, barva }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se vytvořit štítek');
+  }
+  return res.json();
+}
+
+export async function deleteTag(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/stitky/${id}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se smazat štítek');
+  }
+  return res.json();
+}
+
+/** Štítky konkrétní zakázky — resilientní GET. */
+export async function getTenderTags(id: string): Promise<Stitek[]> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${id}/stitky`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).stitky ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function attachTag(id: string, stitekId: string): Promise<{ success: boolean; stitky: Stitek[] }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/stitky`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ stitek_id: stitekId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se přiřadit štítek');
+  }
+  return res.json();
+}
+
+export async function detachTag(id: string, stitekId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/stitky/${stitekId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se odebrat štítek');
   }
   return res.json();
 }

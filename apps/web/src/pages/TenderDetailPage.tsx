@@ -12,6 +12,7 @@ import {
   UserPlus,
   Plus,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   getTenderStatus,
@@ -34,6 +35,10 @@ import {
   getComments,
   createComment,
   deleteComment,
+  getTags,
+  getTenderTags,
+  attachTag,
+  detachTag,
   type PipelineSteps,
   type ActivityEntry,
   type Task,
@@ -607,6 +612,10 @@ function MetadataRail({
           )}
         </RailField>
 
+        <RailField label="Štítky">
+          <TagPicker tenderId={tenderId} />
+        </RailField>
+
         <RailField label="Řešitel">
           <AssigneePicker tenderId={tenderId} assignee={assignee} />
         </RailField>
@@ -817,6 +826,65 @@ function StatusChangeButton({ tenderId, allowedNext }: { tenderId: string; allow
 }
 
 /** Výběr řešitele v metadatové liště — Avatar+jméno + Select (vč. „Nepřiřazeno"). */
+function TagPicker({ tenderId }: { tenderId: string }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const { data: tags = [] } = useQuery({ queryKey: ['tender-tags', tenderId], queryFn: () => getTenderTags(tenderId) });
+  const { data: allTags = [] } = useQuery({ queryKey: ['tags'], queryFn: getTags, retry: false, staleTime: 60_000 });
+  const [adding, setAdding] = useState('');
+
+  const attached = new Set(tags.map((t) => t.id));
+  const available = allTags.filter((t) => !attached.has(t.id));
+
+  const invalidate = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['tender-tags', tenderId] }),
+    qc.invalidateQueries({ queryKey: ['tenders'] }),
+  ]);
+
+  async function add(id: string) {
+    if (!id) return;
+    try { await attachTag(tenderId, id); await invalidate(); }
+    catch (e) { toast(statusErrorMessage(e), 'danger'); }
+    setAdding('');
+  }
+  async function remove(id: string) {
+    try { await detachTag(tenderId, id); await invalidate(); }
+    catch (e) { toast(statusErrorMessage(e), 'danger'); }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {tags.map((t) => (
+            <span key={t.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+              <Badge tone={t.barva as BadgeTone} size="sm">{t.nazev}</Badge>
+              <button
+                onClick={() => void remove(t.id)}
+                title="Odebrat štítek"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', display: 'flex', padding: 0 }}
+              >
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {available.length > 0 && (
+        <Select
+          size="sm"
+          value={adding}
+          onChange={(e) => void add(e.target.value)}
+          options={[{ value: '', label: '+ Přidat štítek…' }, ...available.map((t) => ({ value: t.id, label: t.nazev }))]}
+        />
+      )}
+      {tags.length === 0 && available.length === 0 && (
+        <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Žádné štítky — vytvořte je v Nastavení → Štítky.</span>
+      )}
+    </div>
+  );
+}
+
 function AssigneePicker({ tenderId, assignee }: { tenderId: string; assignee: string | null }) {
   const { toast } = useToast();
   const qc = useQueryClient();
