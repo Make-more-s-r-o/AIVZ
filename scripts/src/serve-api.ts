@@ -41,6 +41,10 @@ import {
 } from './lib/terminy-store.js';
 import { notify, getNotifications, getUnreadCount, markRead } from './lib/notif-store.js';
 import { getComments, getComment, createComment, softDeleteComment } from './lib/comments-store.js';
+import { getViews, getView, createView, deleteView } from './lib/views-store.js';
+import {
+  getTags, createTag, deleteTag, getTenderTags, getAllTenderTags, attachTag, detachTag,
+} from './lib/tags-store.js';
 import { updateUserRole, USER_ROLES, type UserRole } from './lib/user-store.js';
 import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
@@ -605,6 +609,7 @@ app.get('/api/tenders', async (_req, res) => {
     const dirs = await readdir(INPUT_DIR);
     const crmStatuses = await getAllStatuses();
     const taskCounts = await getTaskCounts();
+    const tenderTags = await getAllTenderTags();
     const tenders = await Promise.all(
       dirs
         .filter((d) => !d.startsWith('.'))
@@ -626,6 +631,7 @@ app.get('/api/tenders', async (_req, res) => {
             status: crm?.status ?? null,
             assignee: crm?.assignee ?? null,
             tasks: taskCounts.get(tenderId) ?? { done: 0, total: 0 },
+            stitky: tenderTags.get(tenderId) ?? [],
           };
         })
     );
@@ -2048,6 +2054,135 @@ app.delete('/api/comments/:commentId', async (req, res) => {
     const ok = await softDeleteComment(commentId);
     if (ok) await logActivity(comment.tender_id, 'comment_deleted', sub, { comment_id: comment.id });
     res.json({ success: ok });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Uložené pohledy (M9b, saved views) ---
+// GET pohledy viditelné uživateli (vlastní + sdílené) — vlastník z JWT sub (requireJwt), resilientní klient.
+app.get('/api/views', requireJwt, async (req, res) => {
+  const userId = (req as any).user?.sub as string | undefined;
+  if (!userId) return res.json({ views: [] });
+  try {
+    res.json({ views: await getViews(userId) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST pohled — vlastník VÝHRADNĚ z JWT sub (ne z body). nazev povinný, definice = objekt filtru.
+app.post('/api/views', requireJwt, async (req, res) => {
+  const userId = (req as any).user?.sub as string | undefined;
+  if (!userId) return res.status(401).json({ error: 'auth_required' });
+  const body = req.body ?? {};
+  const nazev = typeof body.nazev === 'string' ? body.nazev.trim() : '';
+  if (!nazev) return res.status(400).json({ error: 'nazev_required' });
+  if (nazev.length > 120) return res.status(400).json({ error: 'nazev_too_long' });
+  const definice = body.definice && typeof body.definice === 'object' && !Array.isArray(body.definice) ? body.definice : {};
+  // Cap serializované velikosti definice (nazev je capnutý taky) — brání storage-exhaustion přes uložené pohledy.
+  if (JSON.stringify(definice).length > 8192) return res.status(400).json({ error: 'definice_too_large' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const view = await createView({ user_id: userId, nazev, definice, je_sdileny: !!body.je_sdileny });
+    res.json(view);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE pohled — jen vlastník NEBO admin (role z user-store dle sub).
+app.delete('/api/views/:id', requireJwt, async (req, res) => {
+  const { id } = req.params;
+  if (!/^\d{1,18}$/.test(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const view = await getView(id);
+    if (!view) return res.status(404).json({ error: 'not_found' });
+    const sub = (req as any).user?.sub ?? null;
+    let isAdmin = false;
+    if (sub) { const u = await getUserById(sub); isAdmin = u?.role === 'admin'; }
+    if (!isAdmin && view.user_id !== sub) {
+      return res.status(403).json({ error: 'forbidden', reason: 'Smazat pohled může jen jeho autor nebo administrátor.' });
+    }
+    res.json({ success: await deleteView(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Štítky (M9b, tags) ---
+const TAG_COLORS = new Set(['neutral', 'primary', 'success', 'warning', 'danger']);
+
+// GET globální číselník štítků (public GET → [] bez DB).
+app.get('/api/stitky', async (_req, res) => {
+  try {
+    res.json({ stitky: await getTags() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST nový štítek (název povinný + cap, barva z presetů). Mutace → global auth mw blokne viewera.
+app.post('/api/stitky', async (req, res) => {
+  const body = req.body ?? {};
+  const nazev = typeof body.nazev === 'string' ? body.nazev.trim() : '';
+  if (!nazev) return res.status(400).json({ error: 'nazev_required' });
+  if (nazev.length > 40) return res.status(400).json({ error: 'nazev_too_long' });
+  const barva = typeof body.barva === 'string' && TAG_COLORS.has(body.barva) ? body.barva : 'neutral';
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    res.json(await createTag(nazev, barva, actor));
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE štítek — jen admin (globální číselník; kaskádně odpojí vazby).
+app.delete('/api/stitky/:id', requireJwt, requireRole('admin'), async (req, res) => {
+  const { id } = req.params;
+  if (!/^\d{1,18}$/.test(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    res.json({ success: await deleteTag(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET štítky zakázky (public GET → []).
+app.get('/api/tenders/:id/stitky', async (req, res) => {
+  try {
+    res.json({ stitky: await getTenderTags(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST přiřadit štítek zakázce ({ stitek_id }).
+app.post('/api/tenders/:id/stitky', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const stitekId = String((req.body ?? {}).stitek_id ?? '');
+  if (!/^\d{1,18}$/.test(stitekId)) return res.status(400).json({ error: 'invalid_stitek_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    await attachTag(id, stitekId);
+    res.json({ success: true, stitky: await getTenderTags(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE odebrat štítek ze zakázky.
+app.delete('/api/tenders/:id/stitky/:stitekId', async (req, res) => {
+  const { id, stitekId } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!/^\d{1,18}$/.test(stitekId)) return res.status(400).json({ error: 'invalid_stitek_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    res.json({ success: await detachTag(id, stitekId) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
