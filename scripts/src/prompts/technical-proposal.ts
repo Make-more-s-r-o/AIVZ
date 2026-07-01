@@ -7,6 +7,7 @@ Technický návrh musí:
 4. Obsahovat harmonogram dodání a implementace
 5. Popisovat záruční a pozáruční servis
 6. Uvést reference (pokud jsou požadovány)
+7. Datum zpracování uváděj VÝHRADNĚ podle data dodaného v zadání (níže) — nikdy datum nevymýšlej
 
 Formát: Markdown (bude konvertován do DOCX).
 Používej nadpisy ## a ### pro strukturu.
@@ -27,7 +28,11 @@ export function buildTechnicalProposalUserMessage(
     .map(([k, v]) => `- ${k}: ${v}`)
     .join('\n');
 
-  return `Veřejná zakázka: ${tenderName}
+  // Reálné datum zpracování (systémový čas) — brání halucinaci roku v AI textu.
+  const dnes = new Date().toLocaleDateString('cs-CZ', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  return `Datum zpracování: ${dnes}
+Veřejná zakázka: ${tenderName}
 Předmět: ${tenderSubject}
 
 Technické požadavky:
