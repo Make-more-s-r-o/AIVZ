@@ -13,9 +13,8 @@ export interface NastaveniPageProps {
 }
 
 /**
- * Nastavení — STUB. Sub-navigation (Firmy · Uživatelé a role · Heslo) wrapping
- * the existing CompanySettings / UserManagement / ChangePasswordForm. The screen
- * agent restyles the inner forms to the design tokens.
+ * Nastavení — pod-navigace (Firmy · Uživatelé a role · Heslo · Štítky) obalující
+ * CompanySettings / UserManagement / ChangePasswordForm / TagManager.
  */
 export default function NastaveniPage({ section, currentUserId, onNavSection }: NastaveniPageProps) {
   return (

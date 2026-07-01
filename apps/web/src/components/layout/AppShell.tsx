@@ -294,7 +294,8 @@ export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, chil
             ))}
           </nav>
           <button
-            title="Hledat (brzy)"
+            onClick={() => onNav('zakazky')}
+            title="Hledat zakázky"
             style={{
               display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 10px 0 11px', cursor: 'pointer',
               background: 'var(--surface-page)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
@@ -303,10 +304,6 @@ export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, chil
           >
             <Search size={15} />
             <span style={{ flex: 1, textAlign: 'left' }}>Hledat zakázky…</span>
-            <kbd style={{
-              fontFamily: 'var(--font-mono)', fontSize: 11, padding: '1px 5px', borderRadius: 4,
-              background: 'var(--surface-card)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)',
-            }}>⌘K</kbd>
           </button>
           <NotificationBell />
         </header>
