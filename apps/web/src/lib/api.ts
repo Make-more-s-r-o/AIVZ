@@ -426,11 +426,15 @@ export async function getTasks(id: string): Promise<Task[]> {
   }
 }
 
-/** „Moje úkoly" — nedokončené úkoly přihlášeného uživatele napříč zakázkami. */
+/**
+ * „Moje úkoly" — nedokončené úkoly přihlášeného uživatele napříč zakázkami.
+ * Příjemce určuje server z JWT (sub), NE z query — proto se ?assignee neposílá (anti-IDOR).
+ * `assignee` slouží jen jako guard: bez přihlášeného uživatele voláním neplýtváme.
+ */
 export async function getMyTasks(assignee: string): Promise<Task[]> {
   if (!assignee) return [];
   try {
-    const res = await fetch(`${API_BASE}/tasks/mine?assignee=${encodeURIComponent(assignee)}`, { headers: authHeaders() });
+    const res = await fetch(`${API_BASE}/tasks/mine`, { headers: authHeaders() });
     if (!res.ok) return [];
     return (await res.json()).tasks ?? [];
   } catch {
@@ -629,6 +633,52 @@ export async function markNotificationsRead(ids?: string[]): Promise<{ updated: 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.reason || err.error || 'Nepodařilo se označit přečtené');
+  }
+  return res.json();
+}
+
+// --- Komentáře + @mention (M8) ---
+
+export interface Comment {
+  id: string;
+  tender_id: string;
+  text: string;
+  mentions: string[];
+  author_id: string | null;
+  author_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Komentáře zakázky — resilientní GET (vzor getTasks): 401/chyba → prázdno, ne reload. */
+export async function getComments(id: string): Promise<Comment[]> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${id}/comments`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return (await res.json()).comments ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function createComment(id: string, input: { text: string; mentions?: string[] }): Promise<Comment> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/comments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se přidat komentář');
+  }
+  return res.json();
+}
+
+export async function deleteComment(commentId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/comments/${commentId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se smazat komentář');
   }
   return res.json();
 }
