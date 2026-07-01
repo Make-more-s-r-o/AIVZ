@@ -1,5 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getUsers, createNewUser, deleteUserById, type SafeUser } from '../lib/api';
+import { getUsers, createNewUser, updateUserRole, deleteUserById, type SafeUser, type UserRole } from '../lib/api';
+
+const ROLES: UserRole[] = ['admin', 'analytik', 'viewer'];
+
+const ROLE_LABELS: Record<UserRole, string> = {
+  admin: 'Administrátor',
+  analytik: 'Analytik',
+  viewer: 'Prohlížeč',
+};
+
+// Odstín podle role: admin = primární (modrá), analytik = neutrální, viewer = tlumený
+const ROLE_BADGE_CLASSES: Record<UserRole, string> = {
+  admin: 'bg-blue-100 text-blue-800',
+  analytik: 'bg-gray-100 text-gray-700',
+  viewer: 'bg-gray-50 text-gray-500',
+};
 
 interface UserManagementProps {
   currentUserId: string;
@@ -15,10 +30,14 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
   const [newEmail, setNewEmail] = useState('');
   const [newName, setNewName] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [newRole, setNewRole] = useState<UserRole>('analytik');
   const [creating, setCreating] = useState(false);
 
   // Delete confirmation
   const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  // Změna role (probíhající řádek)
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   const loadUsers = useCallback(async () => {
     try {
@@ -39,10 +58,11 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
     setCreating(true);
     setError('');
     try {
-      await createNewUser(newEmail, newName, newPassword);
+      await createNewUser(newEmail, newName, newPassword, newRole);
       setNewEmail('');
       setNewName('');
       setNewPassword('');
+      setNewRole('analytik');
       setShowForm(false);
       await loadUsers();
     } catch (err: any) {
@@ -63,6 +83,19 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
     }
   };
 
+  const handleRoleChange = async (userId: string, role: UserRole) => {
+    setUpdatingId(userId);
+    setError('');
+    try {
+      await updateUserRole(userId, role);
+      await loadUsers();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   const formatDate = (d: string | null) => {
     if (!d) return '-';
     return new Date(d).toLocaleString('cs-CZ');
@@ -71,6 +104,9 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
   if (loading) {
     return <div className="py-8 text-center text-gray-500">Načítání uživatelů...</div>;
   }
+
+  // Roli může měnit jen administrátor (odvozeno ze seznamu uživatelů)
+  const isAdmin = users.find((u) => u.id === currentUserId)?.role === 'admin';
 
   return (
     <div>
@@ -91,7 +127,7 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
       {showForm && (
         <form onSubmit={handleCreate} className="mb-6 rounded-lg border bg-gray-50 p-4">
           <h3 className="mb-3 text-sm font-semibold text-gray-700">Nový uživatel</h3>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
               <label className="mb-1 block text-xs font-medium text-gray-600">Jméno</label>
               <input
@@ -126,6 +162,18 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
                 minLength={6}
               />
             </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">Role</label>
+              <select
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as UserRole)}
+                className="w-full rounded border px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              >
+                {ROLES.map((r) => (
+                  <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                ))}
+              </select>
+            </div>
           </div>
           <button
             type="submit"
@@ -143,6 +191,7 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
             <tr>
               <th className="px-4 py-3 font-medium text-gray-600">Jméno</th>
               <th className="px-4 py-3 font-medium text-gray-600">E-mail</th>
+              <th className="px-4 py-3 font-medium text-gray-600">Role</th>
               <th className="px-4 py-3 font-medium text-gray-600">Vytvořen</th>
               <th className="px-4 py-3 font-medium text-gray-600">Poslední přihlášení</th>
               <th className="px-4 py-3 font-medium text-gray-600"></th>
@@ -158,6 +207,28 @@ export default function UserManagement({ currentUserId }: UserManagementProps) {
                   )}
                 </td>
                 <td className="px-4 py-3 text-gray-600">{user.email}</td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${ROLE_BADGE_CLASSES[user.role]}`}
+                    >
+                      {ROLE_LABELS[user.role]}
+                    </span>
+                    {isAdmin && user.id !== currentUserId && (
+                      <select
+                        value={user.role}
+                        onChange={(e) => handleRoleChange(user.id, e.target.value as UserRole)}
+                        disabled={updatingId === user.id}
+                        aria-label="Změnit roli"
+                        className="rounded border px-2 py-1 text-xs focus:border-blue-500 focus:outline-none disabled:opacity-50"
+                      >
+                        {ROLES.map((r) => (
+                          <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </td>
                 <td className="px-4 py-3 text-gray-500">{formatDate(user.createdAt)}</td>
                 <td className="px-4 py-3 text-gray-500">{formatDate(user.lastLoginAt)}</td>
                 <td className="px-4 py-3 text-right">

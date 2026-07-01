@@ -591,6 +591,48 @@ export async function seedTerminy(id: string): Promise<{ seeded: number; terminy
   return res.json();
 }
 
+// --- Notifikace (M7, zvonek) ---
+
+export interface Notification {
+  id: string;
+  user_id: string;
+  typ: string;
+  text: string;
+  url: string | null;
+  tender_id: string | null;
+  entity_typ: string | null;
+  entity_id: string | null;
+  actor_id: string | null;
+  precteno: boolean;
+  created_at: string;
+}
+
+/** Notifikace přihlášeného uživatele — resilientní (401/chyba → prázdno, ne reload). */
+export async function getNotifications(userId: string): Promise<{ items: Notification[]; unread: number }> {
+  if (!userId) return { items: [], unread: 0 };
+  try {
+    const res = await fetch(`${API_BASE}/notifications?userId=${encodeURIComponent(userId)}`, { headers: authHeaders() });
+    if (!res.ok) return { items: [], unread: 0 };
+    const data = await res.json();
+    return { items: data.items ?? [], unread: data.unread ?? 0 };
+  } catch {
+    return { items: [], unread: 0 };
+  }
+}
+
+export async function markNotificationsRead(ids?: string[]): Promise<{ updated: number }> {
+  const res = await fetch(`${API_BASE}/notifications/read`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(ids ? { ids } : {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se označit přečtené');
+  }
+  return res.json();
+}
+
 // --- AI Cost ---
 
 export interface CostSummary {
@@ -660,12 +702,28 @@ export async function saveParts(id: string, selected: string[]): Promise<{ succe
 
 // --- User management API ---
 
+export type UserRole = 'admin' | 'analytik' | 'viewer';
+
 export interface SafeUser {
   id: string;
   email: string;
   name: string;
+  role: UserRole;
   createdAt: string;
   lastLoginAt: string | null;
+}
+
+export async function updateUserRole(userId: string, role: UserRole): Promise<SafeUser> {
+  const res = await fetch(`${API_BASE}/users/${userId}/role`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Nepodařilo se změnit roli');
+  }
+  return res.json();
 }
 
 export async function getUsers(): Promise<SafeUser[]> {
@@ -680,11 +738,11 @@ export async function getUsers(): Promise<SafeUser[]> {
   }
 }
 
-export async function createNewUser(email: string, name: string, password: string): Promise<SafeUser> {
+export async function createNewUser(email: string, name: string, password: string, role?: UserRole): Promise<SafeUser> {
   const res = await fetch(`${API_BASE}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ email, name, password }),
+    body: JSON.stringify({ email, name, password, role }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));

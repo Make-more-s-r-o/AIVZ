@@ -37,8 +37,10 @@ import {
 } from './lib/stage-machine.js';
 import { computeSubmitGate } from './lib/submit-gate.js';
 import {
-  getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy,
+  getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy, getDueReminders, markReminded,
 } from './lib/terminy-store.js';
+import { notify, getNotifications, getUnreadCount, markRead } from './lib/notif-store.js';
+import { updateUserRole, USER_ROLES, type UserRole } from './lib/user-store.js';
 import {
   getWarehouseStats, getWarehouseQualityStats, searchProducts, getProduct, createProduct,
   updateProduct, deleteProduct, getCategories, getCategoryTree,
@@ -65,6 +67,10 @@ if (!existsSync(companyConfigPath)) {
 }
 
 const app = express();
+// Case-sensitive routing: jinak Express (case-insensitive) namapuje /API/... na /api/... handler,
+// zatímco req.path zůstane /API/... a case-sensitive `startsWith('/api/')` guardy v auth/RBAC
+// middleware ho pustí bez ověření (auth+RBAC bypass). Tímto /API/... → 404, fail-closed.
+app.set('case sensitive routing', true);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -124,16 +130,44 @@ app.use((req, res, next) => {
     if (API_TOKEN && qToken === API_TOKEN) return next();
   }
 
-  // 3. Allow same-origin browser requests (localhost dev without JWT_SECRET)
-  try {
-    const origin = req.headers.origin || req.headers.referer;
-    if (origin) {
-      const originHost = new URL(origin).hostname;
-      if (originHost === req.hostname) return next();
-    }
-  } catch {}
+  // 3. Same-origin bypass POUZE v dev (JWT vypnutý) a jen z loopbacku. Origin/Referer i Host jsou
+  //    klientem ovladatelné → NESMÍ sloužit jako auth signál v produkci (jinak drop Authorization
+  //    hlavičky nebo spoof Host obchází auth i RBAC). V prod (JWT zapnutý) je tato větev vypnutá.
+  if (!isJwtEnabled()) {
+    try {
+      const origin = req.headers.origin || req.headers.referer;
+      const loopback = ['localhost', '127.0.0.1', '::1'];
+      if (origin && loopback.includes(req.hostname)) {
+        const originHost = new URL(origin).hostname;
+        if (originHost === req.hostname) return next();
+      }
+    } catch {}
+  }
 
   res.status(401).json({ error: 'Unauthorized' });
+});
+
+// RBAC (M7): viewer je read-only. Blokuj mutace (non-GET) pro roli viewer napříč API, kromě
+// vlastních akcí (přečtení notifikací, změna vlastního hesla) a auth/setup. V dev bez JWT se
+// neomezuje (single-user). Běží po auth middleware (req.user je nastaven pro platný JWT).
+const ROLE_EXEMPT_MUTATIONS = new Set(['/api/notifications/read', '/api/auth/change-password']);
+app.use(async (req, res, next) => {
+  if (!isJwtEnabled()) return next();
+  if (req.method === 'GET') return next();
+  if (!req.path.startsWith('/api/')) return next();
+  if (req.path.startsWith('/api/auth/')) return next();
+  if (ROLE_EXEMPT_MUTATIONS.has(req.path)) return next();
+  // Aktuální role z user-store (ne JWT claim) → demote na viewer se projeví ihned.
+  const sub = (req as any).user?.sub;
+  let role = (req as any).user?.role as UserRole | undefined;
+  if (sub) {
+    const u = await getUserById(sub);
+    role = (u?.role as UserRole | undefined);
+  }
+  if (role === 'viewer') {
+    return res.status(403).json({ error: 'forbidden_role', reason: 'Účet s rolí Prohlížeč nemůže provádět změny.' });
+  }
+  next();
 });
 
 // --- Async Job Queue ---
@@ -374,6 +408,26 @@ function requireJwt(req: express.Request, res: express.Response, next: express.N
   res.status(401).json({ error: 'Unauthorized — JWT required' });
 }
 
+// RBAC (M7): omezení mutací dle role. V dev bez JWT (isJwtEnabled()===false) se neomezuje
+// (single-user provoz). Legacy token bez role → dohledat z user-store dle sub (ať se nezamkne).
+function requireRole(...roles: UserRole[]) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!isJwtEnabled()) return next();
+    const sub = (req as any).user?.sub;
+    // Aktuální role z user-store dle sub (ne z JWT claimu) → demote/revoke se projeví ihned,
+    // ne až po expiraci tokenu (rememberMe = 30 dní). Fallback na claim jen bez sub.
+    let role: UserRole | undefined = (req as any).user?.role;
+    if (sub) {
+      const u = await getUserById(sub);
+      role = (u?.role as UserRole | undefined);
+    }
+    if (!role || !roles.includes(role)) {
+      return res.status(403).json({ error: 'forbidden_role', reason: 'Nedostatečná oprávnění pro tuto akci.' });
+    }
+    next();
+  };
+}
+
 // GET /api/auth/status - check if setup is required
 app.get('/api/auth/status', async (_req, res) => {
   try {
@@ -490,25 +544,46 @@ app.get('/api/users', requireJwt, async (_req, res) => {
   }
 });
 
-// POST /api/users - create a new user
-app.post('/api/users', requireJwt, async (req, res) => {
+// POST /api/users - create a new user (admin only)
+app.post('/api/users', requireJwt, requireRole('admin'), async (req, res) => {
   try {
-    const { email, name, password } = req.body;
+    const { email, name, password, role } = req.body;
     if (!email || !name || !password) {
       return res.status(400).json({ error: 'Email, name, and password are required' });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
-    const user = await createUser(email, name, password);
+    if (role && !USER_ROLES.includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+    const user = await createUser(email, name, password, role);
     res.json(user);
   } catch (err: any) {
     res.status(400).json({ error: err.message || String(err) });
   }
 });
 
-// DELETE /api/users/:userId - delete a user (self-deletion blocked)
-app.delete('/api/users/:userId', requireJwt, async (req, res) => {
+// PATCH /api/users/:userId/role - change a user's role (admin only)
+app.patch('/api/users/:userId/role', requireJwt, requireRole('admin'), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body ?? {};
+    if (!role || !USER_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    const payload = (req as any).user;
+    // Admin si nesmí sebrat vlastní admin roli (aby nezůstal systém bez admina omylem).
+    if (payload?.sub === userId && role !== 'admin') {
+      return res.status(400).json({ error: 'Cannot demote your own admin role' });
+    }
+    const user = await updateUserRole(userId as string, role as UserRole);
+    res.json(user);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || String(err) });
+  }
+});
+
+// DELETE /api/users/:userId - delete a user (self-deletion blocked, admin only)
+app.delete('/api/users/:userId', requireJwt, requireRole('admin'), async (req, res) => {
   try {
     const payload = (req as any).user;
     const { userId } = req.params;
@@ -1548,6 +1623,9 @@ app.patch('/api/tenders/:id/status', async (req, res) => {
     await logActivity(id, 'status_change', actor, {
       old: current, new: target, reason: reason ?? null, actor_name: actorName,
     });
+    if (crm?.assignee) {
+      await notify({ user_id: crm.assignee, typ: 'status_change', text: 'Změnil se stav přiřazené zakázky.', url: `#/tender/${id}`, tender_id: id, actor_id: actor, dedup_key: `status_change:${id}` });
+    }
     res.json({ success: true, status: target });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1571,6 +1649,9 @@ app.put('/api/tenders/:id/assignee', async (req, res) => {
     const actor = (req as any).user?.sub ?? null;
     const actorName = (req as any).user?.name ?? null;
     await logActivity(id, 'assignment', actor, { assignee: value, actor_name: actorName });
+    if (value) {
+      await notify({ user_id: value, typ: 'assigned', text: 'Byla vám přiřazena zakázka.', url: `#/tender/${id}`, tender_id: id, actor_id: actor, dedup_key: `assigned:${id}` });
+    }
     res.json({ success: true, assignee: value });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1655,6 +1736,9 @@ app.post('/api/tenders/:id/tasks', async (req, res) => {
       created_by: actor,
     });
     await logActivity(id, 'task_created', actor, { task_id: task.id, title: task.title, actor_name: actorName });
+    if (task.assignee) {
+      await notify({ user_id: task.assignee, typ: 'task_assigned', text: `Nový úkol: ${task.title}`, url: `#/tender/${id}?tab=ukoly`, tender_id: id, entity_typ: 'task', entity_id: task.id, actor_id: actor, dedup_key: `task_assigned:${task.id}` });
+    }
     res.json(task);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1872,6 +1956,40 @@ app.post('/api/tenders/:id/terminy/seed', async (req, res) => {
     const actorName = (req as any).user?.name ?? null;
     if (inserted > 0) await logActivity(id, 'terminy_seeded', actor, { count: inserted, actor_name: actorName });
     res.json({ seeded: inserted, terminy: await getTerminy(id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Notifikace (M7, zvonek) ---
+// GET notifikace uživatele — příjemce VÝHRADNĚ z JWT sub (ne z ?userId, jinak IDOR — čtení cizích
+// notifikací). requireJwt nastaví req.user; resilientní klient si 401 přeloží na prázdný zvonek.
+app.get('/api/notifications', requireJwt, async (req, res) => {
+  const userId = (req as any).user?.sub as string | undefined;
+  const unreadOnly = req.query.unread === '1';
+  if (!userId) return res.json({ items: [], unread: 0 });
+  try {
+    const [items, unread] = await Promise.all([
+      getNotifications(userId, { limit: 30, unreadOnly }),
+      getUnreadCount(userId),
+    ]);
+    res.json({ items, unread });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST označit přečtené — příjemce VÝHRADNĚ z autentizovaného principalu (JWT sub), nikdy z body
+// (jinak by šlo označit cizí notifikace jako přečtené — IDOR).
+app.post('/api/notifications/read', async (req, res) => {
+  const body = req.body ?? {};
+  const userId = (req as any).user?.sub;
+  if (!userId) return res.status(401).json({ error: 'auth_required' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const ids = Array.isArray(body.ids) ? body.ids.map(String) : undefined;
+    const updated = await markRead(userId, ids);
+    res.json({ updated });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2241,9 +2359,36 @@ startup().then(() => {
     console.log(`Output dir: ${OUTPUT_DIR}`);
   });
 
+  // Reminder sweep (M7): periodicky notifikuje řešitele o blížících se termínech (getDueReminders
+  // z M6). Best-effort, guard bez DB. Immediate run + interval; timer se ruší při shutdownu.
+  let reminderTimer: NodeJS.Timeout | null = null;
+  const runReminderSweep = async () => {
+    if (!(await isDbAvailable())) return;
+    try {
+      const due = await getDueReminders();
+      for (const t of due) {
+        const crm = await getStatus(t.tender_id);
+        const recipient = crm?.assignee;
+        if (recipient) {
+          await notify({
+            user_id: recipient, typ: 'deadline', text: 'Blíží se termín přiřazené zakázky.',
+            url: `#/tender/${t.tender_id}`, tender_id: t.tender_id, entity_typ: 'termin', entity_id: t.id,
+            actor_id: null, dedup_key: `deadline:${t.id}`,
+          });
+          await markReminded(t.id);
+        }
+      }
+    } catch {
+      // best-effort — sweep nikdy neshodí server
+    }
+  };
+  void runReminderSweep();
+  reminderTimer = setInterval(() => { void runReminderSweep(); }, 15 * 60 * 1000);
+
   // Graceful shutdown
   const shutdown = async () => {
     console.log('\nShutting down...');
+    if (reminderTimer) clearInterval(reminderTimer);
     server.close();
     await closePool();
     process.exit(0);

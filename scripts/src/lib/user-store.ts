@@ -8,11 +8,16 @@ const ROOT = new URL('../../../', import.meta.url).pathname;
 const USERS_FILE = join(ROOT, 'config', 'users.json');
 const SALT_ROUNDS = 10;
 
+// RBAC (M7): viewer = jen čtení, analytik = plné CRM mutace, admin = + správa uživatelů/rolí.
+export type UserRole = 'admin' | 'analytik' | 'viewer';
+export const USER_ROLES: UserRole[] = ['admin', 'analytik', 'viewer'];
+
 export interface User {
   id: string;
   email: string;
   name: string;
   passwordHash: string;
+  role: UserRole;
   createdAt: string;
   lastLoginAt: string | null;
 }
@@ -20,14 +25,20 @@ export interface User {
 export type SafeUser = Omit<User, 'passwordHash'>;
 
 interface UsersFile {
-  users: User[];
+  users: Array<Partial<User> & { id: string; email: string; name: string; passwordHash: string }>;
 }
 
 async function readUsers(): Promise<User[]> {
   try {
     const raw = await readFile(USERS_FILE, 'utf-8');
     const data: UsersFile = JSON.parse(raw);
-    return data.users || [];
+    // Backfill role u legacy účtů (předcházejí RBAC) → admin, aby se nikdo nezamkl.
+    return (data.users || []).map((u) => ({
+      ...u,
+      role: (u.role && USER_ROLES.includes(u.role)) ? u.role : 'admin',
+      lastLoginAt: u.lastLoginAt ?? null,
+      createdAt: u.createdAt ?? new Date(0).toISOString(),
+    })) as User[];
   } catch {
     return [];
   }
@@ -61,7 +72,7 @@ export async function getUserById(id: string): Promise<User | null> {
   return users.find(u => u.id === id) || null;
 }
 
-export async function createUser(email: string, name: string, password: string): Promise<SafeUser> {
+export async function createUser(email: string, name: string, password: string, role?: UserRole): Promise<SafeUser> {
   const users = await readUsers();
 
   if (users.some(u => u.email.toLowerCase() === email.toLowerCase())) {
@@ -69,16 +80,29 @@ export async function createUser(email: string, name: string, password: string):
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  // První uživatel (setup) = admin; jinak výchozí analytik, nebo předaná role.
+  const finalRole: UserRole = users.length === 0 ? 'admin' : (role && USER_ROLES.includes(role) ? role : 'analytik');
   const user: User = {
     id: `u_${randomUUID().slice(0, 12)}`,
     email: email.toLowerCase().trim(),
     name: name.trim(),
     passwordHash,
+    role: finalRole,
     createdAt: new Date().toISOString(),
     lastLoginAt: null,
   };
 
   users.push(user);
+  await writeUsers(users);
+  return toSafeUser(user);
+}
+
+export async function updateUserRole(userId: string, role: UserRole): Promise<SafeUser> {
+  if (!USER_ROLES.includes(role)) throw new Error('Invalid role');
+  const users = await readUsers();
+  const user = users.find(u => u.id === userId);
+  if (!user) throw new Error('User not found');
+  user.role = role;
   await writeUsers(users);
   return toSafeUser(user);
 }
