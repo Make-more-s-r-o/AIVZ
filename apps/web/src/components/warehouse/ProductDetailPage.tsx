@@ -9,10 +9,13 @@ interface ProductDetailPageProps {
 }
 
 export default function ProductDetailPage({ productId, onBack }: ProductDetailPageProps) {
+  // Všechny hooky musí běžet při každém renderu ve stejném pořadí (Rules of Hooks),
+  // proto jsou deklarované nad podmíněnými early returny níže.
   const { data: product, isLoading, error } = useQuery({
     queryKey: ['warehouse-product', productId],
     queryFn: () => getWarehouseProduct(productId),
   });
+  const [copied, setCopied] = useState(false);
 
   if (isLoading) {
     return <div className="py-12 text-center text-gray-400">Načítám detail produktu...</div>;
@@ -28,8 +31,6 @@ export default function ProductDetailPage({ productId, onBack }: ProductDetailPa
       </div>
     );
   }
-
-  const [copied, setCopied] = useState(false);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
