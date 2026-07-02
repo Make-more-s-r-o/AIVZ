@@ -125,6 +125,9 @@ const DOC_STYLES = {
     heading3: {
       run: { font: 'Calibri', size: 24, bold: true }, // 12pt
     },
+    heading4: {
+      run: { font: 'Calibri', size: 22, bold: true }, // 11pt
+    },
   },
 };
 
@@ -1493,6 +1496,11 @@ function formatPrice(value: number): string {
   return value.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/** Zaokrouhlí na 2 desetinná místa (odstraní i float šum typu 92828.19000000006) */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 // --- Cenová nabídka ---
 
 export async function generateCenovaNabidka(
@@ -1502,9 +1510,9 @@ export async function generateCenovaNabidka(
   bidPriceBezDph?: number,
   bidPriceSdph?: number
 ): Promise<Buffer> {
-  const priceBezDph = bidPriceBezDph ?? product.cena_bez_dph;
-  const priceSdph = bidPriceSdph ?? product.cena_s_dph;
-  const dph = priceSdph - priceBezDph;
+  const priceBezDph = round2(bidPriceBezDph ?? product.cena_bez_dph);
+  const priceSdph = round2(bidPriceSdph ?? product.cena_s_dph);
+  const dph = round2(priceSdph - priceBezDph);
 
   const thinBorder = { style: BorderStyle.SINGLE, size: 1, color: '999999' };
   const borders = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
@@ -1703,19 +1711,27 @@ export async function generateCenovaNabidkaMulti(
     ],
   });
 
-  const dataRows = items.map(item => new TableRow({
+  // Řádkové ceny zaokrouhlíme na 2 desetinná místa a celkovou cenu počítáme jako
+  // součet těchto zaokrouhlených řádků — tím je zaručeno, že Σ položek == celková cena.
+  const lines = items.map(item => ({
+    item,
+    lineBezDph: round2(item.priceBezDph * item.mnozstvi),
+    lineSdph: round2(item.priceSdph * item.mnozstvi),
+  }));
+
+  const dataRows = lines.map(({ item, lineBezDph, lineSdph }) => new TableRow({
     children: [
       new TableCell({ children: [new Paragraph(item.polozka)], borders }),
       new TableCell({ children: [new Paragraph(`${item.product.vyrobce} ${item.product.model}`)], borders }),
       new TableCell({ children: [new Paragraph(`${item.mnozstvi} ks`)], borders }),
-      new TableCell({ children: [new Paragraph(formatPrice(item.priceBezDph * item.mnozstvi))], borders }),
-      new TableCell({ children: [new Paragraph(formatPrice(item.priceSdph * item.mnozstvi))], borders }),
+      new TableCell({ children: [new Paragraph(formatPrice(lineBezDph))], borders }),
+      new TableCell({ children: [new Paragraph(formatPrice(lineSdph))], borders }),
     ],
   }));
 
-  const totalBezDph = items.reduce((sum, i) => sum + i.priceBezDph * i.mnozstvi, 0);
-  const totalSdph = items.reduce((sum, i) => sum + i.priceSdph * i.mnozstvi, 0);
-  const dph = totalSdph - totalBezDph;
+  const totalBezDph = round2(lines.reduce((sum, l) => sum + l.lineBezDph, 0));
+  const totalSdph = round2(lines.reduce((sum, l) => sum + l.lineSdph, 0));
+  const dph = round2(totalSdph - totalBezDph);
 
   const doc = new Document({
     styles: DOC_STYLES,
@@ -1827,7 +1843,26 @@ function parseMarkdownContent(content: string): (Paragraph | Table)[] {
       continue;
     }
 
+    // Vodorovný oddělovač (---, ***, ___) → jen mezera, ne doslovný text "---"
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      elements.push(new Paragraph({ text: '' }));
+      i++;
+      continue;
+    }
+
     // Headings
+    // H4+ (#### a hlubší) → sjednotíme na úroveň 4; kontrolujeme PŘED ### / ## / #,
+    // jinak by čtyři mřížky spadly do regular paragraph a vykreslily se doslovně (####).
+    const h4plus = line.match(/^#{4,6}\s+(.*)$/);
+    if (h4plus) {
+      elements.push(new Paragraph({
+        children: parseInlineFormatting(h4plus[1]),
+        heading: HeadingLevel.HEADING_4,
+        spacing: { before: 160, after: 80 },
+      }));
+      i++;
+      continue;
+    }
     if (line.startsWith('### ')) {
       elements.push(new Paragraph({
         children: parseInlineFormatting(line.slice(4)),

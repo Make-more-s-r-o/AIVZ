@@ -138,6 +138,11 @@ function extractMisto(sidlo: string): string {
   return 'V Praze';
 }
 
+/** Zaokrouhlí na 2 desetinná místa (odstraní i float šum typu 92828.19000000006) */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 /** Formátuje datum jako DD.MM.YYYY */
 function formatDatum(): string {
   const now = new Date();
@@ -235,34 +240,42 @@ export async function resolveDocumentData(tenderId: string): Promise<DocumentDat
     }];
   }
 
-  // Calculate totals
-  const celkova_cena_bez_dph = selectedProducts.reduce((s, p) => s + p.priceBezDph * p.mnozstvi, 0);
-  const celkova_cena_s_dph = selectedProducts.reduce((s, p) => s + p.priceSdph * p.mnozstvi, 0);
-  const dph_castka = celkova_cena_s_dph - celkova_cena_bez_dph;
-
-  // Build items
-  const polozky: DocumentDataItem[] = selectedProducts.map(p => ({
-    nazev: p.polozka,
-    mnozstvi: p.mnozstvi,
-    jednotka: p.jednotka,
-    cena_za_jednotku_bez_dph: p.priceBezDph,
-    cena_celkem_bez_dph: p.priceBezDph * p.mnozstvi,
-    cast_id: p.castId,
+  // Řádkové ceny zaokrouhlíme na 2 desetinná místa; celkové ceny počítáme jako součet
+  // těchto zaokrouhlených řádků → Σ položek == celková cena (žádný drift z per-item zaokrouhlení).
+  const lines = selectedProducts.map(p => ({
+    ...p,
+    lineBezDph: round2(p.priceBezDph * p.mnozstvi),
+    lineSdph: round2(p.priceSdph * p.mnozstvi),
   }));
 
-  // Build casti (multi-part)
+  // Calculate totals
+  const celkova_cena_bez_dph = round2(lines.reduce((s, l) => s + l.lineBezDph, 0));
+  const celkova_cena_s_dph = round2(lines.reduce((s, l) => s + l.lineSdph, 0));
+  const dph_castka = round2(celkova_cena_s_dph - celkova_cena_bez_dph);
+
+  // Build items
+  const polozky: DocumentDataItem[] = lines.map(l => ({
+    nazev: l.polozka,
+    mnozstvi: l.mnozstvi,
+    jednotka: l.jednotka,
+    cena_za_jednotku_bez_dph: l.priceBezDph,
+    cena_celkem_bez_dph: l.lineBezDph,
+    cast_id: l.castId,
+  }));
+
+  // Build casti (multi-part) — ceny per část sečteme ze zaokrouhlených řádků,
+  // aby Σ částí == celková cena (místo dopočtu s_dph přes ×1.21).
   let casti: DocumentDataCast[] | undefined;
   if (hasParts && selectedPartIds) {
     casti = analysis.casti
       .filter(c => selectedPartIds!.has(c.id))
       .map(c => {
-        const castItems = polozky.filter(p => p.cast_id === c.id);
-        const castBezDph = castItems.reduce((s, p) => s + p.cena_celkem_bez_dph, 0);
+        const castLines = lines.filter(l => l.castId === c.id);
         return {
           id: c.id,
           nazev: c.nazev,
-          cena_bez_dph: castBezDph,
-          cena_s_dph: Math.round(castBezDph * 1.21 * 100) / 100,
+          cena_bez_dph: round2(castLines.reduce((s, l) => s + l.lineBezDph, 0)),
+          cena_s_dph: round2(castLines.reduce((s, l) => s + l.lineSdph, 0)),
         };
       });
   }

@@ -51,6 +51,23 @@ export interface PriceOverride {
   poznamka?: string;
 }
 
+// Ověření ceny web-searchem — návrh dohledaný z webu.
+// NIKDY nepřepisuje cenova_uprava; slouží jen jako podklad, který uživatel ručně potvrdí.
+// (Strukturálně shodné s OvereniCeny v lib/api.ts — držíme lokálně, aby tento typový
+// modul nezáležel na api vrstvě.)
+export interface OvereniCeny {
+  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
+  web_cena_bez_dph?: number;
+  web_cena_s_dph?: number;
+  mena?: string;
+  zdroj_url?: string;
+  dodavatel?: string;
+  dostupnost?: string;
+  poznamka?: string;
+  overeno_at: string;
+  prekracuje_strop?: boolean;
+}
+
 export interface PolozkaMatch {
   polozka_nazev: string;
   polozka_index: number;
@@ -63,6 +80,7 @@ export interface PolozkaMatch {
   vybrany_index: number;
   oduvodneni_vyberu: string;
   cenova_uprava?: PriceOverride;
+  overeni_ceny?: OvereniCeny;
 }
 
 export interface ProductMatch {
@@ -72,6 +90,7 @@ export interface ProductMatch {
   vybrany_index?: number;
   oduvodneni_vyberu?: string;
   cenova_uprava?: PriceOverride;
+  overeni_ceny?: OvereniCeny;
   polozky_match?: PolozkaMatch[];
 }
 
