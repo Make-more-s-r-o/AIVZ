@@ -25,7 +25,7 @@ import {
   copyCompanyDocsToTender,
   getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
 } from './lib/company-store.js';
-import type { DocSlotType } from './lib/doc-slots.js';
+import { DOC_SLOTS, type DocSlotType } from './lib/doc-slots.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
@@ -209,6 +209,7 @@ function processQueue() {
     match: 'match-product.ts',
     generate: 'generate-bid.ts',
     validate: 'validate-bid.ts',
+    'verify-prices': 'verify-prices.ts',
   };
 
   const scriptFile = stepFiles[job.step];
@@ -903,7 +904,14 @@ app.get('/api/tenders/:id/documents', async (req, res) => {
     const outputDir = join(OUTPUT_DIR, req.params.id);
     const files = await readdir(outputDir);
     const docFiles = files.filter((f) => f.endsWith('.docx') || f.endsWith('.xlsx') || f.endsWith('.pdf'));
-    res.json(docFiles);
+    // U vícedílných soupisů může poslední část vzniknout dvakrát: finální `soupis_filled_<X>.xlsx`
+    // (krok 4D) i surová template-fill meziverze `<X>.xlsx` — tu skryj, ať uchazeč nepřiloží
+    // špatnou verzi. Skrýváme jen když finální protějšek existuje.
+    const rawSoupisWithFilled = new Set(
+      docFiles.filter((f) => f.startsWith('soupis_filled_')).map((f) => f.slice('soupis_filled_'.length)),
+    );
+    const visible = docFiles.filter((f) => !rawSoupisWithFilled.has(f));
+    res.json(visible);
   } catch {
     res.status(404).json({ error: 'No documents found — run generate step first' });
   }
@@ -1014,7 +1022,8 @@ app.get('/api/tenders/:id/generation-meta', async (req, res) => {
     const data = await readFile(join(OUTPUT_DIR, req.params.id, 'generation-meta.json'), 'utf-8');
     res.json(JSON.parse(data));
   } catch {
-    res.status(404).json({ error: 'Not found — run generate step first' });
+    // Před prvním generováním soubor neexistuje — prázdný objekt místo 404 (console noise v UI).
+    res.json({});
   }
 });
 
@@ -1024,7 +1033,8 @@ app.get('/api/tenders/:id/field-validation', async (req, res) => {
     const data = await readFile(join(OUTPUT_DIR, req.params.id, 'field-validation.json'), 'utf-8');
     res.json(JSON.parse(data));
   } catch {
-    res.status(404).json({ error: 'Not found — run validate step first' });
+    // Před první validací soubor neexistuje — prázdné pole místo 404 (console noise v UI).
+    res.json([]);
   }
 });
 
@@ -1426,6 +1436,61 @@ app.get('/api/companies/:companyId/documents/:filename', async (req, res) => {
   }
 });
 
+// GET /api/tenders/:id/priloha-checklist — checklist kvalifikačních příloh (M-followup d):
+// požadované doc-sloty z analysis.kvalifikace × dokumenty firmy (manifest) × přílohy zakázky.
+// Read-only; bez analýzy vrací prázdno (checklist se odvozuje z kvalifikačních požadavků).
+app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    let analysis: any = null;
+    try { analysis = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8')); } catch {}
+    const kval = analysis?.kvalifikace ?? analysis?.kvalifikacni_pozadavky;
+    if (!Array.isArray(kval) || kval.length === 0) {
+      return res.json({ items: [], company_id: null, analyza_hotova: !!analysis });
+    }
+    const requiredSlots = mapQualifikaceToSlots(kval);
+
+    // Firma zakázky (tender-meta.json) → manifest jejích dokladů.
+    let companyId: string | null = null;
+    try {
+      const meta = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'tender-meta.json'), 'utf-8'));
+      companyId = typeof meta.company_id === 'string' ? meta.company_id : null;
+    } catch {}
+    const slotToCompanyFile = new Map<string, string>();
+    if (companyId) {
+      try {
+        const manifest = await getDocManifest(companyId);
+        for (const e of manifest.entries) {
+          if (!slotToCompanyFile.has(e.slot)) slotToCompanyFile.set(e.slot, e.filename);
+        }
+      } catch {}
+    }
+
+    // Přílohy nahrané přímo k zakázce (output/<id>/prilohy).
+    let attachments: string[] = [];
+    try {
+      attachments = (await readdir(join(OUTPUT_DIR, id, 'prilohy'))).filter((f) => !f.startsWith('.'));
+    } catch {}
+    const attachmentsLower = attachments.map((f) => f.toLowerCase());
+
+    const items = requiredSlots.map((slot) => {
+      const label = DOC_SLOTS.find((s) => s.type === slot)?.label ?? slot;
+      const companyFile = slotToCompanyFile.get(slot);
+      // Příloha zakázky se páruje volně dle názvu slotu/souboru firmy (přílohy nemají sloty).
+      const attMatch = attachments.find((f, i) =>
+        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, '')));
+      if (attMatch) return { slot, label, status: 'nahrano' as const, zdroj: 'zakazka' as const, filename: attMatch };
+      if (companyFile) return { slot, label, status: 'nahrano' as const, zdroj: 'firma' as const, filename: companyFile };
+      return { slot, label, status: 'chybi' as const };
+    });
+
+    res.json({ items, company_id: companyId, analyza_hotova: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // PUT /api/tenders/:id/company - set company for tender → auto-copy docs
 app.put('/api/tenders/:id/company', async (req, res) => {
   const { id } = req.params;
@@ -1447,8 +1512,10 @@ app.put('/api/tenders/:id/company', async (req, res) => {
     try {
       const analysisPath = join(OUTPUT_DIR, id, 'analysis.json');
       const analysis = JSON.parse(await readFile(analysisPath, 'utf-8'));
-      if (analysis.kvalifikacni_pozadavky && Array.isArray(analysis.kvalifikacni_pozadavky)) {
-        requiredSlots = mapQualifikaceToSlots(analysis.kvalifikacni_pozadavky);
+      // Analýza používá pole `kvalifikace` (starší název `kvalifikacni_pozadavky` jen fallback).
+      const kval = analysis.kvalifikace ?? analysis.kvalifikacni_pozadavky;
+      if (Array.isArray(kval)) {
+        requiredSlots = mapQualifikaceToSlots(kval);
       }
     } catch {}
 

@@ -807,6 +807,61 @@ export async function detachTag(id: string, stitekId: string): Promise<{ success
   return res.json();
 }
 
+// --- Ověření cen web-searchem + checklist příloh (followup b+d) ---
+
+/** Návrh ceny dohledaný web-searchem (NIKDY nepřepisuje cenova_uprava — potvrzuje uživatel). */
+export interface OvereniCeny {
+  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
+  web_cena_bez_dph?: number;
+  web_cena_s_dph?: number;
+  mena?: string;
+  zdroj_url?: string;
+  dodavatel?: string;
+  dostupnost?: string;
+  poznamka?: string;
+  overeno_at: string;
+  prekracuje_strop?: boolean;
+}
+
+/** Spustí background job ověření cen (web search) — vrací jobId pro polling přes getJobStatus. */
+export async function verifyPrices(id: string): Promise<{ jobId: string; status: string }> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/run/verify-prices`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Ověření cen se nepodařilo spustit');
+  }
+  return res.json();
+}
+
+export interface PrilohaChecklistItem {
+  slot: string;
+  label: string;
+  status: 'nahrano' | 'chybi';
+  zdroj?: 'firma' | 'zakazka';
+  filename?: string;
+}
+
+export interface PrilohaChecklist {
+  items: PrilohaChecklistItem[];
+  company_id: string | null;
+  analyza_hotova: boolean;
+}
+
+/** Checklist kvalifikačních příloh — resilientní GET (401/chyba → prázdno). */
+export async function getPrilohaChecklist(id: string): Promise<PrilohaChecklist> {
+  const empty: PrilohaChecklist = { items: [], company_id: null, analyza_hotova: false };
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/priloha-checklist`, { headers: authHeaders() });
+    if (!res.ok) return empty;
+    return await res.json();
+  } catch {
+    return empty;
+  }
+}
+
 // --- AI Cost ---
 
 export interface CostSummary {

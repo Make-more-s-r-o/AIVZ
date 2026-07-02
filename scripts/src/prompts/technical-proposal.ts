@@ -11,7 +11,12 @@ Technický návrh musí:
 
 Formát: Markdown (bude konvertován do DOCX).
 Používej nadpisy ## a ### pro strukturu.
-Piš stručně ale kompletně — typicky 2-4 strany A4.`;
+Piš stručně ale kompletně — typicky 2-4 strany A4.
+
+DŮLEŽITÉ — nepiš titulní hlavičku dokumentu, tu doplní systém automaticky:
+- Nezačínej nadpisem „TECHNICKÝ NÁVRH" ani opakováním názvu zakázky, uchazeče, IČO, sídla či data zpracování — titulní blok i závěrečný podpis vloží generátor sám.
+- Nepoužívej vodorovné oddělovače (řádky pouze s ---).
+- Začni rovnou první obsahovou sekcí, např. „## 1. Úvod a identifikace nabídky".`;
 
 export function buildTechnicalProposalUserMessage(
   tenderName: string,

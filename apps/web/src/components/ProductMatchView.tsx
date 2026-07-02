@@ -1,17 +1,21 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import {
   getProductMatch,
   getAnalysis,
   updatePriceOverride,
   updateItemPriceOverride,
+  verifyPrices,
+  getJobStatus,
   type PriceOverrideData,
 } from '../lib/api';
 import { cn } from '../lib/cn';
-import { ChevronDown, ChevronRight, Package, Wrench, Mouse } from 'lucide-react';
+import { ChevronDown, ChevronRight, Package, Wrench, Mouse, Globe, ExternalLink, Loader2 } from 'lucide-react';
 import ProductCandidateCard from './ProductCandidateCard';
 import ItemPriceCalculator from './ItemPriceCalculator';
-import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate } from '../types/tender';
+import { useToast } from './ui';
+import { getErrorMessage } from '../types/tender';
+import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -41,25 +45,197 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
   if (error) return <div className="py-8 text-center text-gray-500">Produkty zatím nejsou k dispozici. Spusťte krok "Produkty".</div>;
   if (!data) return null;
 
-  if (isMultiItem) {
+  return (
+    <div className="space-y-4">
+      <VerifyPricesHeader tenderId={tenderId} queryClient={queryClient} />
+      {isMultiItem ? (
+        <MultiItemView
+          match={match}
+          tenderId={tenderId}
+          budget={budget}
+          queryClient={queryClient}
+          casti={casti}
+        />
+      ) : (
+        <SingleItemView
+          match={match}
+          tenderId={tenderId}
+          budget={budget}
+          queryClient={queryClient}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- Ověření cen web-searchem: hlavička s tlačítkem + polling jobu ---
+interface VerifyPricesHeaderProps {
+  tenderId: string;
+  queryClient: QueryClient;
+}
+
+function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) {
+  const { toast } = useToast();
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string>('');
+  const logSeenRef = useRef(0);
+
+  // Polling běžícího jobu (vzor PipelineStatus): inkrementální logy, poslední řádek = progress.
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const job = await getJobStatus(jobId, logSeenRef.current);
+        if (job.logs.length > 0) {
+          logSeenRef.current = job.totalLogLines;
+          const tail = job.logs[job.logs.length - 1];
+          if (tail) setProgress(tail);
+        }
+
+        if (job.status === 'done') {
+          clearInterval(interval);
+          setJobId(null);
+          setProgress('');
+          queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+          toast('Ceny ověřeny z webu', 'success');
+        } else if (job.status === 'error') {
+          clearInterval(interval);
+          setJobId(null);
+          setProgress('');
+          toast(job.error || 'Ověření cen selhalo', 'danger');
+        }
+      } catch {
+        // Síťová chyba — pokračuj v pollingu.
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [jobId, tenderId, queryClient, toast]);
+
+  const running = !!jobId;
+
+  const handleVerify = useCallback(async () => {
+    if (running) return; // Druhé kliknutí během běhu ignoruj.
+    logSeenRef.current = 0;
+    setProgress('Spouštím ověření cen…');
+    try {
+      const { jobId: id } = await verifyPrices(tenderId);
+      setJobId(id);
+    } catch (err: unknown) {
+      setProgress('');
+      toast(getErrorMessage(err), 'danger');
+    }
+  }, [running, tenderId, toast]);
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="text-xs text-gray-500">
+        {running ? (
+          <span className="inline-flex items-center gap-1.5">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {progress || 'Ověřuji ceny…'}
+          </span>
+        ) : (
+          'Dohledá aktuální tržní ceny položek na webu jako podklad — ceny potvrzujete ručně.'
+        )}
+      </div>
+      <button
+        onClick={handleVerify}
+        disabled={running}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
+          running
+            ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400'
+            : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+        )}
+      >
+        {running
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          : <Globe className="h-3.5 w-3.5" />}
+        {running ? 'Ověřuji ceny…' : 'Ověřit ceny (web)'}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Sestaví cenový návrh (PriceOverride) z web ceny pro předvyplnění cenového panelu.
+ * potvrzeno=false — potvrzení dělá uživatel ručně jako dnes. Chybí-li bez DPH, dopočítá se
+ * z ceny s DPH (a naopak) sazbou 21 %.
+ */
+function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
+  const bez = overeni.web_cena_bez_dph
+    ?? (overeni.web_cena_s_dph != null ? Math.round(overeni.web_cena_s_dph / 1.21) : 0);
+  const sdph = overeni.web_cena_s_dph ?? Math.round(bez * 1.21);
+  return {
+    nakupni_cena_bez_dph: bez,
+    nakupni_cena_s_dph: sdph,
+    marze_procent: 0,
+    nabidkova_cena_bez_dph: bez,
+    nabidkova_cena_s_dph: sdph,
+    potvrzeno: false,
+    poznamka: overeni.zdroj_url ? `Cena z webu: ${overeni.zdroj_url}` : 'Cena z webu',
+  };
+}
+
+// --- Kompaktní chip s ověřenou webovou cenou + tlačítko „Použít" ---
+interface OvereniCenyChipProps {
+  overeni: OvereniCeny;
+  onUse: () => void;
+}
+
+function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
+  if (overeni.stav === 'nalezeno') {
+    const cenaSdph = overeni.web_cena_s_dph
+      ?? (overeni.web_cena_bez_dph != null ? Math.round(overeni.web_cena_bez_dph * 1.21) : undefined);
     return (
-      <MultiItemView
-        match={match}
-        tenderId={tenderId}
-        budget={budget}
-        queryClient={queryClient}
-        casti={casti}
-      />
+      <div className={cn(
+        'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-xs',
+        overeni.prekracuje_strop ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'
+      )}>
+        <Globe className="h-3.5 w-3.5 shrink-0 text-gray-500" />
+        <span className="font-medium text-gray-800">
+          Web: {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH` : '—'}
+        </span>
+        {overeni.dodavatel && <span className="text-gray-500">· {overeni.dodavatel}</span>}
+        {overeni.dostupnost && <span className="text-gray-500">· {overeni.dostupnost}</span>}
+        {overeni.prekracuje_strop && (
+          <span className="rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+            NAD STROP
+          </span>
+        )}
+        {overeni.zdroj_url && (
+          <a
+            href={overeni.zdroj_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-0.5 text-blue-600 hover:underline"
+          >
+            zdroj <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+        <button
+          onClick={onUse}
+          className="ml-auto rounded border border-blue-300 bg-white px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-50"
+        >
+          Použít
+        </button>
+      </div>
     );
   }
 
+  // nenalezeno → šedý chip, chyba → žlutý chip
+  const isChyba = overeni.stav === 'chyba';
   return (
-    <SingleItemView
-      match={match}
-      tenderId={tenderId}
-      budget={budget}
-      queryClient={queryClient}
-    />
+    <div className={cn(
+      'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-xs',
+      isChyba ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-gray-200 bg-gray-50 text-gray-500'
+    )}>
+      <Globe className="h-3.5 w-3.5 shrink-0" />
+      <span>{isChyba ? 'Ověření ceny selhalo' : 'Cena na webu nenalezena'}</span>
+      {overeni.poznamka && <span>· {overeni.poznamka}</span>}
+    </div>
   );
 }
 
@@ -74,6 +250,9 @@ interface SingleItemViewProps {
 function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemViewProps) {
   const selectedProduct = match?.kandidati?.[match?.vybrany_index ?? 0];
   const existingOverride = match?.cenova_uprava;
+  const overeni = match?.overeni_ceny;
+  // Návrh ceny z webu předvyplněný přes „Použít"; přednost před cenova_uprava do potvrzení.
+  const [webDraft, setWebDraft] = useState<PriceOverride | null>(null);
 
   const handleConfirm = useCallback(async (priceData: PriceOverrideData) => {
     await updatePriceOverride(tenderId, priceData);
@@ -98,12 +277,19 @@ function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemView
         ))}
       </div>
 
+      {overeni && (
+        <OvereniCenyChip
+          overeni={overeni}
+          onUse={() => setWebDraft(buildDraftFromWeb(overeni))}
+        />
+      )}
+
       {selectedProduct && (
         <ItemPriceCalculator
           selectedProduct={selectedProduct}
-          existingOverride={existingOverride}
+          existingOverride={webDraft ?? existingOverride}
           budget={budget}
-          onConfirm={handleConfirm}
+          onConfirm={async (data) => { await handleConfirm(data); setWebDraft(null); }}
           label="Cenová kalkulace"
         />
       )}
@@ -122,12 +308,29 @@ interface MultiItemViewProps {
 
 function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiItemViewProps) {
   const [expandedItems, setExpandedItems] = useState<Set<number>>(() => new Set([0]));
+  // Návrhy cen z webu předvyplněné přes „Použít" — mají přednost před perzistovanou
+  // cenova_uprava v panelu, dokud je uživatel nepotvrdí (pak se draft zahodí).
+  const [priceDrafts, setPriceDrafts] = useState<Map<number, PriceOverride>>(() => new Map());
 
   const toggleItem = (index: number) => {
     setExpandedItems(prev => {
       const next = new Set(prev);
       if (next.has(index)) next.delete(index);
       else next.add(index);
+      return next;
+    });
+  };
+
+  const handleUseWebPrice = (itemIndex: number, overeni: OvereniCeny) => {
+    setPriceDrafts(prev => new Map(prev).set(itemIndex, buildDraftFromWeb(overeni)));
+    setExpandedItems(prev => new Set(prev).add(itemIndex)); // rozbal, ať je panel vidět
+  };
+
+  const clearDraft = (itemIndex: number) => {
+    setPriceDrafts(prev => {
+      if (!prev.has(itemIndex)) return prev;
+      const next = new Map(prev);
+      next.delete(itemIndex);
       return next;
     });
   };
@@ -271,6 +474,11 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                 </div>
               </div>
               <div className="flex items-center gap-3">
+                {pm.overeni_ceny?.stav === 'nalezeno' && pm.overeni_ceny.prekracuje_strop && (
+                  <span className="rounded bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                    NAD STROP
+                  </span>
+                )}
                 {isItemConfirmed && (
                   <span className="rounded bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-800">
                     Potvrzeno
@@ -314,12 +522,19 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                   ))}
                 </div>
 
+                {pm.overeni_ceny && (
+                  <OvereniCenyChip
+                    overeni={pm.overeni_ceny}
+                    onUse={() => handleUseWebPrice(idx, pm.overeni_ceny!)}
+                  />
+                )}
+
                 {selectedProduct && (
                   <ItemPriceCalculator
                     selectedProduct={selectedProduct}
-                    existingOverride={pm.cenova_uprava}
+                    existingOverride={priceDrafts.get(idx) ?? pm.cenova_uprava}
                     budget={undefined}
-                    onConfirm={(data) => handleItemConfirm(idx, data)}
+                    onConfirm={async (data) => { await handleItemConfirm(idx, data); clearDraft(idx); }}
                     label={`Cenová kalkulace: ${pm.polozka_nazev}`}
                     mnozstvi={pm.mnozstvi}
                     jednotka={pm.jednotka}

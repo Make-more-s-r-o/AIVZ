@@ -13,10 +13,12 @@ import {
   getFieldValidation,
   setDocumentMode,
   finalizeTender,
+  getPrilohaChecklist,
   type FieldValidationResult,
+  type PrilohaChecklistItem,
 } from '../lib/api';
 import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, Send } from 'lucide-react';
-import { Button, useToast } from './ui';
+import { Button, Card, Badge, useToast } from './ui';
 
 interface DocumentListProps {
   tenderId: string;
@@ -92,6 +94,47 @@ function ValidationChecklist({ result }: { result: FieldValidationResult }) {
   );
 }
 
+/**
+ * Řádek checklistu kvalifikačních příloh — název dokladu + stav (nahráno/chybí).
+ * Nahráno: badge se zdrojem (firma × zakázka) + název souboru. Chybí: badge + odkaz
+ * na sekci nahrávání níže.
+ */
+function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
+  const nahrano = item.status === 'nahrano';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}>
+      <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)' }}>
+        {item.label}
+      </span>
+      {nahrano ? (
+        <>
+          <Badge tone="success" size="sm">
+            Nahráno ({item.zdroj === 'firma' ? 'firma' : 'zakázka'})
+          </Badge>
+          {item.filename && (
+            <span
+              title={item.filename}
+              style={{
+                fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)',
+                maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
+              {item.filename}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <Badge tone="warning" size="sm">Chybí</Badge>
+          <a href="#kvalifikacni-doklady" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--info-fg)', whiteSpace: 'nowrap' }}>
+            nahrát níže
+          </a>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function DocumentList({ tenderId }: DocumentListProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -122,6 +165,11 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     retry: false,
   });
 
+  const { data: prilohaChecklist, isLoading: prilohaChecklistLoading } = useQuery({
+    queryKey: ['priloha-checklist', tenderId],
+    queryFn: () => getPrilohaChecklist(tenderId),
+  });
+
   const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -130,6 +178,7 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     try {
       await uploadAttachments(tenderId, Array.from(files));
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
     } catch (err) {
       console.error('Upload failed:', err);
       setActionError('Nahrání přílohy se nezdařilo.');
@@ -145,6 +194,7 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     try {
       await deleteAttachment(tenderId, filename);
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
     } catch (err) {
       console.error('Delete failed:', err);
       setActionError('Smazání přílohy se nezdařilo.');
@@ -335,8 +385,35 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
         </div>
       )}
 
+      {/* Checklist kvalifikačních příloh — odvozený z kvalifikačních požadavků AI analýzy */}
+      <Card title="Kvalifikační přílohy">
+        {prilohaChecklistLoading ? (
+          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Načítám…</p>
+        ) : !prilohaChecklist?.analyza_hotova ? (
+          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>
+            Spusťte AI analýzu — checklist se odvozuje z kvalifikačních požadavků.
+          </p>
+        ) : prilohaChecklist.items.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>
+            Analýza nevyžaduje žádné kvalifikační doklady.
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {prilohaChecklist.items.map((item) => (
+              <PrilohaChecklistRow key={item.slot} item={item} />
+            ))}
+          </div>
+        )}
+        {prilohaChecklist?.analyza_hotova && prilohaChecklist.company_id === null
+          && prilohaChecklist.items.some((i) => i.status === 'chybi') && (
+          <p style={{ margin: '10px 0 0', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+            Přiřaďte zakázce firmu (Nastavení → Firmy), doklady se doplní automaticky.
+          </p>
+        )}
+      </Card>
+
       {/* Qualification documents (attachments) */}
-      <div>
+      <div id="kvalifikacni-doklady">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Kvalifikační doklady</h3>
           <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition-colors">

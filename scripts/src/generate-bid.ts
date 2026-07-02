@@ -44,6 +44,16 @@ const CLEAN_BUILDERS: Record<string, (data: DocumentData) => Promise<Buffer>> = 
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
+/** Zaokrouhlí na 2 desetinná místa (odstraní i float šum typu 92828.19000000006) */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/** Formátuje cenu jako "442 039,00" — cs-CZ, vždy 2 desetinná místa */
+function formatMoney(value: number): string {
+  return value.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 /** Remove diacritics, replace spaces with underscores, strip extension */
 function sanitizeFilename(name: string): string {
   return name
@@ -170,10 +180,15 @@ async function main() {
     }];
   }
 
-  // Total prices
-  const totalBezDph = selectedProducts.reduce((s, p) => s + p.priceBezDph * p.mnozstvi, 0);
-  const totalSdph = selectedProducts.reduce((s, p) => s + p.priceSdph * p.mnozstvi, 0);
-  const dphAmount = totalSdph - totalBezDph;
+  // Total prices — řádky zaokrouhlíme na 2 desetinná místa a součet počítáme z nich,
+  // aby Σ položek == celková cena (žádný drift z per-item zaokrouhlení).
+  const lineTotals = selectedProducts.map(p => ({
+    bez: round2(p.priceBezDph * p.mnozstvi),
+    sdph: round2(p.priceSdph * p.mnozstvi),
+  }));
+  const totalBezDph = round2(lineTotals.reduce((s, l) => s + l.bez, 0));
+  const totalSdph = round2(lineTotals.reduce((s, l) => s + l.sdph, 0));
+  const dphAmount = round2(totalSdph - totalBezDph);
 
   const allConfirmed = isMultiProduct
     ? productMatch.polozky_match!.every(pm => pm.cenova_uprava?.potvrzeno)
@@ -192,9 +207,9 @@ async function main() {
     zadavatel: analysis.zakazka.zadavatel.nazev,
     zadavatel_ico: analysis.zakazka.zadavatel.ico || undefined,
     zadavatel_kontakt: analysis.zakazka.zadavatel.kontakt || undefined,
-    cena_bez_dph: totalBezDph.toLocaleString('cs-CZ'),
-    cena_s_dph: totalSdph.toLocaleString('cs-CZ'),
-    dph: dphAmount.toLocaleString('cs-CZ'),
+    cena_bez_dph: formatMoney(totalBezDph),
+    cena_s_dph: formatMoney(totalSdph),
+    dph: formatMoney(dphAmount),
     dph_sazba: '21',
     datum: new Date().toLocaleDateString('cs-CZ'),
     doba_plneni_od: analysis.terminy.doba_plneni_od || undefined,
