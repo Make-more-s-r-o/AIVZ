@@ -101,11 +101,12 @@ const TAB_VALUES = new Set<string>(TABS.map((t) => t.value));
  */
 export default function TenderDetailPage({ tenderId, initialTab, onBack }: TenderDetailPageProps) {
   const [tab, setTab] = useState<string>(initialTab && TAB_VALUES.has(initialTab) ? initialTab : 'prehled');
-  // Deep-link na záložku (zvonek notifikace #/tender/<id>?tab=komentare): když se initialTab změní
-  // za běhu (klik na notifikaci u již otevřené zakázky), přepni na cílovou záložku. Manuální přepnutí
-  // tabů hash nemění → initialTab zůstává → efekt nepřebíjí volbu uživatele.
+  // Deep-link na záložku (zvonek notifikace #/tender/<id>?tab=komentare): drž záložku v souladu
+  // s URL. Manuální přepnutí tabů se zrcadlí do hashe (selectTab), takže initialTab je vždy zdrojem
+  // pravdy — když z URL ?tab= zmizí (breadcrumb, zvonek bez tabu), vrať se na Přehled (jinak by
+  // stránka „visela" na naposledy otevřené záložce a Přehled by nešel otevřít).
   useEffect(() => {
-    if (initialTab && TAB_VALUES.has(initialTab)) setTab(initialTab);
+    setTab(initialTab && TAB_VALUES.has(initialTab) ? initialTab : 'prehled');
   }, [initialTab]);
   // Rozbalovací lišta „Zpracování" nad záložkami — spouštění kroků pipeline.
   const [pipelineOpen, setPipelineOpen] = useState(true);
@@ -116,7 +117,8 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
   // zakázku po ručním přepnutí záložky nevyvolal hashchange (shodný hash) → „mrtvý klik".
   function selectTab(next: string) {
     setTab(next);
-    const target = next === 'prehled' ? `#/tender/${tenderId}` : `#/tender/${tenderId}?tab=${next}`;
+    const eid = encodeURIComponent(tenderId);
+    const target = next === 'prehled' ? `#/tender/${eid}` : `#/tender/${eid}?tab=${next}`;
     try {
       if (window.location.hash !== target) {
         window.history.replaceState(null, '', target);

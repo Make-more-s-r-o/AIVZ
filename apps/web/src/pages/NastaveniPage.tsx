@@ -35,7 +35,14 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
         style={{ marginBottom: 20 }}
       />
       {section === 'firmy' && <CompanySettings />}
-      {section === 'uzivatele' && currentUserId && <UserManagement currentUserId={currentUserId} />}
+      {section === 'uzivatele' && (currentUserId ? (
+        <UserManagement currentUserId={currentUserId} />
+      ) : (
+        // Bez přihlášeného uživatele (dev bez JWT / chybějící profil) nenechávej prázdnou plochu.
+        <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)' }}>
+          Správa uživatelů vyžaduje přihlášení. Přihlaste se prosím znovu.
+        </p>
+      ))}
       {section === 'heslo' && <ChangePasswordForm />}
       {section === 'stitky' && <TagManager />}
     </div>

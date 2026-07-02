@@ -106,7 +106,13 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
               {window.location.hostname === 'localhost' && (
                 <button
                   type="button"
-                  onClick={() => window.location.reload()}
+                  onClick={() => {
+                    // Dev bypass: bez uloženého tokenu App znovu ukáže tento dialog (nekonečná
+                    // smyčka). Ulož placeholder — backend na localhostu bez JWT mutace pouští
+                    // přes same-origin bypass, token se reálně neověřuje.
+                    setAuthToken('localhost-dev');
+                    window.location.reload();
+                  }}
                   className="rounded border px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
                 >
                   Přeskočit

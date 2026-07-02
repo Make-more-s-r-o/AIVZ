@@ -1631,7 +1631,7 @@ app.patch('/api/tenders/:id/status', async (req, res) => {
       old: current, new: target, reason: reason ?? null, actor_name: actorName,
     });
     if (crm?.assignee) {
-      await notify({ user_id: crm.assignee, typ: 'status_change', text: 'Změnil se stav přiřazené zakázky.', url: `#/tender/${id}`, tender_id: id, actor_id: actor, dedup_key: `status_change:${id}` });
+      await notify({ user_id: crm.assignee, typ: 'status_change', text: 'Změnil se stav přiřazené zakázky.', url: `#/tender/${encodeURIComponent(id)}`, tender_id: id, actor_id: actor, dedup_key: `status_change:${id}` });
     }
     res.json({ success: true, status: target });
   } catch (err) {
@@ -1657,7 +1657,7 @@ app.put('/api/tenders/:id/assignee', async (req, res) => {
     const actorName = (req as any).user?.name ?? null;
     await logActivity(id, 'assignment', actor, { assignee: value, actor_name: actorName });
     if (value) {
-      await notify({ user_id: value, typ: 'assigned', text: 'Byla vám přiřazena zakázka.', url: `#/tender/${id}`, tender_id: id, actor_id: actor, dedup_key: `assigned:${id}` });
+      await notify({ user_id: value, typ: 'assigned', text: 'Byla vám přiřazena zakázka.', url: `#/tender/${encodeURIComponent(id)}`, tender_id: id, actor_id: actor, dedup_key: `assigned:${id}` });
     }
     res.json({ success: true, assignee: value });
   } catch (err) {
@@ -1746,7 +1746,7 @@ app.post('/api/tenders/:id/tasks', async (req, res) => {
     });
     await logActivity(id, 'task_created', actor, { task_id: task.id, title: task.title, actor_name: actorName });
     if (task.assignee) {
-      await notify({ user_id: task.assignee, typ: 'task_assigned', text: `Nový úkol: ${task.title}`, url: `#/tender/${id}?tab=ukoly`, tender_id: id, entity_typ: 'task', entity_id: task.id, actor_id: actor, dedup_key: `task_assigned:${task.id}` });
+      await notify({ user_id: task.assignee, typ: 'task_assigned', text: `Nový úkol: ${task.title}`, url: `#/tender/${encodeURIComponent(id)}?tab=ukoly`, tender_id: id, entity_typ: 'task', entity_id: task.id, actor_id: actor, dedup_key: `task_assigned:${task.id}` });
     }
     res.json(task);
   } catch (err) {
@@ -2012,7 +2012,7 @@ app.post('/api/tenders/:id/comments', async (req, res) => {
       notified.add(uid);
       await notify({
         user_id: uid, typ: 'mention', text: `${actorName ?? 'Někdo'} vás zmínil v komentáři.`,
-        url: `#/tender/${id}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
+        url: `#/tender/${encodeURIComponent(id)}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
         actor_id: actor, dedup_key: `mention:${comment.id}:${uid}`,
       });
     }
@@ -2021,7 +2021,7 @@ app.post('/api/tenders/:id/comments', async (req, res) => {
     if (crm?.assignee && crm.assignee !== actor && !notified.has(crm.assignee)) {
       await notify({
         user_id: crm.assignee, typ: 'comment', text: 'Nový komentář u přiřazené zakázky.',
-        url: `#/tender/${id}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
+        url: `#/tender/${encodeURIComponent(id)}?tab=komentare`, tender_id: id, entity_typ: 'comment', entity_id: comment.id,
         actor_id: actor, dedup_key: `comment:${comment.id}`,
       });
     }
@@ -2599,7 +2599,7 @@ startup().then(() => {
         if (recipient) {
           await notify({
             user_id: recipient, typ: 'deadline', text: 'Blíží se termín přiřazené zakázky.',
-            url: `#/tender/${t.tender_id}`, tender_id: t.tender_id, entity_typ: 'termin', entity_id: t.id,
+            url: `#/tender/${encodeURIComponent(t.tender_id)}`, tender_id: t.tender_id, entity_typ: 'termin', entity_id: t.id,
             actor_id: null, dedup_key: `deadline:${t.id}`,
           });
           await markReminded(t.id);

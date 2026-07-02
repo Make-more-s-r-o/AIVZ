@@ -51,13 +51,17 @@ export default function ProductList({
   const [priceMinInput, setPriceMinInput] = useState(priceMin?.toString() || '');
   const [priceMaxInput, setPriceMaxInput] = useState(priceMax?.toString() || '');
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
-  const priceDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+  // Samostatný debounce timer pro každé pole ceny — jinak by rychlá změna obou polí
+  // zrušila pending update prvního pole a jeho hodnota by se ztratila.
+  const priceMinDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const priceMaxDebounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Cleanup debounce timers na unmount
   useEffect(() => {
     return () => {
       clearTimeout(debounceRef.current);
-      clearTimeout(priceDebounceRef.current);
+      clearTimeout(priceMinDebounceRef.current);
+      clearTimeout(priceMaxDebounceRef.current);
     };
   }, []);
 
@@ -108,10 +112,11 @@ export default function ProductList({
   };
 
   const handlePriceChange = (field: 'price_min' | 'price_max', value: string) => {
+    const ref = field === 'price_min' ? priceMinDebounceRef : priceMaxDebounceRef;
     if (field === 'price_min') setPriceMinInput(value);
     else setPriceMaxInput(value);
-    clearTimeout(priceDebounceRef.current);
-    priceDebounceRef.current = setTimeout(() => {
+    clearTimeout(ref.current);
+    ref.current = setTimeout(() => {
       onParamsChange({ [field]: value || null, p: null });
     }, 500);
   };

@@ -40,8 +40,11 @@ function parseHash(): Route {
   const qIdx = hash.indexOf('?');
   const path = qIdx === -1 ? hash : hash.slice(0, qIdx);
 
+  // ID v hashi jsou percent-enkódovaná (prohlížeč enkóduje mezery/&; my enkódujeme při navigaci)
+  // — při čtení je nutné dekódovat, jinak se zobrazí „Robota%20" a API lookupy selžou.
+  const dec = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
   if (path.startsWith('/tender/')) {
-    const tenderId = path.split('/')[2];
+    const tenderId = dec(path.split('/')[2] ?? '');
     if (tenderId) {
       // Deep-link na konkrétní záložku, např. #/tender/<id>?tab=komentare (zvonek notifikace).
       const q = qIdx === -1 ? '' : hash.slice(qIdx + 1);
@@ -50,7 +53,7 @@ function parseHash(): Route {
     }
   }
   if (path.startsWith('/warehouse/product/')) {
-    const productId = path.split('/')[3];
+    const productId = dec(path.split('/')[3] ?? '');
     if (productId) return { view: 'warehouse-product', productId };
   }
   if (path === '/warehouse') return { view: 'warehouse', tab: 'dashboard' };
@@ -145,16 +148,16 @@ export default function App() {
   let content: React.ReactNode;
   switch (route.view) {
     case 'prehled':
-      content = <PrehledPage onOpen={(id) => navigate('/tender/' + id)} currentUserId={user?.id} />;
+      content = <PrehledPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} currentUserId={user?.id} />;
       break;
     case 'monitoring':
-      content = <MonitoringPage onOpen={(id) => navigate('/tender/' + id)} />;
+      content = <MonitoringPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} />;
       break;
     case 'pipeline':
-      content = <PipelinePage onOpen={(id) => navigate('/tender/' + id)} />;
+      content = <PipelinePage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} />;
       break;
     case 'zakazky':
-      content = <ZakazkyPage onOpen={(id) => navigate('/tender/' + id)} />;
+      content = <ZakazkyPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} />;
       break;
     case 'kalendar':
       content = <KalendarPage />;

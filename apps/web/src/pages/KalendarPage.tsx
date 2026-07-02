@@ -40,7 +40,7 @@ function parseDatum(datum: string): Date {
 
 // Navigace na detail zakázky přes stejný hash-routing jako zbytek appky.
 function openTender(id: string): void {
-  window.location.hash = '#/tender/' + id;
+  window.location.hash = '#/tender/' + encodeURIComponent(id);
 }
 
 /**

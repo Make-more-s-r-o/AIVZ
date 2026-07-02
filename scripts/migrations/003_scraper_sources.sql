@@ -15,4 +15,7 @@ INSERT INTO manufacturer_aliases (canonical_name, alias) VALUES
   ('Prusa Research', 'PrusaResearch'),
   ('Prusa Research', 'Prusa 3D'),
   ('Prusa Research', 'Prusament')
-ON CONFLICT (canonical_name, alias) DO NOTHING;
+ON CONFLICT (alias) DO NOTHING;
+-- Pozn.: unique je na sloupci `alias` (viz 001), ne na dvojici (canonical_name, alias).
+-- Původní `ON CONFLICT (canonical_name, alias)` padal na čisté DB (chybějící matching constraint)
+-- a zablokoval všechny následující migrace (004–010 = celá CRM vrstva).
