@@ -151,11 +151,28 @@ export async function callClaude(
         },
         { signal: controller.signal },
       );
-      // message_start nese přesné input_tokens, každý message_delta kumulativní output_tokens —
+      // message_start nese přesné input_tokens, message_delta kumulativní output_tokens —
       // zachytíme je průběžně, aby byla usage k dispozici i když stream skončí abortem.
+      //
+      // Heartbeat á ~60 s: dlouhá generace (analyze 32k tokenů = jednotky minut) jinak mlčí
+      // a idle watchdog job fronty (300 s bez outputu) by živý stream zabil. POZOR:
+      // `message_delta` chodí až na KONCI zprávy (usage + stop_reason), průběžný obsah teče
+      // přes `content_block_delta` — heartbeat MUSÍ viset na něm, jinak nikdy nevystřelí
+      // (prod job c1e45a7f: analyze 58k znaků zabit idle watchdogem uprostřed živé generace).
+      let lastHeartbeat = Date.now();
+      let streamedChars = 0;
       stream.on('streamEvent', (event) => {
         if (event.type === 'message_start') {
           partialInputTokens = event.message.usage.input_tokens;
+        } else if (event.type === 'content_block_delta') {
+          if (event.delta.type === 'text_delta') streamedChars += event.delta.text.length;
+          // ~3.5 znaku/token — hrubý průběžný odhad pro účtování abortnuté generace,
+          // finální usage ho přepíše přesným číslem z message_delta.
+          partialOutputTokens = Math.max(partialOutputTokens, Math.round(streamedChars / 3.5));
+          if (Date.now() - lastHeartbeat >= 60_000) {
+            lastHeartbeat = Date.now();
+            console.log(`  … AI stream běží (~${partialOutputTokens} output tokenů)`);
+          }
         } else if (event.type === 'message_delta') {
           partialOutputTokens = event.usage.output_tokens;
         }

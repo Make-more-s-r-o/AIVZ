@@ -56,7 +56,7 @@ export const TenderAnalysisSchema = z.object({
   })),
   hodnotici_kriteria: z.array(z.object({
     nazev: z.string(),
-    vaha_procent: z.number(),
+    vaha_procent: z.preprocess(parseAiNumber, z.number().nullable()).transform(v => v ?? 0),
     popis: z.string(),
   })).optional().default([]),
   terminy: z.object({
@@ -95,6 +95,22 @@ export const TenderAnalysisSchema = z.object({
   }),
 });
 
+// Čísla z AI výstupů občas přijdou jako string („12 990,50 Kč", „1.299,-") — bez koerce
+// spadne celý match na ZodError až PO zaplacení všech AI dávek (prod job 8752b6d9).
+// Koerce toleruje mezery/nbsp, měnu a českou desetinnou čárku; nečíselný string nechá
+// projít do z.number(), které ho odmítne standardní chybou.
+function parseAiNumber(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  let s = v.replace(/[\s ]/g, '').replace(/(Kč|CZK|,-|%)$/i, '');
+  if (s.includes('.') && s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, ''); // „1.299“ = česky 1299
+  else s = s.replace(',', '.');
+  if (s === '' || !/^-?\d/.test(s)) return v;
+  const n = Number(s);
+  return Number.isNaN(n) ? v : n;
+}
+const aiNumber = () => z.preprocess(parseAiNumber, z.number());
+
 // Product matching
 export const ProductCandidateSchema = z.object({
   vyrobce: z.string(),
@@ -107,8 +123,8 @@ export const ProductCandidateSchema = z.object({
     hodnota: z.string(),
     komentar: z.string().optional(),
   })),
-  cena_bez_dph: z.number(),
-  cena_s_dph: z.number(),
+  cena_bez_dph: aiNumber(),
+  cena_s_dph: aiNumber(),
   cena_spolehlivost: z.enum(['vysoka', 'stredni', 'nizka']).default('nizka'),
   cena_komentar: z.string().optional(),
   dodavatele: z.array(z.string()),
@@ -119,7 +135,7 @@ export const ProductCandidateSchema = z.object({
   // Warehouse matching metadata
   warehouse_product_id: z.string().uuid().optional(),
   match_tier: z.enum(['exact', 'text', 'vector']).optional(),
-  match_score: z.number().optional(),
+  match_score: z.preprocess(parseAiNumber, z.number().optional()),
 });
 
 export const PriceOverrideSchema = z.object({
@@ -135,14 +151,14 @@ export const PriceOverrideSchema = z.object({
 export const PolozkaMatchSchema = z.object({
   polozka_nazev: z.string(),
   polozka_index: z.number(),
-  mnozstvi: z.number().optional(),
+  mnozstvi: z.preprocess(parseAiNumber, z.number().optional()),
   jednotka: z.string().optional(),
   specifikace: z.string().optional(),
   cena_max_s_dph: z.number().optional(),  // hard per-unit cap incl. VAT (carried from analysis)
   typ: z.enum(['produkt', 'prislusenstvi', 'sluzba']).default('produkt'),
   cast_id: z.string().optional(),    // references CastSchema.id
   kandidati: z.array(ProductCandidateSchema),
-  vybrany_index: z.number(),
+  vybrany_index: aiNumber(),
   oduvodneni_vyberu: z.string(),
   cenova_uprava: PriceOverrideSchema.optional(),
 });
@@ -152,7 +168,7 @@ export const ProductMatchSchema = z.object({
   matchedAt: z.string().datetime(),
   // Legacy single-product fields
   kandidati: z.array(ProductCandidateSchema).optional(),
-  vybrany_index: z.number().optional(),
+  vybrany_index: z.preprocess(parseAiNumber, z.number().optional()),
   oduvodneni_vyberu: z.string().optional(),
   cenova_uprava: PriceOverrideSchema.optional(),
   // Multi-product fields

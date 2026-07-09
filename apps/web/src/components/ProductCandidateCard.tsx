@@ -1,5 +1,5 @@
 import { cn } from '../lib/cn';
-import { Check, X, AlertTriangle, ExternalLink } from 'lucide-react';
+import { Check, X, AlertTriangle, ExternalLink, Loader2 } from 'lucide-react';
 import type { ProductCandidate } from '../types/tender';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -11,9 +11,13 @@ const CONFIDENCE_LABELS: Record<string, { label: string; color: string }> = {
 interface ProductCandidateCardProps {
   product: ProductCandidate;
   isSelected: boolean;
+  // Ruční přepnutí výběru operátorem. Když chybí, karta je jen zobrazovací (bez tlačítka).
+  onSelect?: () => void;
+  // Probíhá ukládání výběru pro tuto položku → tlačítka jsou disabled.
+  selecting?: boolean;
 }
 
-export default function ProductCandidateCard({ product, isSelected }: ProductCandidateCardProps) {
+export default function ProductCandidateCard({ product, isSelected, onSelect, selecting }: ProductCandidateCardProps) {
   const confidence = CONFIDENCE_LABELS[product.cena_spolehlivost] ?? { label: 'Nízká', color: 'bg-red-100 text-red-800' };
 
   return (
@@ -113,6 +117,18 @@ export default function ProductCandidateCard({ product, isSelected }: ProductCan
       )}
       {product.dostupnost && (
         <div className="text-xs text-gray-500">Dostupnost: {product.dostupnost}</div>
+      )}
+
+      {/* Ruční výběr: u vybraného kandidáta nic (badge nahoře stačí), u ostatních tlačítko. */}
+      {onSelect && !isSelected && (
+        <button
+          onClick={onSelect}
+          disabled={selecting}
+          className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-blue-300 bg-white px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {selecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+          Vybrat tento produkt
+        </button>
       )}
     </div>
   );

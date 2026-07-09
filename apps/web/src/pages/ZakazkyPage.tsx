@@ -1,10 +1,10 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react';
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Search, Plus, Inbox, Save, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 import { Button, Input, Select, Avatar, Badge, useToast } from '../components/ui';
 import { StageBadge, DecisionPill, DeadlineCountdown } from '../components/crm';
 import {
-  getTenders, getAnalysis, getUsers,
+  getTendersSummary, getUsers,
   getViews, createView, deleteView, getTags,
   type SavedView, type Stitek,
 } from '../lib/api';
@@ -81,7 +81,8 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const qc = useQueryClient();
   const { toast } = useToast();
 
-  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
+  // Jeden request se souhrnem analýzy embednutým na každé zakázce (zrušení N+1 getAnalysis).
+  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
   // Řešitel = jméno z user-store; enrichment, degraduje na prázdno (getUsers je resilientní).
   const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
   const usersMap = useMemo(() => new Map(users.map((u): [string, string] => [u.id, u.name || u.email])), [users]);
@@ -93,39 +94,28 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
     [allTags],
   );
 
-  // Lazy per-row obohacení (zadavatel, hodnota, lhůta, rozhodnutí) z analysis.json.
-  const analyses = useQueries({
-    queries: tenders.map((t) => ({
-      queryKey: ['analysis', t.id],
-      queryFn: () => getAnalysis(t.id),
-      retry: false,
-      enabled: t.steps.analyze === 'done',
-      staleTime: 5 * 60 * 1000,
-    })),
-  });
-
+  // Obohacení (zadavatel, hodnota, lhůta, rozhodnutí) přichází embednuté v t.analysis (souhrn).
   const rows: Row[] = useMemo(
     () =>
-      tenders.map((t, i) => {
-        const q = analyses[i];
-        const a = q?.data;
-        const lhuta = a?.terminy?.lhuta_nabidek ?? null;
+      tenders.map((t) => {
+        const a = t.analysis;
+        const lhuta = a?.lhuta_nabidek ?? null;
         return {
           id: t.id,
           stage: effectiveStage({ status: t.status, steps: t.steps }),
-          nazev: a?.zakazka?.nazev || t.name || t.tenderId || t.id,
-          evidence: a?.zakazka?.evidencni_cislo || t.tenderId || t.id,
-          zadavatel: a?.zakazka?.zadavatel?.nazev || '',
-          ico: a?.zakazka?.zadavatel?.ico || '',
-          hodnota: a?.zakazka?.predpokladana_hodnota,
+          nazev: a?.nazev || t.name || t.tenderId || t.id,
+          evidence: a?.evidencni_cislo || t.tenderId || t.id,
+          zadavatel: a?.zadavatel_nazev || '',
+          ico: a?.zadavatel_ico || '',
+          hodnota: a?.predpokladana_hodnota ?? undefined,
           lhuta,
-          decision: normalizeDecision(a?.doporuceni?.rozhodnuti),
+          decision: normalizeDecision(a?.rozhodnuti ?? undefined),
           days: deadlineDays(lhuta),
           assignee: t.assignee ?? null,
           stitky: t.stitky ?? [],
         };
       }),
-    [tenders, analyses],
+    [tenders],
   );
 
   const filtered = useMemo(() => {

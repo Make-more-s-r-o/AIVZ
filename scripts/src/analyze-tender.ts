@@ -36,12 +36,21 @@ async function main() {
 
   console.log(`\nAnalyzing ${analysisText.length} characters...`);
 
-  // Call Claude
+  // Call Claude — velké zakázky (72k+ znaků, stovky položek) potřebují víc output tokenů;
+  // 16384 se u nich useklo uprostřed JSON (prod tendery 1779109774773, 1782811562056).
   const result = await callClaude(
     ANALYZE_TENDER_SYSTEM,
     buildAnalyzeUserMessage(analysisText),
-    { maxTokens: 16384, temperature: 0.1 }
+    { maxTokens: 32768, temperature: 0.1 }
   );
+
+  // Useknutá odpověď = garantovaně rozbitý JSON — jasná chyba místo SyntaxError změti.
+  if (result.stopReason === 'max_tokens') {
+    throw new Error(
+      `Analýza překročila limit výstupu (${result.outputTokens} tokenů) — zakázka je příliš rozsáhlá na jeden průchod. ` +
+      `Zvažte rozdělení dokumentace nebo navýšení limitu (analyze maxTokens).`,
+    );
+  }
 
   // Parse and validate JSON response
   let jsonStr = result.content.trim();
