@@ -8,6 +8,7 @@ import {
   bulkUpdateItemPriceOverride,
   verifyPrices,
   getJobStatus,
+  JobNotFoundError,
   type PriceOverrideData,
 } from '../lib/api';
 import { cn } from '../lib/cn';
@@ -75,11 +76,18 @@ interface VerifyPricesHeaderProps {
   queryClient: QueryClient;
 }
 
+// Kolik po sobě jdoucích síťových výpadků pollingu tolerovat, než spinner vzdáme
+// (2500 ms interval → ~75 s). Stejný princip jako v PipelineStatus.
+const MAX_FAILED_POLLS = 30;
+
 function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) {
   const { toast } = useToast();
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
   const logSeenRef = useRef(0);
+  // Počítadlo po sobě jdoucích síťových výpadků pollingu (úspěšný poll ho vynuluje),
+  // ať spinner netočí donekonečna při delším výpadku spojení.
+  const failedPollsRef = useRef(0);
 
   // Polling běžícího jobu (vzor PipelineStatus): inkrementální logy, poslední řádek = progress.
   useEffect(() => {
@@ -88,6 +96,7 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
     const interval = setInterval(async () => {
       try {
         const job = await getJobStatus(jobId, logSeenRef.current);
+        failedPollsRef.current = 0; // úspěšný poll → vynuluj počítadlo výpadků
         if (job.logs.length > 0) {
           logSeenRef.current = job.totalLogLines;
           const tail = job.logs[job.logs.length - 1];
@@ -106,8 +115,28 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
           setProgress('');
           toast(job.error || 'Ověření cen selhalo', 'danger');
         }
-      } catch {
-        // Síťová chyba — pokračuj v pollingu.
+      } catch (err) {
+        // Zastav spinner a vyčisti stav (společné pro oba fatální případy níže).
+        const giveUp = (message: string) => {
+          clearInterval(interval);
+          setJobId(null);
+          setProgress('');
+          failedPollsRef.current = 0;
+          toast(message, 'danger');
+        };
+
+        if (err instanceof JobNotFoundError) {
+          // 404 — úloha zmizela ze serveru (nejčastěji restart/deploy během běhu). Dřív to
+          // bare catch spolkl a tlačítko viselo na „Ověřuji ceny…" navždy. Teď zastav a nabídni restart.
+          giveUp('Ověření cen bylo ztraceno — server se pravděpodobně restartoval (deploy). Spusťte ověření znovu.');
+          return;
+        }
+
+        // Síťová chyba — pollovat dál, ale s limitem, ať spinner netočí donekonečna.
+        failedPollsRef.current += 1;
+        if (failedPollsRef.current >= MAX_FAILED_POLLS) {
+          giveUp('Ztráta spojení se serverem během ověřování cen. Spusťte ověření znovu.');
+        }
       }
     }, 2500);
 
@@ -119,6 +148,7 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
   const handleVerify = useCallback(async () => {
     if (running) return; // Druhé kliknutí během běhu ignoruj.
     logSeenRef.current = 0;
+    failedPollsRef.current = 0;
     setProgress('Spouštím ověření cen…');
     try {
       const { jobId: id } = await verifyPrices(tenderId);
