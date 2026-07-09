@@ -437,7 +437,9 @@ async function main() {
       const sliceItemsWithReqs = sliceItems.map(item => ({ ...item, technicke_pozadavky: relevantReqs }));
 
       // Střízlivý strop output tokenů, tvrdý cap 16384 (dřív až 65536 → generace přes 600s).
-      const maxTokens = Math.min(16384, 4096 + sliceItems.length * candidateCount * 400);
+      // 700 tokenů/kandidáta: 400 bylo poddimenzované — upovídané české oduvodneni_vyberu
+      // narazilo na strop přesně (prod job 084394f2: 10496/10496 out) a useknulo JSON.
+      const maxTokens = Math.min(16384, 4096 + sliceItems.length * candidateCount * 700);
 
       // Přidej warehouse kontext do AI promptu
       let userMessage = buildProductMatchUserMessage(
@@ -481,6 +483,20 @@ async function main() {
 
       await logCost(tenderId, `match-batch-${label}`, result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
       totalCost += result.costCZK;
+
+      // Useknutá odpověď (strop max_tokens) = garantovaně nekompletní JSON. Neřešit křehkým
+      // recovery — rozpůlit dávku (poloviční položky ⇒ poloviční výstup), stejná salvage
+      // cesta jako u timeoutu; už rozpůlená dávka selže nahlas.
+      if (result.stopReason === 'max_tokens') {
+        if (allowRetry && sliceItems.length > 1) {
+          const mid = Math.ceil(sliceItems.length / 2);
+          console.warn(`  ⚠ Odpověď dávky ${label} useknuta stropem max_tokens — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);
+          await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
+          await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        throw new Error(`AI matching: odpověď useknuta limitem tokenů i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
+      }
 
       let jsonStr = result.content.trim();
       if (jsonStr.startsWith('```')) {
