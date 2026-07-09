@@ -5,17 +5,20 @@ import {
   getAnalysis,
   updatePriceOverride,
   updateItemPriceOverride,
+  bulkUpdateItemPriceOverride,
   verifyPrices,
   getJobStatus,
+  JobNotFoundError,
   type PriceOverrideData,
 } from '../lib/api';
 import { cn } from '../lib/cn';
-import { ChevronDown, ChevronRight, Package, Wrench, Mouse, Globe, ExternalLink, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Package, Wrench, Mouse, Globe, ExternalLink, Loader2, CheckCheck } from 'lucide-react';
 import ProductCandidateCard from './ProductCandidateCard';
 import ItemPriceCalculator from './ItemPriceCalculator';
 import { useToast } from './ui';
 import { getErrorMessage } from '../types/tender';
 import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
+import { safeHttpUrl } from '../lib/url';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -74,11 +77,18 @@ interface VerifyPricesHeaderProps {
   queryClient: QueryClient;
 }
 
+// Kolik po sobě jdoucích síťových výpadků pollingu tolerovat, než spinner vzdáme
+// (2500 ms interval → ~75 s). Stejný princip jako v PipelineStatus.
+const MAX_FAILED_POLLS = 30;
+
 function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) {
   const { toast } = useToast();
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
   const logSeenRef = useRef(0);
+  // Počítadlo po sobě jdoucích síťových výpadků pollingu (úspěšný poll ho vynuluje),
+  // ať spinner netočí donekonečna při delším výpadku spojení.
+  const failedPollsRef = useRef(0);
 
   // Polling běžícího jobu (vzor PipelineStatus): inkrementální logy, poslední řádek = progress.
   useEffect(() => {
@@ -87,6 +97,7 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
     const interval = setInterval(async () => {
       try {
         const job = await getJobStatus(jobId, logSeenRef.current);
+        failedPollsRef.current = 0; // úspěšný poll → vynuluj počítadlo výpadků
         if (job.logs.length > 0) {
           logSeenRef.current = job.totalLogLines;
           const tail = job.logs[job.logs.length - 1];
@@ -105,8 +116,28 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
           setProgress('');
           toast(job.error || 'Ověření cen selhalo', 'danger');
         }
-      } catch {
-        // Síťová chyba — pokračuj v pollingu.
+      } catch (err) {
+        // Zastav spinner a vyčisti stav (společné pro oba fatální případy níže).
+        const giveUp = (message: string) => {
+          clearInterval(interval);
+          setJobId(null);
+          setProgress('');
+          failedPollsRef.current = 0;
+          toast(message, 'danger');
+        };
+
+        if (err instanceof JobNotFoundError) {
+          // 404 — úloha zmizela ze serveru (nejčastěji restart/deploy během běhu). Dřív to
+          // bare catch spolkl a tlačítko viselo na „Ověřuji ceny…" navždy. Teď zastav a nabídni restart.
+          giveUp('Ověření cen bylo ztraceno — server se pravděpodobně restartoval (deploy). Spusťte ověření znovu.');
+          return;
+        }
+
+        // Síťová chyba — pollovat dál, ale s limitem, ať spinner netočí donekonečna.
+        failedPollsRef.current += 1;
+        if (failedPollsRef.current >= MAX_FAILED_POLLS) {
+          giveUp('Ztráta spojení se serverem během ověřování cen. Spusťte ověření znovu.');
+        }
       }
     }, 2500);
 
@@ -118,6 +149,7 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
   const handleVerify = useCallback(async () => {
     if (running) return; // Druhé kliknutí během běhu ignoruj.
     logSeenRef.current = 0;
+    failedPollsRef.current = 0;
     setProgress('Spouštím ověření cen…');
     try {
       const { jobId: id } = await verifyPrices(tenderId);
@@ -168,6 +200,7 @@ function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
   const bez = overeni.web_cena_bez_dph
     ?? (overeni.web_cena_s_dph != null ? Math.round(overeni.web_cena_s_dph / 1.21) : 0);
   const sdph = overeni.web_cena_s_dph ?? Math.round(bez * 1.21);
+  const safeUrl = safeHttpUrl(overeni.zdroj_url);
   return {
     nakupni_cena_bez_dph: bez,
     nakupni_cena_s_dph: sdph,
@@ -175,7 +208,32 @@ function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
     nabidkova_cena_bez_dph: bez,
     nabidkova_cena_s_dph: sdph,
     potvrzeno: false,
-    poznamka: overeni.zdroj_url ? `Cena z webu: ${overeni.zdroj_url}` : 'Cena z webu',
+    poznamka: safeUrl ? `Cena z webu: ${safeUrl}` : 'Cena z webu',
+  };
+}
+
+/**
+ * Sestaví data pro potvrzení ceny jedné položky (pro hromadné „Potvrdit"). Zdroj v pořadí priority:
+ * web-draft (pokud si operátor „Použít" web cenu) → již existující cenova_uprava → AI odhad
+ * (cena_bez_dph vybraného kandidáta). Marže se přebírá z draftu/úpravy, jinak 0. Počítá stejně
+ * jako ItemPriceCalculator (jednotný money-path). Vrací null, pokud položku nelze ocenit
+ * (chybí kandidát nebo nákupní cena ≤ 0) — takovou hromadné potvrzení přeskočí.
+ */
+function buildConfirmData(pm: PolozkaMatch, draft?: PriceOverride): PriceOverrideData | null {
+  const product = pm.kandidati[pm.vybrany_index] as ProductCandidate | undefined;
+  const existing = pm.cenova_uprava;
+  const nakupni = draft?.nakupni_cena_bez_dph ?? existing?.nakupni_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
+  if (!(nakupni > 0)) return null;
+  const marze = draft?.marze_procent ?? existing?.marze_procent ?? 0;
+  const nabidkovaBez = Math.round(nakupni * (1 + marze / 100));
+  return {
+    nakupni_cena_bez_dph: nakupni,
+    nakupni_cena_s_dph: Math.round(nakupni * 1.21),
+    marze_procent: marze,
+    nabidkova_cena_bez_dph: nabidkovaBez,
+    nabidkova_cena_s_dph: Math.round(nabidkovaBez * 1.21),
+    potvrzeno: true,
+    poznamka: draft?.poznamka ?? existing?.poznamka ?? undefined,
   };
 }
 
@@ -205,9 +263,9 @@ function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
             NAD STROP
           </span>
         )}
-        {overeni.zdroj_url && (
+        {safeHttpUrl(overeni.zdroj_url) && (
           <a
-            href={overeni.zdroj_url}
+            href={safeHttpUrl(overeni.zdroj_url)}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-0.5 text-blue-600 hover:underline"
@@ -307,10 +365,23 @@ interface MultiItemViewProps {
 }
 
 function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiItemViewProps) {
+  const { toast } = useToast();
   const [expandedItems, setExpandedItems] = useState<Set<number>>(() => new Set([0]));
   // Návrhy cen z webu předvyplněné přes „Použít" — mají přednost před perzistovanou
   // cenova_uprava v panelu, dokud je uživatel nepotvrdí (pak se draft zahodí).
   const [priceDrafts, setPriceDrafts] = useState<Map<number, PriceOverride>>(() => new Map());
+  // Hromadné potvrzení cen: výběr řádků (checkboxy) + probíhající uložení.
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [bulkSaving, setBulkSaving] = useState(false);
+
+  const toggleSelect = (index: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
 
   const toggleItem = (index: number) => {
     setExpandedItems(prev => {
@@ -354,6 +425,47 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
 
   const allConfirmed = polozky.every((pm) => pm.cenova_uprava?.potvrzeno);
   const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
+
+  // Indexy nepotvrzených položek (pořadí = index v poli polozky, což používá i per-item confirm).
+  const unconfirmedIndices = polozky
+    .map((pm, i) => (pm.cenova_uprava?.potvrzeno ? -1 : i))
+    .filter((i) => i >= 0);
+
+  // Hromadné potvrzení: pro každou vybranou položku dopočítá cenu (buildConfirmData) a pošle
+  // JEDNÍM requestem (bulk endpoint, transakčně nad souborem). Položky bez ceny přeskočí.
+  const confirmBulk = useCallback(async (indices: number[]) => {
+    if (bulkSaving) return;
+    const payload: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }> = [];
+    let skipped = 0;
+    for (const idx of indices) {
+      const pm = polozky[idx];
+      if (!pm) continue;
+      const data = buildConfirmData(pm, priceDrafts.get(idx));
+      if (!data) { skipped++; continue; }
+      payload.push({ itemIndex: idx, cenova_uprava: data });
+    }
+    if (payload.length === 0) {
+      toast(skipped > 0 ? 'Vybrané položky nelze automaticky ocenit (chybí cena)' : 'Není co potvrdit', 'danger');
+      return;
+    }
+    setBulkSaving(true);
+    try {
+      const { updated } = await bulkUpdateItemPriceOverride(tenderId, payload);
+      // Web-drafty potvrzených položek zahoď (stejně jako po per-item potvrzení).
+      setPriceDrafts((prev) => {
+        const next = new Map(prev);
+        for (const p of payload) next.delete(p.itemIndex);
+        return next;
+      });
+      setSelected(new Set());
+      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      toast(`Potvrzeno ${updated} položek${skipped ? ` (${skipped} přeskočeno — bez ceny)` : ''}`, 'success');
+    } catch (err: unknown) {
+      toast(getErrorMessage(err), 'danger');
+    } finally {
+      setBulkSaving(false);
+    }
+  }, [bulkSaving, polozky, priceDrafts, tenderId, queryClient, toast]);
 
   // Group items by part if multi-part
   const hasPartGroups = casti && casti.length > 1 && polozky.some((pm) => pm.cast_id);
@@ -420,6 +532,44 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
         </div>
       )}
 
+      {/* Hromadné potvrzení cen — zobraz jen dokud zbývá nepotvrzená položka. */}
+      {!allConfirmed && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+          <span className="text-xs font-medium text-gray-700">
+            {selected.size > 0
+              ? `Vybráno ${selected.size} z ${polozky.length}`
+              : `Nepotvrzeno ${unconfirmedIndices.length} položek`}
+          </span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {selected.size > 0 && (
+              <button
+                onClick={() => setSelected(new Set())}
+                disabled={bulkSaving}
+                className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Zrušit výběr
+              </button>
+            )}
+            <button
+              onClick={() => confirmBulk([...selected])}
+              disabled={bulkSaving || selected.size === 0}
+              className="inline-flex items-center gap-1.5 rounded-md border border-blue-300 bg-white px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Potvrdit vybrané ({selected.size})
+            </button>
+            <button
+              onClick={() => confirmBulk(unconfirmedIndices)}
+              disabled={bulkSaving || unconfirmedIndices.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
+              Potvrdit vše ({unconfirmedIndices.length})
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Grouped accordion items */}
       {groups.map((group, gi) => (
         <div key={gi} className="space-y-2">
@@ -447,10 +597,19 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
             'rounded-lg border',
             isItemConfirmed ? 'border-green-200' : 'border-gray-200'
           )}>
-            {/* Accordion header */}
+            {/* Accordion header + checkbox pro hromadné potvrzení (mimo <button>, aby klik
+                na checkbox nerozbaloval řádek) */}
+            <div className="flex items-center">
+            <input
+              type="checkbox"
+              checked={selected.has(idx)}
+              onChange={() => toggleSelect(idx)}
+              aria-label={`Vybrat položku ${pm.polozka_nazev}`}
+              className="ml-4 h-4 w-4 shrink-0 cursor-pointer accent-blue-600"
+            />
             <button
               onClick={() => toggleItem(idx)}
-              className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors rounded-lg"
+              className="flex-1 flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors rounded-lg"
             >
               <div className="flex items-center gap-3">
                 {isExpanded
@@ -502,6 +661,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                 </div>
               </div>
             </button>
+            </div>
 
             {/* Accordion content */}
             {isExpanded && (

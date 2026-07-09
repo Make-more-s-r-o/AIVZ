@@ -34,6 +34,20 @@ function getTokenParam(): string {
   return legacy || '';
 }
 
+/**
+ * Kompaktní souhrn analýzy embednutý do /api/tenders?include=analysis (zrušení N+1).
+ * Obsahuje jen pole, která seznamy (Přehled/Zakázky/Pipeline) reálně zobrazují.
+ */
+export interface TenderAnalysisSummary {
+  nazev: string | null;
+  evidencni_cislo: string | null;
+  zadavatel_nazev: string | null;
+  zadavatel_ico: string | null;
+  predpokladana_hodnota: number | null;
+  lhuta_nabidek: string | null;
+  rozhodnuti: string | null;
+}
+
 export interface TenderSummary {
   id: string;
   name?: string;
@@ -47,6 +61,9 @@ export interface TenderSummary {
   tasks?: { done: number; total: number };
   // CRM (M9b): štítky zakázky (chips na řádcích Zakázek); bez DB → [].
   stitky?: Stitek[];
+  // Přítomné jen při ?include=analysis / ?include=cost (getTendersSummary). null = nezanalyzováno.
+  analysis?: TenderAnalysisSummary | null;
+  costTotalCZK?: number | null;
 }
 
 export interface ActivityEntry {
@@ -99,6 +116,15 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 export async function getTenders(): Promise<TenderSummary[]> {
   return fetchJson('/tenders');
+}
+
+/**
+ * Seznam zakázek s embednutým souhrnem analýzy + AI náklady (jeden request místo N+1).
+ * Používají Přehled/Zakázky/Pipeline. Vlastní query key (['tenders','summary']), ať se
+ * needostane do kolize s holým getTenders() cache.
+ */
+export async function getTendersSummary(): Promise<TenderSummary[]> {
+  return fetchJson('/tenders?include=analysis,cost');
 }
 
 export async function uploadFiles(files: File[], tenderId?: string): Promise<TenderSummary> {
@@ -240,6 +266,26 @@ export async function updateItemPriceOverride(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'Failed to save item price override');
+  }
+  return res.json();
+}
+
+/**
+ * Hromadné potvrzení cen více položek jedním requestem (transakčně nad product-match.json).
+ * Používá „Potvrdit vše" / „Potvrdit vybrané" v Ocenění — místo N samostatných PUT volání.
+ */
+export async function bulkUpdateItemPriceOverride(
+  id: string,
+  items: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }>,
+): Promise<{ success: boolean; updated: number }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/bulk`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Nepodařilo se hromadně potvrdit ceny');
   }
   return res.json();
 }

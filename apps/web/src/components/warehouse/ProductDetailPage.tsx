@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getWarehouseProduct, type ProductPrice } from '../../lib/api';
 import { PriceAgeDot, formatPrice } from './shared';
+import { safeHttpUrl } from '../../lib/url';
 
 interface ProductDetailPageProps {
   productId: string;
@@ -157,9 +158,9 @@ function PriceRow({ price }: { price: ProductPrice }) {
       </td>
       <td className="px-4 py-3" style={{ color: 'var(--text-secondary)' }}>{price.availability || '-'}</td>
       <td className="px-4 py-3">
-        {price.source_url ? (
+        {safeHttpUrl(price.source_url) ? (
           <a
-            href={price.source_url}
+            href={safeHttpUrl(price.source_url)}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs"

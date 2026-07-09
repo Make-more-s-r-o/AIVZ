@@ -63,21 +63,38 @@ async function main(): Promise<void> {
     onProgress: (m) => console.log('  ' + m),
   });
 
-  // MERGE overeni_ceny do položek (ostatní pole nedotčená)
+  // MERGE overeni_ceny do položek (ostatní pole nedotčená).
+  //
+  // POZOR na lost-update: web search běží MINUTY a `matchData` je snapshot z počátku běhu.
+  // Mezitím může operátor v UI potvrdit ceny (`cenova_uprava`) — jednotlivě i hromadně přes
+  // bulk endpoint — což zapisuje do stejného souboru. Kdybychom zapsali zpět starý snapshot,
+  // tato potvrzení (money-path!) by tiše zmizela. Proto těsně před zápisem soubor znovu
+  // načteme (čerstvá kopie) a mergujeme overeni_ceny jen do ní. Okno mezi tímto re-readem
+  // a rename je milisekundy (místo minut), takže souběžná potvrzení zůstanou zachována.
   const byIndex = new Map<number, OvereniCeny>(results.map((r) => [r.polozka_index, r.overeni_ceny]));
-  if (Array.isArray(matchData.polozky_match)) {
-    for (const item of matchData.polozky_match as (PolozkaMatch & { overeni_ceny?: OvereniCeny })[]) {
+
+  let fresh: ProductMatch;
+  try {
+    fresh = JSON.parse(await readFile(matchPath, 'utf-8')) as ProductMatch;
+  } catch {
+    // Kdyby čerstvé načtení selhalo, radši nepřepisuj soubor stale snapshotem —
+    // overeni_ceny se dá klidně dohledat znovu, ale ztracená cenova_uprava ne.
+    fresh = matchData;
+  }
+
+  if (Array.isArray(fresh.polozky_match)) {
+    for (const item of fresh.polozky_match as (PolozkaMatch & { overeni_ceny?: OvereniCeny })[]) {
       const ov = byIndex.get(item.polozka_index);
       if (ov) item.overeni_ceny = ov;
     }
   } else {
     const rootOv = byIndex.get(-1);
-    if (rootOv) (matchData as ProductMatch & { overeni_ceny?: OvereniCeny }).overeni_ceny = rootOv;
+    if (rootOv) (fresh as ProductMatch & { overeni_ceny?: OvereniCeny }).overeni_ceny = rootOv;
   }
 
   // Atomický zápis (tmp + rename) — nikdy nezanechá poškozený soubor
   const tmpPath = `${matchPath}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(matchData, null, 2), 'utf-8');
+  await writeFile(tmpPath, JSON.stringify(fresh, null, 2), 'utf-8');
   await rename(tmpPath, matchPath);
 
   // Souhrn

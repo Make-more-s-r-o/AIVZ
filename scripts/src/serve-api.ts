@@ -108,9 +108,14 @@ const PUBLIC_PATHS = ['/api/health', '/api/auth/status', '/api/auth/login', '/ap
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   if (PUBLIC_PATHS.includes(req.path)) return next();
-  if (req.method === 'GET') return next();
 
-  // 1. Check JWT Bearer token
+  // Auth se NOVĚ vynucuje i pro GET požadavky. Dřív byl `if (req.method === 'GET') return next();`
+  // hned tady → všechny GET /api/* byly globálně veřejné (kdokoli se znalostí URL četl zakázky,
+  // ceny, firemní IČO/DIČ/IBAN i cenový sklad bez přihlášení). Veřejné zůstávají jen cesty
+  // z PUBLIC_PATHS (health, auth status/login/setup). Read-only role `viewer` čtení nadále smí —
+  // RBAC middleware níže blokuje jen mutace.
+
+  // 1. JWT Bearer token / legacy statický API_TOKEN (platí pro GET i mutace)
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
     const token = auth.slice(7);
@@ -124,7 +129,8 @@ app.use((req, res, next) => {
     if (API_TOKEN && token === API_TOKEN) return next();
   }
 
-  // 2. Support ?token= query param (for download links in <a href>)
+  // 2. Support ?token= query param (for download links in <a href> a jiná GET stažení,
+  //    kde prohlížeč neumí poslat Authorization hlavičku).
   if (req.query.token) {
     const qToken = req.query.token as string;
     const jwtPayload = verifyToken(qToken);
@@ -135,10 +141,13 @@ app.use((req, res, next) => {
     if (API_TOKEN && qToken === API_TOKEN) return next();
   }
 
-  // 3. Same-origin bypass POUZE v dev (JWT vypnutý) a jen z loopbacku. Origin/Referer i Host jsou
-  //    klientem ovladatelné → NESMÍ sloužit jako auth signál v produkci (jinak drop Authorization
-  //    hlavičky nebo spoof Host obchází auth i RBAC). V prod (JWT zapnutý) je tato větev vypnutá.
+  // 3. Dev režim (JWT_SECRET nenastaven, isJwtEnabled()===false) = single-user lokální vývoj.
+  //    - GET zůstává otevřené (jako dřív) → lokální vývoj bez tokenu funguje beze změny.
+  //    - Mutace vyžadují same-origin z loopbacku. Origin/Referer i Host jsou klientem ovladatelné
+  //      → NESMÍ sloužit jako auth signál v produkci; proto je celá tato větev v prod (JWT zapnutý)
+  //      vypnutá a GET tam vyžaduje platný token (viz výše).
   if (!isJwtEnabled()) {
+    if (req.method === 'GET') return next();
     try {
       const origin = req.headers.origin || req.headers.referer;
       const loopback = ['localhost', '127.0.0.1', '::1'];
@@ -658,8 +667,16 @@ app.delete('/api/users/:userId', requireJwt, requireRole('admin'), async (req, r
 });
 
 // GET /api/tenders - list all tenders
-app.get('/api/tenders', async (_req, res) => {
+app.get('/api/tenders', async (req, res) => {
   try {
+    // Volitelné agregované obohacení: `?include=analysis,cost` vloží kompaktní souhrn analýzy
+    // a AI náklady rovnou do každé položky. Bez include je odpověď beze změny (zpětná kompatibilita).
+    // Cíl: zrušit N+1 na Přehledu/Zakázkách/Pipeline, kde FE dřív posílal getAnalysis()+getCost()
+    // jedním requestem za KAŽDOU zakázku.
+    const include = String(req.query.include ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const wantAnalysis = include.includes('analysis');
+    const wantCost = include.includes('cost');
+
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = await readdir(INPUT_DIR);
     const crmStatuses = await getAllStatuses();
@@ -678,7 +695,7 @@ app.get('/api/tenders', async (_req, res) => {
             name = meta.name;
           } catch {}
           const crm = crmStatuses.get(tenderId);
-          return {
+          const base: Record<string, unknown> = {
             id: tenderId,
             name,
             inputFiles: inputFiles.filter((f) => !f.startsWith('.')),
@@ -688,6 +705,43 @@ app.get('/api/tenders', async (_req, res) => {
             tasks: taskCounts.get(tenderId) ?? { done: 0, total: 0 },
             stitky: tenderTags.get(tenderId) ?? [],
           };
+
+          // Kompaktní souhrn analýzy (jen pole, která seznamy reálně zobrazují) — analyzuje se
+          // jen když analyze step doběhl, jinak `null` (žádné zbytečné čtení souboru).
+          if (wantAnalysis) {
+            let analysis: {
+              nazev: string | null; evidencni_cislo: string | null;
+              zadavatel_nazev: string | null; zadavatel_ico: string | null;
+              predpokladana_hodnota: number | null; lhuta_nabidek: string | null;
+              rozhodnuti: string | null;
+            } | null = null;
+            if ((pipeline as any)?.steps?.analyze === 'done') {
+              try {
+                const a = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'analysis.json'), 'utf-8'));
+                analysis = {
+                  nazev: a?.zakazka?.nazev ?? null,
+                  evidencni_cislo: a?.zakazka?.evidencni_cislo ?? null,
+                  zadavatel_nazev: a?.zakazka?.zadavatel?.nazev ?? null,
+                  zadavatel_ico: a?.zakazka?.zadavatel?.ico ?? null,
+                  predpokladana_hodnota: a?.zakazka?.predpokladana_hodnota ?? null,
+                  lhuta_nabidek: a?.terminy?.lhuta_nabidek ?? null,
+                  rozhodnuti: a?.doporuceni?.rozhodnuti ?? null,
+                };
+              } catch {}
+            }
+            base.analysis = analysis;
+          }
+
+          if (wantCost) {
+            let costTotalCZK: number | null = null;
+            try {
+              const summary = await getCostSummary(tenderId);
+              costTotalCZK = summary?.totalCZK ?? null;
+            } catch {}
+            base.costTotalCZK = costTotalCZK;
+          }
+
+          return base;
         })
     );
     res.json(tenders);
@@ -1049,26 +1103,10 @@ app.put('/api/tenders/:id/documents/:filename/mode', async (req, res) => {
   }
 });
 
-// POST /api/tenders/:id/documents/:filename/regenerate - regenerate single document
-app.post('/api/tenders/:id/documents/:filename/regenerate', async (req, res) => {
-  const { id, filename } = req.params;
-  try {
-    // Queue generate step (re-runs entire generation which will pick up mode overrides)
-    // For now, return guidance — full single-doc regen would need refactoring generate-bid
-    const modesPath = join(OUTPUT_DIR, id, 'document-modes.json');
-    let modes: Record<string, string> = {};
-    try {
-      modes = JSON.parse(await readFile(modesPath, 'utf-8'));
-    } catch {}
-    res.json({
-      message: `To regenerate ${filename}, run the generate step again. Mode overrides are saved.`,
-      current_modes: modes,
-      hint: 'POST /api/tenders/:id/run/generate to re-run full generation',
-    });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
+// Pozn.: dřívější `POST /api/tenders/:id/documents/:filename/regenerate` byl odstraněn — nic
+// nereregeneroval, jen vracel textový návod „spusť generate znovu" a neměl žádného konzumenta
+// ve frontendu. Regenerace jednoho dokumentu se dělá přes plný generate krok
+// (`POST /api/tenders/:id/run/generate`), který respektuje uložené mode-overrides.
 
 // GET /api/tenders/:id/generation-meta - generation metadata (modes, costs per document)
 app.get('/api/tenders/:id/generation-meta', async (req, res) => {
@@ -1240,6 +1278,56 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
     res.json({ success: true, cenova_uprava: parsed });
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'product-match.json not found — run match step first' });
+    }
+    res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  }
+});
+
+// PUT /api/tenders/:id/product-match/price/bulk - hromadné potvrzení cen více položek.
+// MUSÍ být registrováno PŘED `/price/:itemIndex`, jinak by Express „bulk" chytil jako :itemIndex.
+// Transakčně nad souborem product-match.json: jedno čtení → aplikace všech → jeden zápis
+// (ceny žijí v souboru, ne v DB), takže hromadné potvrzení = jeden atomický zápis, ne N souběžných.
+app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
+  const { id } = req.params;
+  const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+
+  try {
+    const items = (req.body as any)?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Očekávám neprázdné pole `items`.' });
+    }
+    // Zvaliduj každou položku (index + PriceOverrideSchema) do dočasného pole — teprve po
+    // úspěšné validaci VŠECH se zapisuje (buď projde vše, nebo nic → žádný částečný zápis).
+    const validated = items.map((it: any, i: number) => {
+      const idx = Number(it?.itemIndex);
+      if (!Number.isInteger(idx) || idx < 0) {
+        throw new Error(`items[${i}].itemIndex musí být nezáporné celé číslo`);
+      }
+      return { idx, cenova_uprava: PriceOverrideSchema.parse(it?.cenova_uprava) };
+    });
+
+    const raw = await readFile(matchPath, 'utf-8');
+    const productMatch = JSON.parse(raw);
+
+    if (!Array.isArray(productMatch.polozky_match)) {
+      return res.status(400).json({ error: 'Tato zakázka nemá víc položek (polozky_match) — použij single-item endpoint.' });
+    }
+    const len = productMatch.polozky_match.length;
+
+    for (const v of validated) {
+      if (v.idx >= len) {
+        return res.status(400).json({ error: `Neplatný index položky ${v.idx}` });
+      }
+    }
+    for (const v of validated) {
+      productMatch.polozky_match[v.idx].cenova_uprava = v.cenova_uprava;
+    }
+    await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+
+    res.json({ success: true, updated: validated.length });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
