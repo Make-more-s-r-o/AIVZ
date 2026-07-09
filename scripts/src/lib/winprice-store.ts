@@ -83,6 +83,79 @@ export function categorizeCommodity(predmet: string): KomoditaKategorie {
 }
 
 // ============================================================
+// Určení rolí stran (zadavatel vs. dodavatel) — heuristika
+// ============================================================
+
+/**
+ * V Registru smluv NENÍ role stran spolehlivě dána pořadím:
+ * `<subjekt>` = ten, kdo má uveřejňovací povinnost a smlouvu publikoval —
+ * může to být kterákoli strana (často DODAVATEL, ne kupující). Nelze proto
+ * natvrdo mapovat subjekt→zadavatel a smluvniStrana→dodavatel (systematicky
+ * to invertuje — viz docs/win-price-design.md, „Známá omezení").
+ *
+ * Heuristika: veřejného zadavatele poznáme podle organizačně-právních klíčových
+ * slov v názvu (nemocnice, město, kraj, ministerstvo, úřad, škola, …). Pokud
+ * právě JEDNA ze stran vypadá jako veřejný zadavatel, přiřadíme jí roli
+ * zadavatele a druhé roli dodavatele. Pokud vypadají obě nebo žádná, roli
+ * nelze spolehlivě určit (`spolehlive=false`) a ponecháme vstupní pořadí.
+ */
+const PUBLIC_AUTHORITY_KEYWORDS = [
+  'nemocnice', 'poliklinik', 'zdravotní ústav', 'zdravotni ustav', 'zdravotnická záchranná',
+  'statutární město', 'statutarni mesto', 'město ', 'mesto ', 'městská část', 'mestska cast',
+  'městský obvod', 'mestsky obvod', 'obec ', 'obecní úřad', 'obecni urad', 'kraj', 'krajský úřad',
+  'krajsky urad', 'ministerstvo', 'magistrát', 'magistrat', 'úřad', 'urad', 'základní škola',
+  'zakladni skola', 'střední škola', 'stredni skola', 'mateřsk', 'matersk', 'gymnázium', 'gymnazium',
+  'univerzit', 'vysoká škola', 'vysoka skola', 'fakult', 'správa', 'sprava', 'ústav', 'ustav',
+  'ředitelství', 'reditelstvi', 'státní podnik', 'statni podnik', 's. p.', 's.p.',
+  'příspěvková organizace', 'prispevkova organizace', 'česká republika', 'ceska republika',
+  'čr -', 'cr -', 'policie', 'hasičsk', 'hasicsk', 'vězeňská', 'vezenska', 'akademie věd',
+  'akademie ved', 'domov pro seniory', 'domov mládeže', 'domov mladeze', 'muzeum', 'knihovna',
+  'divadlo', 'filharmonie', 'technické služby', 'technicke sluzby', 'dopravní podnik',
+  'dopravni podnik', 'povodí', 'povodi', 'lesy české', 'lesy ceske', 'správa železnic',
+  'sprava zeleznic', 'sociálních služeb', 'socialnich sluzeb', 'centrum sociálních',
+  'ředitelství silnic', 'reditelstvi silnic', 'úřad práce', 'urad prace', 'finanční úřad',
+  'financni urad', 'katastrální', 'katastralni', 'zoologická', 'zoologicka', 'botanická',
+];
+
+/** Vrátí true, pokud název organizace vypadá jako veřejný zadavatel. */
+export function looksLikePublicAuthority(nazev: string | null): boolean {
+  if (!nazev) return false;
+  const n = nazev.toLowerCase();
+  return PUBLIC_AUTHORITY_KEYWORDS.some((k) => n.includes(k));
+}
+
+export interface Party {
+  nazev: string | null;
+  ico: string | null;
+}
+
+export interface ResolvedRoles {
+  zadavatel: Party;
+  dodavatel: Party;
+  /** true jen když heuristika roli jednoznačně určila (právě jedna strana je veřejný zadavatel). */
+  spolehlive: boolean;
+}
+
+/**
+ * Určí, která ze dvou stran je zadavatel (kupující) a která dodavatel (vítěz).
+ * Nespoléhá na pořadí subjekt/smluvniStrana. `a` je vstupní pořadí subjekt,
+ * `b` smluvniStrana — použije se jako fallback, když heuristika neurčí roli.
+ */
+export function resolvePartyRoles(a: Party, b: Party): ResolvedRoles {
+  const aPublic = looksLikePublicAuthority(a.nazev);
+  const bPublic = looksLikePublicAuthority(b.nazev);
+
+  if (aPublic && !bPublic) {
+    return { zadavatel: a, dodavatel: b, spolehlive: true };
+  }
+  if (bPublic && !aPublic) {
+    return { zadavatel: b, dodavatel: a, spolehlive: true };
+  }
+  // Obě nebo žádná vypadá jako veřejný zadavatel → roli nelze spolehlivě určit.
+  return { zadavatel: a, dodavatel: b, spolehlive: false };
+}
+
+// ============================================================
 // Upsert
 // ============================================================
 
@@ -100,7 +173,7 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
   if (!pool) throw new Error('Database not available');
   if (records.length === 0) return { received: 0, affected: 0 };
 
-  const COLS = 14;
+  const COLS = 15;
   const CHUNK = Math.floor(60000 / COLS); // pod limit 65535 parametrů PG
   let affected = 0;
 
@@ -114,7 +187,7 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
         const b = idx * COLS;
         rows.push(
           `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},` +
-            `$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14})`,
+            `$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15})`,
         );
         values.push(
           r.zdroj,
@@ -130,6 +203,7 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
           r.cena_s_dph,
           r.mena,
           r.pocet_uchazecu,
+          r.url,
           r.raw ? JSON.stringify(r.raw) : null,
         );
       });
@@ -138,7 +212,7 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
         INSERT INTO win_prices
           (zdroj, zdroj_id, datum, zadavatel_ico, zadavatel_nazev, dodavatel_ico,
            dodavatel_nazev, predmet, komodita_kategorie, cena_bez_dph, cena_s_dph,
-           mena, pocet_uchazecu, raw)
+           mena, pocet_uchazecu, url, raw)
         VALUES ${rows.join(',')}
         ON CONFLICT (zdroj, zdroj_id) DO UPDATE SET
           datum = EXCLUDED.datum,
@@ -152,6 +226,7 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
           cena_s_dph = EXCLUDED.cena_s_dph,
           mena = EXCLUDED.mena,
           pocet_uchazecu = EXCLUDED.pocet_uchazecu,
+          url = EXCLUDED.url,
           raw = EXCLUDED.raw
       `;
       const res = await client.query(sql, values);
