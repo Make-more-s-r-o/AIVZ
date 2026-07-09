@@ -1,5 +1,5 @@
-import { readFile, readdir } from 'fs/promises';
-import { join, extname, basename } from 'path';
+import { readFile } from 'fs/promises';
+import { join, extname, basename, dirname } from 'path';
 import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
 import pdfParse from 'pdf-parse';
@@ -7,6 +7,7 @@ import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import type { ExtractedDocument } from './types.js';
+import { discoverInputFiles } from './input-discovery.js';
 
 // Template files - these are filled in generate step, not analyzed
 const TEMPLATE_PATTERNS = [
@@ -125,12 +126,21 @@ function findSoffice(): string | null {
 export async function extractDocuments(
   inputDir: string
 ): Promise<ExtractedDocument[]> {
-  const files = await readdir(inputDir);
+  // Robustní discovery: rekurzivně projde podadresáře + rozbalí ZIPy (viz input-discovery.ts).
+  // Nahrazuje původní plochý readdir(), který vnořené složky / ZIPy neviděl.
+  const { files, warnings } = await discoverInputFiles(inputDir);
+  for (const w of warnings) console.log(`  [discovery] ${w}`);
+  console.log(`  Objeveno ${files.length} souborů (vč. rozbalených ZIPů a podadresářů)`);
+
   const documents: ExtractedDocument[] = [];
 
-  for (const file of files) {
-    const ext = extname(file).toLowerCase();
-    const filePath = join(inputDir, file);
+  // Množina VŠECH objevených display names (lowercase) — pro dedup .doc↔.docx.
+  const discoveredNamesLower = new Set(files.map((f) => f.name.toLowerCase()));
+
+  for (const f of files) {
+    const file = f.name; // display name (basename nebo relativní cesta při kolizi)
+    const filePath = f.absPath;
+    const ext = extname(f.name).toLowerCase();
 
     if (ext === '.pdf') {
       console.log(`  Parsing PDF: ${file}`);
@@ -172,31 +182,32 @@ export async function extractDocuments(
       // is Linux, where the old hardcoded macOS path was always missing → .doc silently skipped.
       const libreoffice = findSoffice();
       if (libreoffice) {
-        // Cílový .docx: stejný základ názvu vedle zdrojového .doc (do vstupní složky tendru),
+        // Cílový .docx vzniká VEDLE zdrojového .doc (i uvnitř podadresáře/.extracted),
         // aby ho discoverTemplates() ve fázi generování našel — skenuje jen .docx/.xls/.xlsx.
-        const docxName = basename(file, extname(file)) + '.docx';
-        const docxPath = join(inputDir, docxName);
+        const srcDir = dirname(filePath);
+        const docxBase = basename(file, extname(file)) + '.docx';
+        const docxPath = join(srcDir, basename(filePath, extname(filePath)) + '.docx');
 
-        // Idempotence + ochrana proti kolizi: pokud .docx se stejným názvem už na disku je
-        // (výsledek dřívějšího běhu NEBO původní soubor tendru), znovu nekonvertujeme ani
-        // nepřepisujeme — ten .docx zpracuje .docx větev tohoto běhu (readdir ho vrátil výše).
-        if (files.some((f) => f.toLowerCase() === docxName.toLowerCase())) {
-          console.log(`  Skipping .doc conversion — .docx already present: ${docxName}`);
+        // Idempotence + ochrana proti kolizi: pokud .docx se stejným názvem už objeven byl
+        // (výsledek dřívějšího běhu NEBO původní soubor tendru), znovu nekonvertujeme —
+        // ten .docx zpracuje .docx větev tohoto běhu.
+        if (discoveredNamesLower.has(docxBase.toLowerCase()) || existsSync(docxPath)) {
+          console.log(`  Skipping .doc conversion — .docx already present: ${docxBase}`);
         } else {
           console.log(`  Converting .doc → .docx (${libreoffice}): ${file}`);
           try {
             // execFile with an argument array (no shell) — filenames can't inject commands.
-            execFileSync(libreoffice, ['--headless', '--convert-to', 'docx', filePath, '--outdir', inputDir], { timeout: 60000 });
+            execFileSync(libreoffice, ['--headless', '--convert-to', 'docx', filePath, '--outdir', srcDir], { timeout: 60000 });
             if (existsSync(docxPath)) {
               const text = await parseDocx(docxPath);
               // Konvertovaný .docx PONECHÁVÁME na disku vedle zdrojového .doc, aby ho
               // discoverTemplates() ve fázi generování našel (dřív se hned mazal → smlouva chyběla).
               documents.push({
-                filename: docxName,
+                filename: docxBase,
                 type: 'docx',
                 text,
-                isTemplate: isTemplate(docxName),
-                isSoupis: isSoupis(docxName),
+                isTemplate: isTemplate(docxBase),
+                isSoupis: isSoupis(docxBase),
               });
             } else {
               console.log(`  Warning: .doc conversion produced no .docx for ${file}`);

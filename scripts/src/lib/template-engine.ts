@@ -1,8 +1,9 @@
-import { readFile, readdir, writeFile as fsWriteFile } from 'fs/promises';
+import { readFile, writeFile as fsWriteFile } from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { callClaude } from './ai-client.js';
+import { discoverInputFiles } from './input-discovery.js';
 import { TEMPLATE_FILL_SYSTEM, CONTRACT_FILL_SYSTEM, buildTemplateFillUserMessage } from '../prompts/template-fill.js';
 import {
   Document,
@@ -1424,18 +1425,25 @@ export async function docHasResidualPlaceholders(docxPath: string): Promise<bool
  * Uses filename regex first, then falls back to content-based detection.
  */
 export async function discoverTemplates(inputDir: string): Promise<DiscoveredTemplate[]> {
-  const files = await readdir(inputDir);
+  // Robustní discovery (stejná jako v extract kroku): rekurzivně projde podadresáře
+  // + rozbalí ZIPy do .extracted/. Nutné, protože .doc→.docx konverze tenderových
+  // šablon vzniká VEDLE zdroje (i uvnitř .extracted/), takže plochý readdir(inputDir)
+  // by konvertovanou smlouvu/šablonu ve vnořené složce nenašel.
+  const { files: discovered } = await discoverInputFiles(inputDir);
   const templates: DiscoveredTemplate[] = [];
   const typeCounts = new Map<string, number>();
 
-  for (const filename of files) {
+  for (const df of discovered) {
+    // Pro klasifikaci používáme čistý basename (display name může být při kolizi
+    // relativní cesta se separátory " / ", což by pattern matching mátlo).
+    const filename = basename(df.relPath);
     const lowerFilename = filename.toLowerCase();
     // Support both .docx and .xls/.xlsx templates
     if (!lowerFilename.endsWith('.docx') && !lowerFilename.endsWith('.xls') && !lowerFilename.endsWith('.xlsx')) continue;
     // Skip non-template files by filename
     if (SKIP_FILENAME_PATTERNS.some(p => p.test(filename))) continue;
 
-    const filePath = join(inputDir, filename);
+    const filePath = df.absPath;
 
     // 1. Try filename-based classification first (fast)
     // Normalize underscores to spaces so patterns like /kupn[ií]\s*smlouv/ match "Navrh_kupni_smlouvy.docx"
