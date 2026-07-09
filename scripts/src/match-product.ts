@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
-import { callClaude } from './lib/ai-client.js';
+import { callClaude, AICallTimeoutError } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
@@ -150,7 +150,36 @@ function filterRelevantRequirements(
     }
   }
 
-  return allRequirements;
+  // Generický fallback pro ne-IT zakázky (nábytek, nářadí…), kde žádná IT kategorie nesedí.
+  // NEposílej všech N požadavků do promptu (nafoukne vstup i výstup → pomalá generace) —
+  // vyber max HARD_CAP nejrelevantnějších podle překryvu klíčových slov požadavku s texty
+  // položek. Když se nic nepřekrývá, vezmi prvních HARD_CAP.
+  const HARD_CAP = 12;
+  if (allRequirements.length <= HARD_CAP) return allRequirements;
+
+  // Tokenizuj texty položek na slova délky ≥ 4 (odfiltruje spojky/předložky).
+  const itemTokens = new Set(
+    itemText.split(/[^a-záčďéěíňóřšťúůýž0-9]+/i).filter(w => w.length >= 4),
+  );
+
+  const scored = allRequirements.map(req => {
+    const reqText = `${req.parametr} ${req.pozadovana_hodnota}`.toLowerCase();
+    const reqTokens = reqText.split(/[^a-záčďéěíňóřšťúůýž0-9]+/i).filter(w => w.length >= 4);
+    const overlap = reqTokens.reduce((n, t) => n + (itemTokens.has(t) ? 1 : 0), 0);
+    return { req, overlap };
+  });
+
+  const withOverlap = scored.filter(s => s.overlap > 0);
+  if (withOverlap.length >= minRequirements) {
+    // Seřaď dle překryvu sestupně, vezmi prvních HARD_CAP (zachovej původní pořadí uvnitř).
+    return withOverlap
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, HARD_CAP)
+      .map(s => s.req);
+  }
+
+  // Žádný smysluplný překryv → prvních HARD_CAP požadavků.
+  return allRequirements.slice(0, HARD_CAP);
 }
 
 /**
@@ -179,7 +208,7 @@ async function main() {
   const tenderId = tenderIdArg?.split('=')[1] || '3d-tiskarna';
 
   const candidateCountArg = process.argv.find((a) => a.startsWith('--candidates='));
-  const candidateCount = candidateCountArg ? parseInt(candidateCountArg.split('=')[1], 10) : 3;
+  const candidateCount = candidateCountArg ? parseInt(candidateCountArg.split('=')[1], 10) : 2;
 
   console.log(`\n=== Step 3: Product Matching ===`);
   console.log(`Tender ID: ${tenderId}`);
@@ -375,7 +404,8 @@ async function main() {
   }
 
   // Step 1: Match products + accessories via AI (in batches of BATCH_SIZE)
-  const BATCH_SIZE = 15;
+  // BATCH_SIZE 8 (dřív 15) — menší dávka = ohraničenější délka jednoho AI volání.
+  const BATCH_SIZE = 8;
   if (items.length > 0) {
     const totalBatches = Math.ceil(items.length / BATCH_SIZE);
     console.log(`\nMatching ${items.length} product/accessory item(s) with ${requirements.length} technical requirements...`);
@@ -383,23 +413,31 @@ async function main() {
 
     let totalCost = 0;
 
-    for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
-      const batchItems = items.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
-      if (totalBatches > 1) console.log(`\n  Batch ${batchIdx + 1}/${totalBatches}: ${batchItems.length} items`);
+    // Zpracuje souvislý úsek položek (globální index globalOffset..) jedním AI voláním.
+    // Při wall-clock timeoutu (AICallTimeoutError) zkusí JEDNOU rozpůlit dávku a zpracovat
+    // obě poloviny; už rozpůlená dávka (allowRetry=false), která znovu timeoutne, selže
+    // s jasnou hláškou. Globální index = globalOffset + lokální index z odpovědi AI.
+    const processSlice = async (
+      sliceItems: MatchableItem[],
+      globalOffset: number,
+      allowRetry: boolean,
+      label: string,
+    ): Promise<void> => {
+      if (sliceItems.length === 0) return;
 
-      // Phase 6: Deduplicate requirements — only send requirements relevant to this batch
-      const batchRelevantReqs = filterRelevantRequirements(batchItems, requirements);
-      if (batchRelevantReqs.length < requirements.length) {
-        console.log(`    Req dedup: ${requirements.length} → ${batchRelevantReqs.length} requirements`);
+      // Phase 6: Deduplicate requirements — only send requirements relevant to this slice
+      const relevantReqs = filterRelevantRequirements(sliceItems, requirements);
+      if (relevantReqs.length < requirements.length) {
+        console.log(`    Req dedup: ${requirements.length} → ${relevantReqs.length} requirements`);
       }
-      const batchItemsWithReqs = batchItems.map(item => ({ ...item, technicke_pozadavky: batchRelevantReqs }));
+      const sliceItemsWithReqs = sliceItems.map(item => ({ ...item, technicke_pozadavky: relevantReqs }));
 
-      const reqCount = batchRelevantReqs.length || 10;
-      const maxTokens = Math.min(65536, 8192 + batchItems.length * candidateCount * Math.max(reqCount * 80, 2000));
+      // Střízlivý strop output tokenů, tvrdý cap 16384 (dřív až 65536 → generace přes 600s).
+      const maxTokens = Math.min(16384, 4096 + sliceItems.length * candidateCount * 400);
 
       // Přidej warehouse kontext do AI promptu
       let userMessage = buildProductMatchUserMessage(
-        batchItemsWithReqs,
+        sliceItemsWithReqs,
         analysis.zakazka.nazev,
         analysis.zakazka.predmet,
         analysis.zakazka.predpokladana_hodnota,
@@ -410,13 +448,28 @@ async function main() {
         userMessage += `\n\nINTERNÍ KATALOG — nalezeno:\n${warehouseContext.join('\n')}\n\nINSTRUKCE: Produkty z katalogu NENAVRHUJ znovu jako kandidáty. Navrhni ALTERNATIVY nebo jiné modely.`;
       }
 
-      const result = await callClaude(
-        PRODUCT_MATCH_SYSTEM,
-        userMessage,
-        { maxTokens, temperature: 0.3 }
-      );
+      let result;
+      try {
+        result = await callClaude(
+          PRODUCT_MATCH_SYSTEM,
+          userMessage,
+          { maxTokens, temperature: 0.3 }
+        );
+      } catch (err) {
+        if (err instanceof AICallTimeoutError && allowRetry && sliceItems.length > 1) {
+          const mid = Math.ceil(sliceItems.length / 2);
+          console.warn(`  ⚠ AI timeout u dávky ${label} — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);
+          await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
+          await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        if (err instanceof AICallTimeoutError) {
+          throw new Error(`AI matching překročilo časový limit i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu nebo zakázku rozdělit.`);
+        }
+        throw new Error(`AI matching selhalo (dávka ${label}): ${err instanceof Error ? err.message : String(err)}`);
+      }
 
-      await logCost(tenderId, `match-batch-${batchIdx + 1}`, result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
+      await logCost(tenderId, `match-batch-${label}`, result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
       totalCost += result.costCZK;
 
       let jsonStr = result.content.trim();
@@ -443,8 +496,8 @@ async function main() {
               parsed = JSON.parse(fixed);
               const got = parsed.polozky_match?.length ?? (parsed.kandidati ? 1 : 0);
               console.log(`  Recovery successful — parsed ${got} items`);
-              if (got < batchItems.length) {
-                console.warn(`  ⚠ Recovery DROPPED ${batchItems.length - got} item(s) (got ${got}/${batchItems.length}) — bid would be incomplete; rerun match or lower BATCH_SIZE.`);
+              if (got < sliceItems.length) {
+                console.warn(`  ⚠ Recovery DROPPED ${sliceItems.length - got} item(s) (got ${got}/${sliceItems.length}) — bid would be incomplete; rerun match or lower BATCH_SIZE.`);
               }
             } catch {
               throw parseErr;
@@ -457,15 +510,15 @@ async function main() {
         }
       }
 
-      // Enrich and collect results from this batch
+      // Enrich and collect results from this slice
       if (parsed.kandidati) {
-        const srcItem = matchableItems[batchIdx * BATCH_SIZE];
+        const srcItem = matchableItems[globalOffset];
         polozkyMatch.push({
-          polozka_nazev: batchItems[0].nazev,
-          polozka_index: srcItem?.originalIndex ?? batchIdx * BATCH_SIZE,
-          mnozstvi: batchItems[0].mnozstvi || 1,
-          jednotka: batchItems[0].jednotka,
-          typ: batchItems[0].typ || 'produkt',
+          polozka_nazev: sliceItems[0].nazev,
+          polozka_index: srcItem?.originalIndex ?? globalOffset,
+          mnozstvi: sliceItems[0].mnozstvi || 1,
+          jednotka: sliceItems[0].jednotka,
+          typ: sliceItems[0].typ || 'produkt',
           cast_id: srcItem?.cast_id,
           kandidati: parsed.kandidati,
           vybrany_index: parsed.vybrany_index,
@@ -474,17 +527,23 @@ async function main() {
       }
       if (parsed.polozky_match) {
         for (const pm of parsed.polozky_match) {
-          // Map batch-local index to global index
+          // Map slice-local index to global index
           const localIdx = pm.polozka_index;
-          const srcItem = matchableItems[batchIdx * BATCH_SIZE + localIdx];
-          pm.typ = batchItems[localIdx]?.typ || 'produkt';
+          const srcItem = matchableItems[globalOffset + localIdx];
+          pm.typ = sliceItems[localIdx]?.typ || 'produkt';
           pm.cast_id = srcItem?.cast_id;
           // Use the ORIGINAL soupis position (P.č. - 1) so prices map to the right rows even
           // though products/accessories were reordered for matching. (M2/C3)
-          pm.polozka_index = srcItem?.originalIndex ?? (batchIdx * BATCH_SIZE + localIdx);
+          pm.polozka_index = srcItem?.originalIndex ?? (globalOffset + localIdx);
         }
         polozkyMatch.push(...parsed.polozky_match);
       }
+    };
+
+    for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+      const batchItems = items.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
+      if (totalBatches > 1) console.log(`\n  Batch ${batchIdx + 1}/${totalBatches}: ${batchItems.length} items`);
+      await processSlice(batchItems, batchIdx * BATCH_SIZE, true, `${batchIdx + 1}`);
     }
 
     console.log(`  Total AI cost: ${totalCost.toFixed(2)} CZK`);
