@@ -12,6 +12,14 @@ config({ path: new URL('../../.env', import.meta.url).pathname });
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 
+// Cenový sklad při matchingu: DEFAULTNĚ VYPNUTO (rozhodnutí Dan 2026-07-09 — sklad je stale,
+// obsahuje jen 3D-tisk a text-tier vracel filamenty jako kandidáty pro nábytek, které se
+// auto-vybíraly → nesmyslné ceny). Zapnutí: env WAREHOUSE_MATCH_ENABLED=1. I po zapnutí
+// platí prahy níže (min. relevance kandidáta / min. skóre pro auto-výběr místo AI návrhu).
+const WAREHOUSE_MATCH_ENABLED = process.env.WAREHOUSE_MATCH_ENABLED === '1';
+const WAREHOUSE_MIN_SCORE = 0.35;
+const WAREHOUSE_AUTOSELECT_SCORE = 0.75;
+
 // Service keywords — fixed-price services, no product matching needed
 const SERVICE_KEYWORDS = [
   'doprava', 'transport', 'doručení', 'dodání',
@@ -370,7 +378,7 @@ async function main() {
   const warehouseResults = new Map<number, any[]>(); // index → warehouse candidates
   const warehouseContext: string[] = []; // pro AI prompt kontext
 
-  for (let i = 0; i < items.length; i++) {
+  for (let i = 0; WAREHOUSE_MATCH_ENABLED && i < items.length; i++) {
     const item = items[i];
     const request: MatchRequest = {
       nazev: item.nazev,
@@ -381,11 +389,23 @@ async function main() {
 
     const result = await searchWarehouse(request);
     if (result && result.matches.length > 0) {
-      const candidates = result.matches.map(warehouseMatchToCandidate);
+      // Práh relevance: sklad obsahuje historicky jen 3D-tisk (filamenty), a text-tier
+      // trigram práh je nízký (0.08) → pro nesouvisející položku (nábytek/nářadí) matcher
+      // vrátí filamenty se skóre ~0.1. Bez filtru se vložily na index 0 a auto-vybraly
+      // → nesmyslné ceny (Patrik 2026-07-09). Bereme jen skutečně relevantní shody:
+      // exact vždy, text/vector jen nad prahem.
+      const relevant = result.matches.filter(
+        (m) => m.match_tier === 'exact' || Number(m.match_score) >= WAREHOUSE_MIN_SCORE,
+      );
+      if (relevant.length === 0) {
+        console.log(`  Warehouse: "${item.nazev}" → ${result.matches.length} shod pod prahem (${WAREHOUSE_MIN_SCORE}), ignoruji (nesouvisí s položkou)`);
+        continue;
+      }
+      const candidates = relevant.map(warehouseMatchToCandidate);
       warehouseResults.set(i, candidates);
 
       // Kontext pro AI — ať nenavrhuje stejné produkty
-      for (const m of result.matches) {
+      for (const m of relevant) {
         warehouseContext.push(
           `  - ${m.manufacturer} ${m.model} (${m.part_number || m.ean || 'bez P/N'})` +
           (m.price_bez_dph ? `, ${Number(m.price_bez_dph).toLocaleString('cs-CZ')} Kč` : '') +
@@ -594,17 +614,33 @@ async function main() {
   }
 
   // Step 1.5: Merge warehouse candidates into polozky_match
-  // Warehouse kandidáti se přidají na ZAČÁTEK seznamu kandidátů (vyšší spolehlivost)
+  // Warehouse kandidáti se přidají na začátek jako alternativa. Auto-výběr (vybrany_index=0)
+  // jen když je shoda VYSOKÁ (exact / skóre ≥ AUTOSELECT); u slabší shody warehouse kandidáta
+  // nabídneme, ale ponecháme AI výběr (uživatel může přepnout ručně). Dřív se vždy vybíral
+  // index 0, takže i marginální sklad-shoda přebila lepší AI návrh (Patrik 2026-07-09).
   if (warehouseResults.size > 0) {
+    // Merge klíčujeme přes originalIndex — matchableItems[i].originalIndex === pm.polozka_index.
+    const byOriginalIndex = new Map<number, any[]>();
+    for (const [i, cands] of warehouseResults.entries()) {
+      const oi = matchableItems[i]?.originalIndex ?? i;
+      byOriginalIndex.set(oi, cands);
+    }
     for (const pm of polozkyMatch) {
-      const whCandidates = warehouseResults.get(pm.polozka_index);
+      const whCandidates = byOriginalIndex.get(pm.polozka_index);
       if (whCandidates && whCandidates.length > 0) {
-        // Přidej warehouse kandidáty na začátek
+        const aiCount = pm.kandidati.length;
         pm.kandidati = [...whCandidates, ...pm.kandidati];
-        // Warehouse kandidát na indexu 0 = nejlepší match
-        pm.vybrany_index = 0;
-        pm.oduvodneni_vyberu = `Produkt nalezen v cenovém skladu (reálná cena). ${pm.oduvodneni_vyberu || ''}`.trim();
-        console.log(`  Merged warehouse candidates for "${pm.polozka_nazev}": +${whCandidates.length} candidates`);
+        const best = whCandidates[0];
+        const strong = best?.match_tier === 'exact' || Number(best?.match_score ?? 0) >= WAREHOUSE_AUTOSELECT_SCORE;
+        if (strong) {
+          pm.vybrany_index = 0;
+          pm.oduvodneni_vyberu = `Produkt nalezen v cenovém skladu (reálná cena). ${pm.oduvodneni_vyberu || ''}`.trim();
+        } else {
+          // Warehouse kandidáti přidáni na začátek → původní AI výběr se posunul o jejich počet.
+          pm.vybrany_index = pm.vybrany_index + whCandidates.length;
+          pm.oduvodneni_vyberu = `Ve skladu nalezena jen orientační shoda (zkontrolujte a případně vyberte skladový produkt). ${pm.oduvodneni_vyberu || ''}`.trim();
+        }
+        console.log(`  Merged warehouse for "${pm.polozka_nazev}": +${whCandidates.length} (AI ${aiCount}), auto-select=${strong}`);
       }
     }
   }
