@@ -248,8 +248,11 @@ function processQueue() {
   // idle timer) a salvage přes půlení dávky proběhne. Idle watchdog tak chytá jen skutečně
   // zaseknuté (žádný progres) procesy.
   const IDLE_TIMEOUT_MS = 300000;
+  // match: 188-položková zakázka (24 dávek à ~80 s) legitimně přesáhla 1800 s (job
+  // tender-1779109774773 zabit na capu po 30 min živé práce) — cap je runaway pojistka,
+  // reálné zaseknutí chytá idle watchdog (300 s bez outputu, heartbeat streamu ho drží).
   const ABSOLUTE_CAP_MS =
-    (job.step === 'match' || job.step === 'verify-prices') ? 1800000
+    (job.step === 'match' || job.step === 'verify-prices') ? 3600000
     : job.step === 'generate' ? 600000
     : job.step === 'analyze' ? 900000   // 32k-token analyze velké zakázky = jednotky minut
     : 300000;
