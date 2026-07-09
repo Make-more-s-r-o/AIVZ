@@ -39,5 +39,9 @@ miniMVP/
 # Temporary tender uploads
 input/tender-*/
 
+# Pracovní složka pro rozbalené ZIPy vstupní dokumentace (input-discovery.ts)
+input/**/.extracted/
+.extracted/
+
 # Misc
 *.pptx
