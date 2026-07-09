@@ -47,8 +47,9 @@ Hotovo: P0 fix pipeline stability (watchdog timeout + truncation), robustní ZIP
 5. Perzistentní + paralelní fronta (Postgres-backed, N workerů, retry/backoff, přežití restartu) místo in-memory seriálové. Pracnost M. Nutná podmínka hromadného provozu.
 6. Observabilita nákladů — agregace cost-tracker napříč zakázkami, měsíční spend, strop + alerting. Pracnost S–M.
 7. Konfigurovatelný cenový strop per-zakázka (dnes hardcoded 39 999 Kč v `submit-gate.ts`) + margin floor guardrail. Pracnost S — levná rychlá pojistka, dá se udělat kdykoli nezávisle.
+8. **Obnova cenového skladu jako kurátorovaná win-price/katalogová DB s prahy relevance.** Dnešní sklad (2026-07-09) obsahuje jen stale 3D-tisk sortiment a byl defaultně vypnutý (`WAREHOUSE_MATCH_ENABLED`, viz noční fix PR #22) poté, co u reálné zakázky nabízel filamenty jako "match" na nesouvisející položky přes příliš nízký práh podobnosti (0.08). Než se sklad znovu zapne pro víc komodit, potřebuje: (a) kurátorovaný re-import napříč komoditami (ne jen 3D tisk), (b) přísné prahy podobnosti kalibrované na reálných datech (dnešní nouzový fix 0.35/0.75 je konzervativní výchozí bod, ne finální kalibrace), (c) koncepčně sladit s win-price databází (Fáze 2) — obě jsou v podstatě "historická cenová inteligence", jen jeden zdroj je nákupní ceny ze skladu/scraperů a druhý vítězné ceny z veřejných zakázek; stojí za úvahu sjednotit datový model. Pracnost M. Bez tohoto kroku zůstává match-product omezen na čisté AI hledání bez cenového srovnání proti vlastnímu katalogu.
 
-**Metrika hotovosti:** deploy/restart nepřeruší rozpracovaný job; měsíční AI/infra náklad viditelný na jednom místě; libovolná zakázka má vlastní cenový strop bez zásahu do kódu.
+**Metrika hotovosti:** deploy/restart nepřeruší rozpracovaný job; měsíční AI/infra náklad viditelný na jednom místě; libovolná zakázka má vlastní cenový strop bez zásahu do kódu; sklad se zapíná per-komodita s ověřenou přesností matchování (ne plošně jako dřív).
 
 ### Fáze 2 (L, navazuje na Fázi 0 prototyp): Win-price databáze do produkce
 

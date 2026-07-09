@@ -9,8 +9,27 @@
 3. **PR #15** — první P0 fix (watchdog + granularita). Nasazeno, ale prod verifikace odkryla **druhou, samostatnou chybu**: odpověď AI se ořezávala na stropu `max_tokens` (10496/10496) → useknutý JSON → match dál padal, jen jinak a rychleji.
 4. **PR #19** — oprava truncation (split dávky při `stop_reason=max_tokens`, zvýšený token budget na kandidáta 400→700).
 5. **Merge batch #16–18** souběžně vzniklých větví (win-price prototyp, DS sjednocení legacy komponent, robustní ZIP/vnořený ingest) + #19, jeden finální deploy.
-6. **[doplní se: E2E výsledky]** — průchodnost historických zakázek na produkci po deployi.
-7. **[doplní se: CRM/security batch stav]** — auth/bulk UX práce odložena na ranní review (nejrizikovější změna, nemergovat uprostřed noci ani do rozjeté E2E).
+6. **E2E na produkci pokračovalo přes den** — odhalilo a opravilo další 3 bugy (heartbeat na `message_delta`, `parse-soupis` header kolize, `vaha_procent` Zod pád) + Patrikův reálný feedback k naceňování ze skladu (viz „Odpoledne" níže). Finální tabulka: **[doplní se: finální E2E tabulka]**.
+7. **CRM/security batch (PR #21) zmergováno** na Danův explicitní pokyn „merguj sám, autonomní vývoj" — GET auth, bulk potvrzení cen, XSS fix, N+1 agregát, race fix ve `verify-prices`. Prod smoke OK.
+
+## Odpoledne — Patrikův feedback #2 a E2E nálezy
+
+**13:03 Patrik nahlásil (parafráze):** „našlo smysluplně položky, ale nabízí filamenty mimo specifikaci a nejde vybrat správný produkt."
+
+**Root cause potvrzen:** cenový sklad (dnes obsahuje jen 3D-tisk sortiment, ceny stale) přes text-tier matching (práh podobnosti 0.08 — extrémně nízký) vkládal filamenty jako kandidáty na index 0 a systém je **automaticky vybíral** bez ohledu na relevanci — na `tender-1783520423526` to bylo 38 z 38 položek. Dan rozhodl: **sklad neimportovat/nepoužívat**, dokud nebude kurátorovaný.
+
+**Fix — PR #22:** warehouse matching je nově **defaultně vypnutý** (env `WAREHOUSE_MATCH_ENABLED`, default off, zapnout `=1`) a prahy podobnosti zpřísněny na 0.35 (kandidát) / 0.75 (auto-select). Zakázka `tender-1783520423526` byla dekontaminována — přegenerována s AI-only nálezem (Bott Verso systém, Treston nábytek) místo filamentů.
+
+**Doplňkové fixy vzniklé z E2E matice, všechny opraveny a nasazeny:**
+
+| PR | Bug | Dopad |
+|---|---|---|
+| **#23** | Chyběl ruční výběr kandidáta u položky | Nový endpoint `PUT product-match/select` + tlačítko „Vybrat tento produkt" v UI; přepnutí kandidáta smaže potvrzenou cenu (nutný re-confirm), aby se cena nesmontovala k jinému produktu. |
+| **#24** | Heartbeat z PR #22 poslouchal jen `message_delta` (chodí až na konci celé zprávy) → idle watchdog zabíjel **živé** dlouhé generace analýzy jako by visely | Přepnuto na `content_block_delta` + průběžný odhad tokenů — watchdog nyní správně rozezná aktivní streaming od skutečného zaseknutí. |
+| **#25** | `HEADER_PATTERNS.cislo` (holý vzor `pol`) matchoval i sloupec „Položka" → číslo a název položky se namapovaly na stejný sloupec → **tiše zahozeno všech 132 řádků** u `kancelarsky-material` | Zpřesněn regex; ověřeno 0/132 → 132/132, regresní test na N-485400 stále 57/57. |
+| (součást #22) | `vaha_procent` s hodnotou `null` nebo textem „40 %" shazovalo Zod validaci | Schema tolerantnější k formátu vstupu z AI. |
+
+**Stav E2E matice v době psaní:** 18+ zakázek PASS včetně zátěžových (57 a 255 položek). Finální dojezd běžel v době psaní (3× re-analýza vybraných zakázek, `kancelarsky-material` re-run po fixu #25, ZIP originály, projektor). **[doplní se: finální E2E tabulka]**
 
 ## Autonomní rozhodnutí
 
@@ -45,9 +64,13 @@ Po prvním deployi (PR #15) byla produkce chvíli **502**: sdílený `makemore-n
 | Win-price prototyp | Hotovo, nasazeno (PR #16), napojení na pipeline zatím jen navrženo |
 | DS sjednocení legacy komponent | Hotovo, nasazeno (PR #17) |
 | ZIP/vnořený ingest | Hotovo, nasazeno (PR #18) |
-| E2E na produkci | **[doplní se: E2E výsledky]** |
-| CRM/security batch (auth, bulk UX) | **[doplní se: CRM/security batch stav]** — odloženo na ranní review |
-| Ranní dokumentační balíček (tento report + brief + roadmapa + Slack návrh) | Hotovo |
+| CRM/security batch (GET auth, bulk potvrzení cen, XSS, N+1, race fix) | Hotovo, nasazeno (PR #21), prod smoke OK |
+| Ruční výběr kandidáta produktu | Hotovo, nasazeno (PR #23) |
+| Warehouse matching OFF + prahy relevance | Hotovo, nasazeno (PR #22) |
+| Heartbeat fix (`content_block_delta`) | Hotovo, nasazeno (PR #24) |
+| `parse-soupis` header kolize | Hotovo, nasazeno (PR #25) |
+| E2E na produkci | 18+ zakázek PASS, finální dojezd v běhu — **[doplní se: finální E2E tabulka]** |
+| Ranní + odpolední dokumentační balíček | Hotovo (tento report + brief + roadmapa + Slack návrh) |
 
 ## Navazující dokumenty
 
