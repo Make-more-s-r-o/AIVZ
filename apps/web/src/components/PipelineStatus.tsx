@@ -2,7 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, Loader2, AlertCircle, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../lib/cn';
-import { runStep, getJobStatus, getCost, type PipelineSteps, type StepName, type StepStatus, type CostSummary } from '../lib/api';
+import { runStep, getJobStatus, getCost, JobNotFoundError, type PipelineSteps, type StepName, type StepStatus, type CostSummary } from '../lib/api';
+
+// Kolik po sobě jdoucích síťových chyb pollu tolerujeme, než úlohu vzdáme (interval 2s → ~60s).
+const MAX_FAILED_POLLS = 30;
 
 const STEPS: { key: StepName; label: string }[] = [
   { key: 'extract', label: 'Extrakce' },
@@ -53,6 +56,9 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
   // Aktuálně běžící krok drž i v refu — closure v pollovacím intervalu jinak vidí stale hodnotu
   // a při chybě bychom nevěděli, který krok nabídnout k opětovnému spuštění.
   const activeStepRef = useRef<StepName | null>(null);
+  // Počítadlo po sobě jdoucích neúspěšných pollů — po překročení limitu úlohu vzdáme,
+  // ať spinner netočí donekonečna při delším výpadku spojení.
+  const failedPollsRef = useRef(0);
   const onStepCompleteRef = useRef(onStepComplete);
   onStepCompleteRef.current = onStepComplete;
 
@@ -69,6 +75,7 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     const interval = setInterval(async () => {
       try {
         const job = await getJobStatus(activeJobId, logSeenRef.current);
+        failedPollsRef.current = 0; // úspěšný poll → vynuluj počítadlo výpadků
         // Append new log lines
         if (job.logs.length > 0) {
           setLogs(prev => [...prev, ...job.logs]);
@@ -93,8 +100,30 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           setJobError(job.error || 'Neznámá chyba');
           onStepCompleteRef.current();
         }
-      } catch {
-        // Network error — keep polling
+      } catch (err) {
+        // Ukonči spinner, ukaž chybu a nabídni restart kroku.
+        const giveUp = (message: string) => {
+          clearInterval(interval);
+          setActiveJobId(null);
+          setActiveStep(null);
+          setFailedStep(activeStepRef.current);
+          activeStepRef.current = null;
+          setJobError(message);
+          onStepCompleteRef.current();
+        };
+
+        if (err instanceof JobNotFoundError) {
+          // 404 — úloha zmizela ze serveru (nejčastěji restart/deploy během běhu). Dřív to
+          // catch spolkl a spinner točil navždy. Teď zastav a nabídni „Zkusit znovu".
+          giveUp('Úloha byla ztracena — server se pravděpodobně restartoval během běhu (deploy). Zkuste krok spustit znovu.');
+          return;
+        }
+
+        // Síťová chyba — pollovat dál, ale s limitem, ať spinner netočí donekonečna.
+        failedPollsRef.current += 1;
+        if (failedPollsRef.current >= MAX_FAILED_POLLS) {
+          giveUp('Ztráta spojení se serverem. Zkuste krok spustit znovu.');
+        }
       }
     }, 2000);
 
@@ -112,6 +141,7 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     setFailedStep(null);
     setLogs([]);
     logSeenRef.current = 0;
+    failedPollsRef.current = 0;
     setActiveStep(step);
     activeStepRef.current = step;
     setShowLogs(true);

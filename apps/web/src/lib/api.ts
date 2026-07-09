@@ -173,9 +173,37 @@ export async function runStep(id: string, step: StepName): Promise<{ jobId: stri
 }
 
 /** Poll job status (with optional log offset for incremental logs) */
+/**
+ * Job zmizel ze serverové in-memory fronty (typicky restart/deploy během běhu úlohy).
+ * Odlišuje se od síťové chyby: 404 = úloha je definitivně ztracená, nemá smysl dál pollovat.
+ */
+export class JobNotFoundError extends Error {
+  constructor() {
+    super('Úloha nenalezena');
+    this.name = 'JobNotFoundError';
+  }
+}
+
 export async function getJobStatus(jobId: string, since?: number): Promise<JobStatus> {
   const params = since ? `?since=${since}` : '';
-  return fetchJson(`/jobs/${jobId}${params}`);
+  const res = await fetch(`${API_BASE}/jobs/${jobId}${params}`, {
+    headers: authHeaders(),
+  });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
+  // 404 = úloha už v paměti serveru není (restart/deploy) → vlastní typ, ať to FE nezamění
+  // se síťovým výpadkem a nepoluje donekonečna (nekonečný spinner).
+  if (res.status === 404) {
+    throw new JobNotFoundError();
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
 }
 
 export interface PriceOverrideData {
