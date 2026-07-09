@@ -43,12 +43,16 @@ function getStepCost(stepKey: string, byStep: CostSummary['byStep']): number {
 export default function PipelineStatus({ tenderId, steps, onStepComplete }: PipelineStatusProps) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<StepName | null>(null);
+  const [failedStep, setFailedStep] = useState<StepName | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [jobError, setJobError] = useState<string | null>(null);
   const [showLogs, setShowLogs] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const logSeenRef = useRef(0);
+  // Aktuálně běžící krok drž i v refu — closure v pollovacím intervalu jinak vidí stale hodnotu
+  // a při chybě bychom nevěděli, který krok nabídnout k opětovnému spuštění.
+  const activeStepRef = useRef<StepName | null>(null);
   const onStepCompleteRef = useRef(onStepComplete);
   onStepCompleteRef.current = onStepComplete;
 
@@ -75,13 +79,18 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           clearInterval(interval);
           setActiveJobId(null);
           setActiveStep(null);
+          activeStepRef.current = null;
           setJobError(null);
+          setFailedStep(null);
           onStepCompleteRef.current();
         } else if (job.status === 'error') {
+          // Zastav spinner (vyprázdni activeJobId/activeStep) a ukaž chybu + krok k restartu.
           clearInterval(interval);
           setActiveJobId(null);
           setActiveStep(null);
-          setJobError(job.error || 'Unknown error');
+          setFailedStep(activeStepRef.current);
+          activeStepRef.current = null;
+          setJobError(job.error || 'Neznámá chyba');
           onStepCompleteRef.current();
         }
       } catch {
@@ -100,17 +109,21 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
   const handleRun = async (step: StepName) => {
     setError(null);
     setJobError(null);
+    setFailedStep(null);
     setLogs([]);
     logSeenRef.current = 0;
     setActiveStep(step);
+    activeStepRef.current = step;
     setShowLogs(true);
 
     try {
       const result = await runStep(tenderId, step);
       setActiveJobId(result.jobId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(err instanceof Error ? err.message : 'Neznámá chyba');
       setActiveStep(null);
+      activeStepRef.current = null;
+      setFailedStep(step);
     }
   };
 
@@ -187,8 +200,25 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
         </div>
       )}
       {jobError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-          Krok selhal: {jobError}
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">
+                Krok {failedStep ? STEPS.find(s => s.key === failedStep)?.label ?? failedStep : ''} selhal
+              </div>
+              <div className="mt-0.5 break-words text-red-600">{jobError}</div>
+              {failedStep && (
+                <button
+                  onClick={() => handleRun(failedStep)}
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100"
+                >
+                  <Play className="h-3 w-3" />
+                  Zkusit znovu
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
