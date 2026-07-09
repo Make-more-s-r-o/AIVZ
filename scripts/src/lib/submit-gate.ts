@@ -31,9 +31,11 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
     );
     const unpriced = items.filter((i) => (i.cenova_uprava?.nabidkova_cena_s_dph ?? 0) <= 0);
     if (overCap.length) {
-      problems.push(
-        `${overCap.length} položek překračuje cenový strop (max 39 999 Kč s DPH): ${overCap.map((i) => `#${i.polozka_index + 1}`).join(', ')}`,
-      );
+      // Skutečný per-item strop z dat (ne hardcoded 39 999) — u každé položky vypiš její limit.
+      const detail = overCap
+        .map((i) => `#${i.polozka_index + 1} (max ${Number(i.cena_max_s_dph).toLocaleString('cs-CZ')} Kč s DPH)`)
+        .join(', ');
+      problems.push(`${overCap.length} položek překračuje cenový strop: ${detail}`);
     }
     if (unpriced.length) {
       problems.push(`${unpriced.length} z ${items.length} položek nemá nabídkovou cenu.`);
