@@ -17,3 +17,5 @@ Díky za nahlášení, ať víme kam se dívat.
 ---
 
 Ještě k tomu druhýmu hlášení (filamenty místo správnýho produktu): to bylo tím, že se do návrhů motal náš cenový sklad — ten dneska obsahuje jen starý 3D-tisk zboží a bral to jako nejbližší shodu i tam, kam to vůbec nepatřilo. Sklad jsem proto teď vypnul, dokud ho pořádně nepročistíme, takže návrhy jdou čistě z AI (a na tý zakázce, kde jsi to hlásil, jsem to přegeneroval — už tam žádný filamenty nejsou). A rovnou jsme přidali i to, co jsi asi taky chtěl — u položky teď jde ručně přepnout na jiný nabízený produkt tlačítkem přímo na kartě kandidáta (jen si pak musíš znovu potvrdit cenu, ta se při přepnutí resetne). V Ocenění navíc přibylo bulk tlačítko „Potvrdit vše/vybrané", ať nemusíš klikat položku po položce.
+
+Ještě jedna věc dopředu: teď mi na chvíli došel kredit na Anthropic účtu, takže se může stát, že u některé zakázky uvidíš chybu kolem "credit balance" u AI kroku (analýza/nacenění) — neděs se, není to nový bug, jen dobíjím a v tichosti to doběhne samo.
