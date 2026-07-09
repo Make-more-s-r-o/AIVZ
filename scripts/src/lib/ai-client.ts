@@ -153,11 +153,18 @@ export async function callClaude(
       );
       // message_start nese přesné input_tokens, každý message_delta kumulativní output_tokens —
       // zachytíme je průběžně, aby byla usage k dispozici i když stream skončí abortem.
+      // Heartbeat á ~60 s: dlouhá generace (analyze 32k tokenů = jednotky minut) jinak mlčí
+      // a idle watchdog job fronty (300 s bez outputu) by živý stream zabil.
+      let lastHeartbeat = Date.now();
       stream.on('streamEvent', (event) => {
         if (event.type === 'message_start') {
           partialInputTokens = event.message.usage.input_tokens;
         } else if (event.type === 'message_delta') {
           partialOutputTokens = event.usage.output_tokens;
+          if (Date.now() - lastHeartbeat >= 60_000) {
+            lastHeartbeat = Date.now();
+            console.log(`  … AI stream běží (${partialOutputTokens} output tokenů)`);
+          }
         }
       });
       const response = await stream.finalMessage();

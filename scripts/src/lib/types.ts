@@ -56,7 +56,7 @@ export const TenderAnalysisSchema = z.object({
   })),
   hodnotici_kriteria: z.array(z.object({
     nazev: z.string(),
-    vaha_procent: z.number(),
+    vaha_procent: z.preprocess(parseAiNumber, z.number().nullable()).transform(v => v ?? 0),
     popis: z.string(),
   })).optional().default([]),
   terminy: z.object({
@@ -101,7 +101,7 @@ export const TenderAnalysisSchema = z.object({
 // projít do z.number(), které ho odmítne standardní chybou.
 function parseAiNumber(v: unknown): unknown {
   if (typeof v !== 'string') return v;
-  let s = v.replace(/[\s ]/g, '').replace(/(Kč|CZK|,-)$/i, '');
+  let s = v.replace(/[\s ]/g, '').replace(/(Kč|CZK|,-|%)$/i, '');
   if (s.includes('.') && s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
   else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, ''); // „1.299“ = česky 1299
   else s = s.replace(',', '.');

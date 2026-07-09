@@ -242,6 +242,7 @@ function processQueue() {
   const ABSOLUTE_CAP_MS =
     (job.step === 'match' || job.step === 'verify-prices') ? 1800000
     : job.step === 'generate' ? 600000
+    : job.step === 'analyze' ? 900000   // 32k-token analyze velké zakázky = jednotky minut
     : 300000;
 
   const child = spawn(
