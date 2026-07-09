@@ -192,6 +192,18 @@ const jobs = new Map<string, Job>();
 let currentJob: string | null = null;
 const jobQueue: string[] = [];
 
+// Jediný zdroj pravdy: mapa krok → skript. Sdílená frontou (processQueue) i run endpointem,
+// aby se obě mapy nerozešly — dřív run endpoint 'verify-prices' NEznal, takže tlačítko
+// „Ověřit ceny z webu" vracelo 400 „Unknown step".
+const STEP_FILES: Record<string, string> = {
+  extract: 'extract-tender.ts',
+  analyze: 'analyze-tender.ts',
+  match: 'match-product.ts',
+  generate: 'generate-bid.ts',
+  validate: 'validate-bid.ts',
+  'verify-prices': 'verify-prices.ts',
+};
+
 function processQueue() {
   if (currentJob) return;
   const nextId = jobQueue.shift();
@@ -203,16 +215,7 @@ function processQueue() {
   currentJob = nextId;
   job.status = 'running';
 
-  const stepFiles: Record<string, string> = {
-    extract: 'extract-tender.ts',
-    analyze: 'analyze-tender.ts',
-    match: 'match-product.ts',
-    generate: 'generate-bid.ts',
-    validate: 'validate-bid.ts',
-    'verify-prices': 'verify-prices.ts',
-  };
-
-  const scriptFile = stepFiles[job.step];
+  const scriptFile = STEP_FILES[job.step];
   if (!scriptFile) {
     job.status = 'error';
     job.error = `Unknown step: ${job.step}`;
@@ -222,7 +225,16 @@ function processQueue() {
     return;
   }
 
-  const stepTimeout = (job.step === 'match' || job.step === 'generate') ? 600000 : 300000;
+  // Watchdog (dřív fixní 600s pro match/generate → dlouhá, ale živá generace umřela na SIGTERM):
+  //  (a) IDLE timeout — když dítě 240s nic nevypíše, považuj ho za zaseknuté a ukonči.
+  //  (b) absolutní strop — tvrdý horní limit i pro aktivně tekoucí proces; match a verify-prices
+  //      mají velkorysých 1800s (desítky položek × web search), generate 600s, ostatní 300s.
+  //  (c) po SIGTERM eskaluj na SIGKILL po 10s, pokud proces stále žije.
+  const IDLE_TIMEOUT_MS = 240000;
+  const ABSOLUTE_CAP_MS =
+    (job.step === 'match' || job.step === 'verify-prices') ? 1800000
+    : job.step === 'generate' ? 600000
+    : 300000;
 
   const child = spawn(
     'node',
@@ -234,26 +246,50 @@ function processQueue() {
     }
   );
 
-  const timeout = setTimeout(() => {
-    child.kill('SIGTERM');
-    job.logs.push(`[TIMEOUT] Process killed after ${stepTimeout / 1000}s`);
-  }, stepTimeout);
+  let finished = false;
+
+  // Ukonči dítě: SIGTERM + eskalace na SIGKILL po 10s, pokud stále běží.
+  const terminate = (reason: string) => {
+    if (finished) return;
+    job.logs.push(`[TIMEOUT] ${reason}`);
+    try { child.kill('SIGTERM'); } catch { /* už mrtvý */ }
+    setTimeout(() => {
+      if (!finished) {
+        job.logs.push('[TIMEOUT] process still alive 10s after SIGTERM — sending SIGKILL');
+        try { child.kill('SIGKILL'); } catch { /* už mrtvý */ }
+      }
+    }, 10000);
+  };
+
+  let idleTimer: NodeJS.Timeout;
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => terminate(`no output for ${IDLE_TIMEOUT_MS / 1000}s`), IDLE_TIMEOUT_MS);
+  };
+  resetIdleTimer();
+
+  const absoluteTimer = setTimeout(
+    () => terminate(`absolute cap ${ABSOLUTE_CAP_MS / 1000}s exceeded`),
+    ABSOLUTE_CAP_MS,
+  );
 
   child.stdout.on('data', (data: Buffer) => {
+    resetIdleTimer();
     const lines = data.toString().split('\n').filter(Boolean);
     job.logs.push(...lines);
   });
 
   child.stderr.on('data', (data: Buffer) => {
+    resetIdleTimer();
     const lines = data.toString().split('\n').filter(Boolean);
     job.logs.push(...lines);
   });
 
-  let finished = false;
   const finishJob = (status: 'done' | 'error', error?: string) => {
     if (finished) return; // Guard against double-fire (error + close)
     finished = true;
-    clearTimeout(timeout);
+    clearTimeout(idleTimer);
+    clearTimeout(absoluteTimer);
     job.status = status;
     if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
@@ -262,8 +298,18 @@ function processQueue() {
     processQueue();
   };
 
-  child.on('close', (code) => {
-    finishJob(code === 0 ? 'done' : 'error', code !== 0 ? `Process exited with code ${code}` : undefined);
+  child.on('close', (code, signal) => {
+    if (code === 0) {
+      finishJob('done');
+    } else {
+      // Rozliš zabití watchdogem (SIGTERM/SIGKILL) od pádu skriptu — jasnější chybová hláška.
+      const killed = signal === 'SIGTERM' || signal === 'SIGKILL';
+      const tail = job.logs.slice(-3).join(' | ');
+      const reason = killed
+        ? `Krok ukončen watchdogem (${signal}) — pravděpodobně zaseknutý nebo příliš dlouhý. Poslední log: ${tail}`
+        : `Process exited with code ${code}${signal ? ` (signal ${signal})` : ''}${tail ? ` — ${tail}` : ''}`;
+      finishJob('error', reason);
+    }
   });
 
   child.on('error', (err) => {
@@ -1571,18 +1617,11 @@ app.get('/api/jobs/:jobId', (req, res) => {
 });
 
 // POST /api/tenders/:id/run/:step - enqueue a pipeline step
-const stepFiles: Record<string, string> = {
-  extract: 'extract-tender.ts',
-  analyze: 'analyze-tender.ts',
-  match: 'match-product.ts',
-  generate: 'generate-bid.ts',
-  validate: 'validate-bid.ts',
-};
-
+// Sdílí STEP_FILES s frontou (processQueue) — obě mapy musí znát stejné kroky (vč. verify-prices).
 app.post('/api/tenders/:id/run/:step', async (req, res) => {
   const { id, step } = req.params;
 
-  if (!stepFiles[step]) {
+  if (!STEP_FILES[step]) {
     return res.status(400).json({ error: `Unknown step: ${step}` });
   }
 
