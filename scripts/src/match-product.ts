@@ -709,11 +709,19 @@ async function main() {
   }
 
   // Build final ProductMatch object — always use polozky_match format now
-  const productMatch = ProductMatchSchema.parse({
+  const finalParse = ProductMatchSchema.safeParse({
     tenderId,
     matchedAt: new Date().toISOString(),
     polozky_match: polozkyMatch,
   });
+  if (!finalParse.success) {
+    // Kompaktní chyba místo tisíců řádků syrového ZodError dumpu v job logu —
+    // vypiš prvních pár issues s cestou, ať je z UI hned vidět, které pole zlobí.
+    const issues = finalParse.error.issues.slice(0, 8)
+      .map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
+    throw new Error(`Výsledek matchingu neprošel validací (${finalParse.error.issues.length} chyb): ${issues}`);
+  }
+  const productMatch = finalParse.data;
 
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');
