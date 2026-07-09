@@ -202,6 +202,18 @@ function cleanStr(v: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Sanitizace URL zdroje ceny u ZDROJE. AI vrací `zdroj_url`, který se v UI renderuje jako
+ * `href` a skládá do poznámky → nesmí projít `javascript:`/`data:` schéma (XSS). Povolíme
+ * jen absolutní http(s) URL; cokoli jiného → undefined. Frontend sanitizuje ještě jednou
+ * (defense-in-depth), ale primární obrana je tady, ať se nebezpečná hodnota vůbec neuloží.
+ */
+function cleanUrl(v: unknown): string | undefined {
+  const s = cleanStr(v);
+  if (!s) return undefined;
+  return /^https?:\/\//i.test(s) ? s : undefined;
+}
+
 // ----------------------------------------------------------------------------
 // Volání API s web searchem (+ retry, + pause_turn loop)
 // ----------------------------------------------------------------------------
@@ -348,7 +360,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
         overeni: {
           stav: 'nenalezeno',
           mena: cleanStr(r.mena),
-          zdroj_url: cleanStr(r.zdroj_url),
+          zdroj_url: cleanUrl(r.zdroj_url),
           poznamka: poznamka ?? 'Cena nenalezena',
           overeno_at: now(),
         },
@@ -366,7 +378,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
         web_cena_bez_dph: bez,
         web_cena_s_dph: sdph,
         mena: cleanStr(r.mena) ?? 'CZK',
-        zdroj_url: cleanStr(r.zdroj_url),
+        zdroj_url: cleanUrl(r.zdroj_url),
         dodavatel: cleanStr(r.dodavatel),
         dostupnost: cleanStr(r.dostupnost),
         poznamka,

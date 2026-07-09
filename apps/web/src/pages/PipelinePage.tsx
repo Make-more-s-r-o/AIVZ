@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type DragEvent } from 'react';
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, Filter, ListChecks } from 'lucide-react';
-import { getAnalysis, getTenders, getUsers, setTenderStatus, type SafeUser, type TenderSummary } from '../lib/api';
+import { getTendersSummary, getUsers, setTenderStatus, type SafeUser, type TenderSummary } from '../lib/api';
 import { effectiveStage, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { canTransition } from '../lib/stage-machine';
 import { STAGES, STAGE_LABELS, type StageKey } from '../lib/stages';
@@ -41,7 +41,8 @@ interface EnrichedTender {
 export default function PipelinePage({ onOpen }: PipelinePageProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const { data: tenders = [] } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
+  // Jeden request se souhrnem analýzy embednutým na každé zakázce (zrušení N+1 getAnalysis).
+  const { data: tenders = [] } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
 
   // Řešitelé pro avatar na kartě (degraduje na holé ID / dashed kolečko, když chybí).
   const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
@@ -50,27 +51,16 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
   // Sloupec, nad kterým se právě vznáší tažená karta (drop-zone zvýraznění).
   const [overCol, setOverCol] = useState<StageKey | null>(null);
 
-  // Per-tender analýza — paralelně, bez retry; 404 (nezanalyzováno) → degradace.
-  const analysisQueries = useQueries({
-    queries: tenders.map((t) => ({
-      queryKey: ['analysis', t.id],
-      queryFn: () => getAnalysis(t.id),
-      retry: false,
-      enabled: t.steps.analyze === 'done',
-      staleTime: 60_000,
-    })),
-  });
-
-  const enriched: EnrichedTender[] = tenders.map((tender, i) => {
-    const analysis = analysisQueries[i]?.data;
+  const enriched: EnrichedTender[] = tenders.map((tender) => {
+    const analysis = tender.analysis;
     return {
       tender,
-      nazev: analysis?.zakazka.nazev || tender.name || tender.id,
+      nazev: analysis?.nazev || tender.name || tender.id,
       stage: effectiveStage({ status: tender.status, steps: tender.steps }),
-      zadavatel: analysis?.zakazka.zadavatel.nazev ?? null,
-      hodnota: analysis?.zakazka.predpokladana_hodnota ?? null,
-      lhuta: analysis?.terminy.lhuta_nabidek ?? null,
-      decision: normalizeDecision(analysis?.doporuceni.rozhodnuti),
+      zadavatel: analysis?.zadavatel_nazev ?? null,
+      hodnota: analysis?.predpokladana_hodnota ?? null,
+      lhuta: analysis?.lhuta_nabidek ?? null,
+      decision: normalizeDecision(analysis?.rozhodnuti ?? undefined),
       assignee: tender.assignee ?? null,
       tasks: tender.tasks ?? null,
     };

@@ -1,11 +1,10 @@
 import type { ReactNode } from 'react';
-import { useQuery, useQueries } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History } from 'lucide-react';
 import {
-  getTenders, getAnalysis, getCost, getRecentActivity, getUsers, getMyTasks,
-  type TenderSummary, type CostSummary, type Task,
+  getTendersSummary, getRecentActivity, getUsers, getMyTasks,
+  type TenderSummary, type TenderAnalysisSummary, type Task,
 } from '../lib/api';
-import type { TenderAnalysis } from '../types/tender';
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays } from '../lib/crm-adapters';
 import { STAGES, STAGE_PROBABILITY, STAGE_LABELS, isTerminalStage, type StageKey } from '../lib/stages';
@@ -20,8 +19,8 @@ export interface PrehledPageProps {
 
 interface Row {
   tender: TenderSummary;
-  analysis: TenderAnalysis | undefined;
-  cost: CostSummary | undefined;
+  analysis: TenderAnalysisSummary | null | undefined;
+  cost: number | null | undefined;
   stage: StageKey;
 }
 
@@ -45,27 +44,8 @@ const priorityLabel: Record<Task['priorita'], string> = {
  * poctivý prázdný stav, nikdy vymyšlená čísla.
  */
 export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps) {
-  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
-
-  const analysisQueries = useQueries({
-    queries: tenders.map((t) => ({
-      queryKey: ['analysis', t.id],
-      queryFn: () => getAnalysis(t.id),
-      retry: false,
-      enabled: t.steps.analyze === 'done',
-      staleTime: 60_000,
-    })),
-  });
-
-  const costQueries = useQueries({
-    queries: tenders.map((t) => ({
-      queryKey: ['cost', t.id],
-      queryFn: () => getCost(t.id),
-      retry: false,
-      enabled: t.steps.analyze === 'done',
-      staleTime: 60_000,
-    })),
-  });
+  // Jeden agregovaný request (souhrn analýzy + AI náklady embednuté) místo N+1 per-zakázku.
+  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
 
   const { data: activity = [] } = useQuery({
     queryKey: ['recent-activity'], queryFn: getRecentActivity, retry: false, staleTime: 30_000,
@@ -84,10 +64,10 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
     staleTime: 30_000,
   });
 
-  const rows: Row[] = tenders.map((t, i) => ({
+  const rows: Row[] = tenders.map((t) => ({
     tender: t,
-    analysis: analysisQueries[i]?.data,
-    cost: costQueries[i]?.data,
+    analysis: t.analysis,
+    cost: t.costTotalCZK,
     stage: effectiveStage({ status: t.status, steps: t.steps }),
   }));
 
@@ -106,7 +86,7 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
 
   for (const r of rows) {
     if (r.stage === 'pripravena') pripravene += 1;
-    const v = r.analysis?.zakazka.predpokladana_hodnota;
+    const v = r.analysis?.predpokladana_hodnota;
     if (typeof v === 'number' && !Number.isNaN(v)) {
       if (!isTerminalStage(r.stage)) {
         pipelineSum += v;
@@ -115,7 +95,7 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
       weightedSum += v * STAGE_PROBABILITY[r.stage];
       weightedHas = true;
     }
-    const c = r.cost?.totalCZK;
+    const c = r.cost;
     if (typeof c === 'number' && !Number.isNaN(c)) {
       costSum += c;
       costHas = true;
@@ -150,7 +130,7 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
 
   // --- Blížící se lhůty (jen zakázky s analyzovanou lhůtou) ---
   const deadlines = rows
-    .map((r) => ({ r, days: deadlineDays(r.analysis?.terminy.lhuta_nabidek ?? null) }))
+    .map((r) => ({ r, days: deadlineDays(r.analysis?.lhuta_nabidek ?? null) }))
     .filter((x) => x.days != null)
     .sort((a, b) => (a.days ?? 0) - (b.days ?? 0))
     .slice(0, 6);
@@ -216,8 +196,8 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column' }}>
               {deadlines.map(({ r, days }, idx) => {
-                const nazev = r.tender.name ?? r.analysis?.zakazka.nazev ?? r.tender.tenderId;
-                const zadavatel = r.analysis?.zakazka.zadavatel.nazev;
+                const nazev = r.tender.name ?? r.analysis?.nazev ?? r.tender.tenderId;
+                const zadavatel = r.analysis?.zadavatel_nazev;
                 return (
                   <div
                     key={r.tender.id}
