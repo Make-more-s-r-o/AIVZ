@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import archiver from 'archiver';
-import { readFile, readdir, mkdir, stat, writeFile, rm } from 'fs/promises';
+import { readFile, readdir, mkdir, stat, writeFile, rm, rename } from 'fs/promises';
 import { getCostSummary } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
 import { existsSync, createWriteStream } from 'fs';
@@ -1361,6 +1361,74 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
     }
     res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  }
+});
+
+// PUT /api/tenders/:id/product-match/select - ruční výběr produktového kandidáta operátorem.
+// Body: { itemIndex, candidateIndex }. AI někdy vybere špatného kandidáta (vybrany_index) a
+// operátor to musí umět přepnout. U multi-item zakázky se položka hledá dle `polozka_index`
+// (ne dle pozice v poli — verify-prices používá stejný klíč), u legacy single-product formátu
+// se pracuje s kořenovým `kandidati`/`vybrany_index` a itemIndex se ignoruje.
+//
+// MONEY-PATH: pokud položka měla potvrzenou `cenova_uprava`, byla vázaná na PŘEDCHOZÍ produkt.
+// Změnou kandidáta ji smažeme (`priceCleared: true`) — cenu musí operátor potvrdit znovu, ať
+// se do nabídky nedostane cena od jiného produktu. Zápis atomicky (tmp + rename) a soubor se
+// čte těsně před zápisem (vzor verify-prices), aby souběžné potvrzení ceny nepřepsal stale snapshotem.
+app.put('/api/tenders/:id/product-match/select', async (req, res) => {
+  const { id } = req.params;
+  const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+
+  try {
+    const { itemIndex, candidateIndex } = (req.body ?? {}) as { itemIndex?: unknown; candidateIndex?: unknown };
+    const candIdx = Number(candidateIndex);
+    if (!Number.isInteger(candIdx) || candIdx < 0) {
+      return res.status(400).json({ error: 'candidateIndex musí být nezáporné celé číslo' });
+    }
+
+    // Čtení těsně před zápisem = nejčerstvější stav (lost-update ochrana proti souběžnému potvrzení ceny).
+    const productMatch = JSON.parse(await readFile(matchPath, 'utf-8'));
+
+    // Vyber cílovou položku: multi-item dle polozka_index, jinak legacy kořen.
+    let target: { kandidati?: unknown[]; vybrany_index?: number; cenova_uprava?: unknown };
+    if (Array.isArray(productMatch.polozky_match)) {
+      const itemIdx = Number(itemIndex);
+      if (!Number.isInteger(itemIdx)) {
+        return res.status(400).json({ error: 'itemIndex musí být celé číslo' });
+      }
+      const found = productMatch.polozky_match.find((p: any) => p?.polozka_index === itemIdx);
+      if (!found) {
+        return res.status(404).json({ error: `Položka s polozka_index ${itemIdx} nenalezena` });
+      }
+      target = found;
+    } else if (Array.isArray(productMatch.kandidati)) {
+      target = productMatch;
+    } else {
+      return res.status(404).json({ error: 'product-match.json nemá kandidáty' });
+    }
+
+    const kandidati = target.kandidati;
+    if (!Array.isArray(kandidati) || candIdx >= kandidati.length) {
+      return res.status(400).json({ error: `Neplatný index kandidáta ${candIdx}` });
+    }
+
+    // Změnou kandidáta se ruší dřív potvrzená cena (vázaná na jiný produkt).
+    let priceCleared = false;
+    if (target.cenova_uprava !== undefined) {
+      delete target.cenova_uprava;
+      priceCleared = true;
+    }
+    target.vybrany_index = candIdx;
+
+    const tmpPath = `${matchPath}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+    await rename(tmpPath, matchPath);
+
+    res.json({ success: true, itemIndex: Number(itemIndex), candidateIndex: candIdx, priceCleared });
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'product-match.json not found — run match step first' });
+    }
+    res.status(400).json({ error: `Nepodařilo se vybrat produkt: ${String(err.message || err)}` });
   }
 });
 
