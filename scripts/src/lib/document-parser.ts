@@ -101,7 +101,7 @@ export async function parseExcel(filePath: string): Promise<string> {
 }
 
 /** Resolve the LibreOffice/soffice binary across platforms. Returns null if not found. */
-function findSoffice(): string | null {
+export function findSoffice(): string | null {
   const candidates = [
     process.env.SOFFICE_BIN,
     '/Applications/LibreOffice.app/Contents/MacOS/soffice',
@@ -121,6 +121,42 @@ function findSoffice(): string | null {
     } catch { /* not on PATH */ }
   }
   return null;
+}
+
+/**
+ * Konvertuje `.doc` → `.docx` přes LibreOffice, výstup vzniká VEDLE zdroje
+ * (tj. i uvnitř podadresáře / `.extracted/`). Vrací cestu k `.docx`, nebo null
+ * (LibreOffice chybí / konverze selhala).
+ *
+ * Idempotence: pokud `.docx` se stejnou cestou už existuje, vrátí ho bez rekonverze.
+ *
+ * DŮLEŽITÉ: konverzi musí volat KAŽDÝ discovery-based krok, který `.doc` šablonu
+ * potřebuje jako `.docx` (analyze i generate). `discoverInputFiles()` totiž na
+ * začátku maže `.extracted/` a ZIP rozbaluje znovu — konvertovaný `.docx` z minulého
+ * běhu (extract kroku) se tím smaže, takže generate krok si `.doc` smlouvu ze ZIPu
+ * musí zkonvertovat sám, jinak tiše zmizí (žádný global fallback pro kupní smlouvu).
+ */
+export function convertDocToDocx(docPath: string): string | null {
+  const soffice = findSoffice();
+  if (!soffice) {
+    console.log(`  Skipping .doc file (LibreOffice not found — set SOFFICE_BIN or install libreoffice): ${basename(docPath)}`);
+    return null;
+  }
+  const srcDir = dirname(docPath);
+  const docxPath = join(srcDir, basename(docPath, extname(docPath)) + '.docx');
+  // Idempotence: konvertovaný .docx už na disku je (dřívější krok téhož běhu).
+  if (existsSync(docxPath)) return docxPath;
+  console.log(`  Converting .doc → .docx (${soffice}): ${basename(docPath)}`);
+  try {
+    // execFile s polem argumentů (žádný shell) — názvy souborů nemohou injektovat příkazy.
+    execFileSync(soffice, ['--headless', '--convert-to', 'docx', docPath, '--outdir', srcDir], { timeout: 60000 });
+    if (existsSync(docxPath)) return docxPath;
+    console.log(`  Warning: .doc conversion produced no .docx for ${basename(docPath)}`);
+    return null;
+  } catch (err) {
+    console.log(`  Warning: Failed to convert .doc ${basename(docPath)}: ${err}`);
+    return null;
+  }
 }
 
 export async function extractDocuments(
@@ -177,47 +213,29 @@ export async function extractDocuments(
         console.log(`  Warning: Failed to parse Excel file ${file}: ${err}`);
       }
     } else if (ext === '.doc') {
-      // Convert .doc → .docx via LibreOffice, then parse. Resolve the binary across
-      // platforms (macOS bundle, Linux /usr/bin, PATH, SOFFICE_BIN) — the production VPS
-      // is Linux, where the old hardcoded macOS path was always missing → .doc silently skipped.
-      const libreoffice = findSoffice();
-      if (libreoffice) {
-        // Cílový .docx vzniká VEDLE zdrojového .doc (i uvnitř podadresáře/.extracted),
-        // aby ho discoverTemplates() ve fázi generování našel — skenuje jen .docx/.xls/.xlsx.
-        const srcDir = dirname(filePath);
-        const docxBase = basename(file, extname(file)) + '.docx';
-        const docxPath = join(srcDir, basename(filePath, extname(filePath)) + '.docx');
+      // Convert .doc → .docx via LibreOffice, then parse. findSoffice() resolves the binary
+      // across platforms (macOS bundle, Linux /usr/bin, PATH, SOFFICE_BIN) — the production
+      // VPS is Linux, where the old hardcoded macOS path was always missing → .doc silently
+      // skipped. Konverze je sdílená s discoverTemplates() (generate krok), aby se zipovaná
+      // .doc smlouva zkonvertovala v OBOU krocích konzistentně.
+      const docxBase = basename(file, extname(file)) + '.docx';
 
-        // Idempotence + ochrana proti kolizi: pokud .docx se stejným názvem už objeven byl
-        // (výsledek dřívějšího běhu NEBO původní soubor tendru), znovu nekonvertujeme —
-        // ten .docx zpracuje .docx větev tohoto běhu.
-        if (discoveredNamesLower.has(docxBase.toLowerCase()) || existsSync(docxPath)) {
-          console.log(`  Skipping .doc conversion — .docx already present: ${docxBase}`);
-        } else {
-          console.log(`  Converting .doc → .docx (${libreoffice}): ${file}`);
-          try {
-            // execFile with an argument array (no shell) — filenames can't inject commands.
-            execFileSync(libreoffice, ['--headless', '--convert-to', 'docx', filePath, '--outdir', srcDir], { timeout: 60000 });
-            if (existsSync(docxPath)) {
-              const text = await parseDocx(docxPath);
-              // Konvertovaný .docx PONECHÁVÁME na disku vedle zdrojového .doc, aby ho
-              // discoverTemplates() ve fázi generování našel (dřív se hned mazal → smlouva chyběla).
-              documents.push({
-                filename: docxBase,
-                type: 'docx',
-                text,
-                isTemplate: isTemplate(docxBase),
-                isSoupis: isSoupis(docxBase),
-              });
-            } else {
-              console.log(`  Warning: .doc conversion produced no .docx for ${file}`);
-            }
-          } catch (err) {
-            console.log(`  Warning: Failed to convert .doc ${file}: ${err}`);
-          }
-        }
+      // Ochrana proti kolizi: pokud .docx se stejným NÁZVEM už objeven byl (původní soubor
+      // tendru vedle .doc), znovu nekonvertujeme — ten .docx zpracuje .docx větev.
+      if (discoveredNamesLower.has(docxBase.toLowerCase())) {
+        console.log(`  Skipping .doc conversion — .docx already present: ${docxBase}`);
       } else {
-        console.log(`  Skipping .doc file (LibreOffice not found — set SOFFICE_BIN or install libreoffice): ${file}`);
+        const docxPath = convertDocToDocx(filePath);
+        if (docxPath) {
+          const text = await parseDocx(docxPath);
+          documents.push({
+            filename: docxBase,
+            type: 'docx',
+            text,
+            isTemplate: isTemplate(docxBase),
+            isSoupis: isSoupis(docxBase),
+          });
+        }
       }
     }
   }
