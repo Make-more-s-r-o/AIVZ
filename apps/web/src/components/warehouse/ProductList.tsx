@@ -2,10 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getWarehouseProducts, getWarehouseCategories, getWarehouseManufacturers,
-  getWarehouseProduct,
+  getWarehouseProduct, type WarehouseProduct,
 } from '../../lib/api';
 import ProductCard from './ProductCard';
 import { PriceAgeDot, formatPrice } from './shared';
+import { Input, Select } from '../ui';
 
 const PAGE_SIZE = 25;
 
@@ -27,18 +28,49 @@ function SortableHeader({ label, field, current, dir, onChange }: {
   label: string; field: string; current: string; dir: string;
   onChange: (field: string, dir: string) => void;
 }) {
+  const [hover, setHover] = useState(false);
   return (
     <th
-      className="px-4 py-3 text-left font-medium text-gray-600 cursor-pointer hover:text-gray-900 select-none"
+      className="px-4 py-3 text-left font-medium cursor-pointer select-none"
+      style={{ color: hover ? 'var(--text-primary)' : 'var(--text-secondary)' }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       onClick={() => onChange(field, current === field && dir === 'asc' ? 'desc' : 'asc')}
     >
       <span className="inline-flex items-center gap-1">
         {label}
         {current === field && (
-          <span className="text-blue-500">{dir === 'asc' ? '↑' : '↓'}</span>
+          <span style={{ color: 'var(--accent)' }}>{dir === 'asc' ? '↑' : '↓'}</span>
         )}
       </span>
     </th>
+  );
+}
+
+function ProductRow({ product, onClick, onMouseEnter }: {
+  product: WarehouseProduct; onClick: () => void; onMouseEnter: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <tr
+      className="cursor-pointer"
+      style={{ background: hover ? 'var(--accent-soft-bg)' : 'transparent' }}
+      onClick={onClick}
+      onMouseEnter={() => { setHover(true); onMouseEnter(); }}
+      onMouseLeave={() => setHover(false)}
+    >
+      <td className="px-4 py-3 font-medium" style={{ color: 'var(--text-primary)' }}>{product.manufacturer}</td>
+      <td className="px-4 py-3 max-w-xs truncate" style={{ color: 'var(--text-primary)' }} title={product.model}>{product.model}</td>
+      <td className="px-4 py-3" style={{ color: 'var(--text-secondary)' }}>{product.category_nazev || '-'}</td>
+      <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--text-secondary)' }}>{product.part_number || '-'}</td>
+      <td className="px-4 py-3 text-right font-medium" style={{ color: 'var(--text-primary)' }}>
+        <span className="inline-flex items-center gap-1.5">
+          {formatPrice(product.best_price)}
+          <PriceAgeDot fetchedAt={product.best_price_fetched_at} />
+        </span>
+      </td>
+      <td className="px-4 py-3 text-xs" style={{ color: 'var(--text-secondary)' }}>{product.best_price_source || '-'}</td>
+    </tr>
   );
 }
 
@@ -125,65 +157,69 @@ export default function ProductList({
     onParamsChange({ sort: field, dir, p: null });
   };
 
+  const categoryOptions = [
+    { value: '', label: 'Všechny kategorie' },
+    ...categories.map((c) => ({ value: String(c.id), label: `${c.parent_id ? '  ' : ''}${c.nazev}` })),
+  ];
+  const manufacturerOptions = [
+    { value: '', label: 'Všichni výrobci' },
+    ...manufacturers.map((m) => ({ value: m, label: m })),
+  ];
+
   return (
     <div>
       {/* Sticky filtry */}
-      <div className="sticky top-0 z-10 bg-white pb-4 border-b mb-4">
+      <div className="sticky top-0 z-10 pb-4 mb-4" style={{ background: 'var(--surface-card)', borderBottom: '1px solid var(--border-default)' }}>
         <div className="flex flex-wrap gap-3">
-          <input
-            type="text"
-            value={searchInput}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            placeholder="Hledat produkty..."
-            className="flex-1 min-w-[200px] rounded-md border px-3 py-2 text-sm"
-          />
-          <select
-            value={categoryId ?? ''}
-            onChange={(e) => onParamsChange({ cat: e.target.value || null, p: null })}
-            className="rounded-md border px-3 py-2 text-sm"
-          >
-            <option value="">Všechny kategorie</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.parent_id ? '\u00A0\u00A0' : ''}{c.nazev}
-              </option>
-            ))}
-          </select>
-          <select
-            value={manufacturer ?? ''}
-            onChange={(e) => onParamsChange({ mfr: e.target.value || null, p: null })}
-            className="rounded-md border px-3 py-2 text-sm"
-          >
-            <option value="">Všichni výrobci</option>
-            {manufacturers.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-          <input
-            type="number"
-            value={priceMinInput}
-            onChange={(e) => handlePriceChange('price_min', e.target.value)}
-            placeholder="Cena od"
-            className="w-24 rounded-md border px-3 py-2 text-sm"
-            min={0}
-          />
-          <input
-            type="number"
-            value={priceMaxInput}
-            onChange={(e) => handlePriceChange('price_max', e.target.value)}
-            placeholder="Cena do"
-            className="w-24 rounded-md border px-3 py-2 text-sm"
-            min={0}
-          />
+          <div className="flex-1 min-w-[200px]">
+            <Input
+              type="text"
+              value={searchInput}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              placeholder="Hledat produkty..."
+            />
+          </div>
+          <div className="w-48">
+            <Select
+              value={categoryId != null ? String(categoryId) : ''}
+              onChange={(e) => onParamsChange({ cat: e.target.value || null, p: null })}
+              options={categoryOptions}
+            />
+          </div>
+          <div className="w-48">
+            <Select
+              value={manufacturer ?? ''}
+              onChange={(e) => onParamsChange({ mfr: e.target.value || null, p: null })}
+              options={manufacturerOptions}
+            />
+          </div>
+          <div className="w-24">
+            <Input
+              type="number"
+              value={priceMinInput}
+              onChange={(e) => handlePriceChange('price_min', e.target.value)}
+              placeholder="Cena od"
+              min={0}
+            />
+          </div>
+          <div className="w-24">
+            <Input
+              type="number"
+              value={priceMaxInput}
+              onChange={(e) => handlePriceChange('price_max', e.target.value)}
+              placeholder="Cena do"
+              min={0}
+            />
+          </div>
         </div>
         {priceMin != null && priceMax != null && priceMin > priceMax && (
-          <p className="mt-1 text-xs text-red-600">Min cena musí být menší než max</p>
+          <p className="mt-1 text-xs" style={{ color: 'var(--danger-solid)' }}>Min cena musí být menší než max</p>
         )}
       </div>
 
       {/* Error banner */}
       {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        <div className="mb-4 rounded-lg p-4 text-sm" style={{ border: '1px solid var(--danger-bg)', background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>
           Chyba při načítání produktů: {(error as Error).message}
         </div>
       )}
@@ -192,9 +228,9 @@ export default function ProductList({
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {isLoading ? (
-            <div className="col-span-full text-center py-8 text-gray-400">Načítám...</div>
+            <div className="col-span-full text-center py-8" style={{ color: 'var(--text-tertiary)' }}>Načítám...</div>
           ) : products.length === 0 ? (
-            <div className="col-span-full text-center py-8 text-gray-400">
+            <div className="col-span-full text-center py-8" style={{ color: 'var(--text-tertiary)' }}>
               {query ? 'Nic nenalezeno' : 'Sklad je prázdný. Importujte produkty.'}
             </div>
           ) : (
@@ -213,49 +249,37 @@ export default function ProductList({
           )}
         </div>
       ) : (
-        <div className="rounded-lg border">
+        <div className="rounded-lg" style={{ border: '1px solid var(--border-default)' }}>
           <table className="w-full text-sm">
-            <thead className="bg-gray-50">
+            <thead style={{ background: 'var(--surface-sunken)' }}>
               <tr>
                 <SortableHeader label="Výrobce" field="name" current={sortBy} dir={sortDir} onChange={handleSort} />
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Model</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Kategorie</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">P/N</th>
+                <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Model</th>
+                <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Kategorie</th>
+                <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>P/N</th>
                 <SortableHeader label="Cena" field="price" current={sortBy} dir={sortDir} onChange={handleSort} />
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Zdroj</th>
+                <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Zdroj</th>
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody style={{ borderTop: '1px solid var(--border-default)' }}>
               {isLoading ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">Načítám...</td></tr>
+                <tr><td colSpan={6} className="px-4 py-8 text-center" style={{ color: 'var(--text-tertiary)' }}>Načítám...</td></tr>
               ) : products.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <tr><td colSpan={6} className="px-4 py-8 text-center" style={{ color: 'var(--text-tertiary)' }}>
                   {query ? 'Nic nenalezeno' : 'Sklad je prázdný. Importujte produkty.'}
                 </td></tr>
               ) : (
                 products.map((p) => (
-                  <tr
+                  <ProductRow
                     key={p.id}
-                    className="cursor-pointer hover:bg-blue-50"
+                    product={p}
                     onClick={() => onProductClick(p.id)}
                     onMouseEnter={() => queryClient.prefetchQuery({
                       queryKey: ['warehouse-product', p.id],
                       queryFn: () => getWarehouseProduct(p.id),
                       staleTime: 60000,
                     })}
-                  >
-                    <td className="px-4 py-3 font-medium">{p.manufacturer}</td>
-                    <td className="px-4 py-3 max-w-xs truncate" title={p.model}>{p.model}</td>
-                    <td className="px-4 py-3 text-gray-500">{p.category_nazev || '-'}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-gray-500">{p.part_number || '-'}</td>
-                    <td className="px-4 py-3 text-right font-medium">
-                      <span className="inline-flex items-center gap-1.5">
-                        {formatPrice(p.best_price)}
-                        <PriceAgeDot fetchedAt={p.best_price_fetched_at} />
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-500 text-xs">{p.best_price_source || '-'}</td>
-                  </tr>
+                  />
                 ))
               )}
             </tbody>
@@ -265,13 +289,14 @@ export default function ProductList({
 
       {/* Paginace */}
       {totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-gray-500">
+        <div className="mt-4 flex items-center justify-between text-sm" style={{ color: 'var(--text-secondary)' }}>
           <span>{total} produktů celkem</span>
           <div className="flex gap-2">
             <button
               onClick={() => { onParamsChange({ p: String(Math.max(0, page - 1)) }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
               disabled={page === 0}
-              className="rounded border px-3 py-1 disabled:opacity-30"
+              className="rounded px-3 py-1"
+              style={{ border: '1px solid var(--border-default)', opacity: page === 0 ? 0.3 : 1 }}
             >
               Předchozí
             </button>
@@ -281,7 +306,8 @@ export default function ProductList({
             <button
               onClick={() => { onParamsChange({ p: String(Math.min(totalPages - 1, page + 1)) }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
               disabled={page >= totalPages - 1}
-              className="rounded border px-3 py-1 disabled:opacity-30"
+              className="rounded px-3 py-1"
+              style={{ border: '1px solid var(--border-default)', opacity: page >= totalPages - 1 ? 0.3 : 1 }}
             >
               Další
             </button>

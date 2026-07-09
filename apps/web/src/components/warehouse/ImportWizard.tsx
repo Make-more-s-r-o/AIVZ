@@ -3,6 +3,7 @@ import {
   uploadImportFile, runWarehouseImport, getWarehouseSources, getWarehouseCategories,
   type ImportPreview, type ImportResult, type WarehouseCategory,
 } from '../../lib/api';
+import { Select } from '../ui';
 
 const TARGET_FIELDS = [
   { value: 'manufacturer', label: 'Výrobce' },
@@ -93,11 +94,14 @@ export default function ImportWizard({ onImportDone }: Props) {
   // Step 1: Upload
   if (step === 'upload') {
     return (
-      <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center">
-        <p className="mb-4 text-gray-600">
+      <div className="rounded-lg p-8 text-center" style={{ border: '1px dashed var(--border-strong)' }}>
+        <p className="mb-4" style={{ color: 'var(--text-secondary)' }}>
           Nahrajte CSV nebo Excel soubor s produkty
         </p>
-        <label className="inline-block cursor-pointer rounded-md bg-blue-600 px-6 py-2 text-sm text-white hover:bg-blue-700">
+        <label
+          className="inline-block cursor-pointer rounded-md px-6 py-2 text-sm"
+          style={{ background: 'var(--accent)', color: 'var(--text-on-accent)' }}
+        >
           Vybrat soubor
           <input
             type="file"
@@ -106,70 +110,71 @@ export default function ImportWizard({ onImportDone }: Props) {
             className="hidden"
           />
         </label>
-        {loading && <p className="mt-3 text-sm text-gray-500">Analyzuji soubor...</p>}
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+        {loading && <p className="mt-3 text-sm" style={{ color: 'var(--text-secondary)' }}>Analyzuji soubor...</p>}
+        {error && <p className="mt-3 text-sm" style={{ color: 'var(--danger-solid)' }}>{error}</p>}
       </div>
     );
   }
 
   // Step 2: Mapping
   if (step === 'mapping' && preview) {
+    const sourceOptions = sources.map((s) => ({ value: String(s.id), label: s.name }));
+    const categoryOptions = [
+      { value: '', label: '-- neurčeno --' },
+      ...categories.map((c) => ({ value: String(c.id), label: `${c.parent_id ? '  ' : ''}${c.nazev}` })),
+    ];
+
     return (
       <div>
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold">Mapování sloupců</h3>
-            <p className="text-sm text-gray-500">
+            <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Mapování sloupců</h3>
+            <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
               {preview.filename} — {preview.total_rows} řádků, {preview.columns.length} sloupců
             </p>
           </div>
           <button
             onClick={() => { setStep('upload'); setPreview(null); }}
-            className="text-sm text-gray-500 hover:text-gray-700"
+            className="text-sm"
+            style={{ color: 'var(--text-secondary)' }}
           >
             Zrušit
           </button>
         </div>
 
         {error && (
-          <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <div className="mb-4 rounded p-3 text-sm" style={{ border: '1px solid var(--danger-bg)', background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>
             {error}
           </div>
         )}
 
         {/* Nastaveni importu */}
-        <div className="mb-4 flex flex-wrap gap-4 rounded-lg bg-gray-50 p-4">
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Zdroj dat</label>
-            <select
-              value={sourceId}
+        <div className="mb-4 flex flex-wrap gap-4 rounded-lg p-4" style={{ background: 'var(--surface-sunken)' }}>
+          <div className="w-56">
+            <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Zdroj dat</label>
+            <Select
+              value={String(sourceId)}
               onChange={(e) => setSourceId(Number(e.target.value))}
-              className="rounded border px-3 py-1.5 text-sm"
-            >
-              {sources.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
+              options={sourceOptions}
+              size="sm"
+            />
           </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Kategorie</label>
-            <select
-              value={categoryId ?? ''}
+          <div className="w-56">
+            <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>Kategorie</label>
+            <Select
+              value={categoryId != null ? String(categoryId) : ''}
               onChange={(e) => setCategoryId(e.target.value ? Number(e.target.value) : undefined)}
-              className="rounded border px-3 py-1.5 text-sm"
-            >
-              <option value="">-- neurčeno --</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.parent_id ? '\u00A0\u00A0' : ''}{c.nazev}</option>
-              ))}
-            </select>
+              options={categoryOptions}
+              size="sm"
+            />
           </div>
           <div className="flex items-end">
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-primary)' }}>
               <input
                 type="checkbox"
                 checked={enrichParams}
                 onChange={(e) => setEnrichParams(e.target.checked)}
+                style={{ accentColor: 'var(--accent)' }}
               />
               AI normalizace parametrů
             </label>
@@ -177,35 +182,28 @@ export default function ImportWizard({ onImportDone }: Props) {
         </div>
 
         {/* Mapping tabulka */}
-        <div className="mb-4 overflow-x-auto rounded-lg border">
+        <div className="mb-4 overflow-x-auto rounded-lg" style={{ border: '1px solid var(--border-default)' }}>
           <table className="w-full text-sm">
-            <thead className="bg-gray-50">
+            <thead style={{ background: 'var(--surface-sunken)' }}>
               <tr>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Sloupec v souboru</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Cílové pole</th>
-                <th className="px-4 py-2 text-left font-medium text-gray-600">Ukázka dat</th>
+                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Sloupec v souboru</th>
+                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Cílové pole</th>
+                <th className="px-4 py-2 text-left font-medium" style={{ color: 'var(--text-secondary)' }}>Ukázka dat</th>
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody>
               {mapping.map((m, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="px-4 py-2 font-medium">{m.source_name}</td>
-                  <td className="px-4 py-2">
-                    <select
+                <tr key={i} style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                  <td className="px-4 py-2 font-medium" style={{ color: 'var(--text-primary)' }}>{m.source_name}</td>
+                  <td className="px-4 py-2 w-52">
+                    <Select
                       value={m.target_field || 'ignore'}
                       onChange={(e) => handleMappingChange(i, e.target.value)}
-                      className={`rounded border px-2 py-1 text-sm ${
-                        m.target_field === 'ignore' || !m.target_field
-                          ? 'text-gray-400'
-                          : ''
-                      }`}
-                    >
-                      {TARGET_FIELDS.map((f) => (
-                        <option key={f.value} value={f.value}>{f.label}</option>
-                      ))}
-                    </select>
+                      options={TARGET_FIELDS}
+                      size="sm"
+                    />
                   </td>
-                  <td className="max-w-xs truncate px-4 py-2 text-gray-500">
+                  <td className="max-w-xs truncate px-4 py-2" style={{ color: 'var(--text-secondary)' }}>
                     {preview.sample_rows[0]?.[m.source_name] || '-'}
                   </td>
                 </tr>
@@ -216,23 +214,23 @@ export default function ImportWizard({ onImportDone }: Props) {
 
         {/* Preview dat */}
         <details className="mb-4">
-          <summary className="cursor-pointer text-sm text-gray-500 hover:text-gray-700">
+          <summary className="cursor-pointer text-sm" style={{ color: 'var(--text-secondary)' }}>
             Ukázka dat ({Math.min(10, preview.sample_rows.length)} řádků)
           </summary>
-          <div className="mt-2 overflow-x-auto rounded border">
+          <div className="mt-2 overflow-x-auto rounded" style={{ border: '1px solid var(--border-default)' }}>
             <table className="w-full text-xs">
-              <thead className="bg-gray-50">
+              <thead style={{ background: 'var(--surface-sunken)' }}>
                 <tr>
                   {preview.columns.map((c) => (
-                    <th key={c} className="whitespace-nowrap px-3 py-1 text-left">{c}</th>
+                    <th key={c} className="whitespace-nowrap px-3 py-1 text-left" style={{ color: 'var(--text-secondary)' }}>{c}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {preview.sample_rows.map((row, i) => (
-                  <tr key={i} className="border-t">
+                  <tr key={i} style={{ borderTop: '1px solid var(--border-subtle)' }}>
                     {preview.columns.map((c) => (
-                      <td key={c} className="max-w-32 truncate px-3 py-1">{row[c] || ''}</td>
+                      <td key={c} className="max-w-32 truncate px-3 py-1" style={{ color: 'var(--text-primary)' }}>{row[c] || ''}</td>
                     ))}
                   </tr>
                 ))}
@@ -243,7 +241,8 @@ export default function ImportWizard({ onImportDone }: Props) {
 
         <button
           onClick={handleRunImport}
-          className="rounded-md bg-green-600 px-6 py-2 text-sm text-white hover:bg-green-700"
+          className="rounded-md px-6 py-2 text-sm"
+          style={{ background: 'var(--success-solid)', color: 'var(--text-on-accent)' }}
         >
           Spustit import ({preview.total_rows} řádků)
         </button>
@@ -254,10 +253,13 @@ export default function ImportWizard({ onImportDone }: Props) {
   // Step 3: Running
   if (step === 'running') {
     return (
-      <div className="rounded-lg border p-8 text-center">
-        <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
-        <p className="text-gray-600">Import probíhá...</p>
-        <p className="mt-1 text-sm text-gray-400">
+      <div className="rounded-lg p-8 text-center" style={{ border: '1px solid var(--border-default)' }}>
+        <div
+          className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full"
+          style={{ border: '4px solid var(--blue-200)', borderTopColor: 'var(--accent)' }}
+        />
+        <p style={{ color: 'var(--text-secondary)' }}>Import probíhá...</p>
+        <p className="mt-1 text-sm" style={{ color: 'var(--text-tertiary)' }}>
           Zpracovávám {preview?.total_rows} řádků
           {enrichParams && ' s AI normalizací parametrů'}
         </p>
@@ -268,36 +270,36 @@ export default function ImportWizard({ onImportDone }: Props) {
   // Step 4: Done
   if (step === 'done' && result) {
     return (
-      <div className="rounded-lg border p-6">
-        <h3 className="mb-3 text-lg font-semibold text-green-700">Import dokončen</h3>
+      <div className="rounded-lg p-6" style={{ border: '1px solid var(--border-default)' }}>
+        <h3 className="mb-3 text-lg font-semibold" style={{ color: 'var(--success-fg)' }}>Import dokončen</h3>
         <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-          <div className="rounded bg-green-50 p-3 text-center">
-            <div className="text-2xl font-bold text-green-700">{result.imported}</div>
-            <div className="text-gray-500">Nových</div>
+          <div className="rounded p-3 text-center" style={{ background: 'var(--success-soft-bg)' }}>
+            <div className="text-2xl font-bold" style={{ color: 'var(--success-fg)' }}>{result.imported}</div>
+            <div style={{ color: 'var(--text-secondary)' }}>Nových</div>
           </div>
-          <div className="rounded bg-blue-50 p-3 text-center">
-            <div className="text-2xl font-bold text-blue-700">{result.updated}</div>
-            <div className="text-gray-500">Aktualizovaných</div>
+          <div className="rounded p-3 text-center" style={{ background: 'var(--info-soft-bg)' }}>
+            <div className="text-2xl font-bold" style={{ color: 'var(--info-fg)' }}>{result.updated}</div>
+            <div style={{ color: 'var(--text-secondary)' }}>Aktualizovaných</div>
           </div>
-          <div className="rounded bg-gray-50 p-3 text-center">
-            <div className="text-2xl font-bold text-gray-700">{result.skipped}</div>
-            <div className="text-gray-500">Přeskočeno</div>
+          <div className="rounded p-3 text-center" style={{ background: 'var(--surface-sunken)' }}>
+            <div className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>{result.skipped}</div>
+            <div style={{ color: 'var(--text-secondary)' }}>Přeskočeno</div>
           </div>
-          <div className="rounded bg-red-50 p-3 text-center">
-            <div className="text-2xl font-bold text-red-700">{result.errors.length}</div>
-            <div className="text-gray-500">Chyb</div>
+          <div className="rounded p-3 text-center" style={{ background: 'var(--danger-soft-bg)' }}>
+            <div className="text-2xl font-bold" style={{ color: 'var(--danger-fg)' }}>{result.errors.length}</div>
+            <div style={{ color: 'var(--text-secondary)' }}>Chyb</div>
           </div>
         </div>
 
         {result.errors.length > 0 && (
           <details className="mt-4">
-            <summary className="cursor-pointer text-sm text-red-600">
+            <summary className="cursor-pointer text-sm" style={{ color: 'var(--danger-solid)' }}>
               Zobrazit chyby ({result.errors.length})
             </summary>
-            <div className="mt-2 max-h-48 overflow-y-auto rounded border p-2 text-xs">
+            <div className="mt-2 max-h-48 overflow-y-auto rounded p-2 text-xs" style={{ border: '1px solid var(--border-default)' }}>
               {result.errors.map((e, i) => (
                 <div key={i} className="py-0.5">
-                  <span className="text-gray-500">Řádek {e.row}:</span> {e.error}
+                  <span style={{ color: 'var(--text-secondary)' }}>Řádek {e.row}:</span> {e.error}
                 </div>
               ))}
             </div>
@@ -307,13 +309,15 @@ export default function ImportWizard({ onImportDone }: Props) {
         <div className="mt-4 flex gap-3">
           <button
             onClick={onImportDone}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+            className="rounded-md px-4 py-2 text-sm"
+            style={{ background: 'var(--accent)', color: 'var(--text-on-accent)' }}
           >
             Zobrazit produkty
           </button>
           <button
             onClick={() => { setStep('upload'); setPreview(null); setResult(null); }}
-            className="rounded-md border px-4 py-2 text-sm text-gray-600 hover:bg-gray-50"
+            className="rounded-md px-4 py-2 text-sm"
+            style={{ border: '1px solid var(--border-default)', color: 'var(--text-secondary)' }}
           >
             Další import
           </button>
