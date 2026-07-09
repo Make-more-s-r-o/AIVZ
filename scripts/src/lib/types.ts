@@ -119,7 +119,8 @@ export const ProductCandidateSchema = z.object({
   parametry: z.record(z.string(), z.string()),
   shoda_s_pozadavky: z.array(z.object({
     pozadavek: z.string(),
-    splneno: z.boolean(),
+    // AI občas vrátí null (nevyhodnoceno) — bezpečná koerce na false (netvrdit splnění)
+    splneno: z.boolean().nullable().transform(v => v ?? false),
     hodnota: z.string(),
     komentar: z.string().optional(),
   })),

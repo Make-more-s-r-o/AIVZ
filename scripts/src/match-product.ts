@@ -446,6 +446,7 @@ async function main() {
       globalOffset: number,
       allowRetry: boolean,
       label: string,
+      boostTokens = false,
     ): Promise<void> => {
       if (sliceItems.length === 0) return;
 
@@ -459,7 +460,12 @@ async function main() {
       // Střízlivý strop output tokenů, tvrdý cap 16384 (dřív až 65536 → generace přes 600s).
       // 700 tokenů/kandidáta: 400 bylo poddimenzované — upovídané české oduvodneni_vyberu
       // narazilo na strop přesně (prod job 084394f2: 10496/10496 out) a useknulo JSON.
-      const maxTokens = Math.min(16384, 4096 + sliceItems.length * candidateCount * 700);
+      // Floor 8192: i 1položková dávka s mnoha požadavky potřebuje slušný budget
+      // (prod: 1 položka / 13 požadavků useknuta na 5496). boostTokens = poslední
+      // pokus jednopoložkové dávky s plným stropem.
+      const maxTokens = boostTokens
+        ? 16384
+        : Math.min(16384, Math.max(8192, 4096 + sliceItems.length * candidateCount * 700));
 
       // Přidej warehouse kontext do AI promptu
       let userMessage = buildProductMatchUserMessage(
@@ -515,6 +521,12 @@ async function main() {
           await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
           return;
         }
+        if (allowRetry && sliceItems.length === 1 && !boostTokens) {
+          // Jednopoložkovou dávku nejde půlit — zkusit jednou s plným token stropem.
+          console.warn(`  ⚠ Odpověď dávky ${label} (1 položka) useknuta — zkouším znovu s plným stropem 16384 tokenů`);
+          await processSlice(sliceItems, globalOffset, false, `${label}x`, true);
+          return;
+        }
         throw new Error(`AI matching: odpověď useknuta limitem tokenů i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
       }
 
@@ -523,11 +535,11 @@ async function main() {
         jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
       }
 
-      let parsed: any;
+      let parsed: any = null;
       try {
         parsed = JSON.parse(jsonStr);
-      } catch (parseErr) {
-        // Try to recover truncated JSON by finding the last complete polozky_match entry
+      } catch {
+        // Pokus o záchranu rozbitého JSON dořezáním k poslednímu kompletnímu záznamu.
         console.log(`  Warning: JSON parse failed, attempting recovery...`);
         const lastComplete = jsonStr.lastIndexOf('"oduvodneni_vyberu"');
         if (lastComplete > 0) {
@@ -537,20 +549,28 @@ async function main() {
             const opens = (truncated.match(/[\[{]/g) || []).length;
             const closes = (truncated.match(/[\]}]/g) || []).length;
             const closers = ']}'.repeat(Math.max(0, opens - closes));
-            const fixed = truncated + closers;
             try {
-              parsed = JSON.parse(fixed);
+              parsed = JSON.parse(truncated + closers);
               const got = parsed.polozky_match?.length ?? (parsed.kandidati ? 1 : 0);
               console.log(`  Recovery successful — parsed ${got} items`);
-            } catch {
-              throw parseErr;
-            }
-          } else {
-            throw parseErr;
+            } catch { /* recovery nevyšlo — řeší salvage níž */ }
           }
-        } else {
-          throw parseErr;
         }
+      }
+
+      // Nevalidní JSON i po recovery: stejná salvage cesta jako timeout/truncation —
+      // rozpůlit dávku (menší výstup = spolehlivější JSON), teprve pak selhat nahlas.
+      // Dřív se tady tvrdě throwlo → 188položkový match umřel po 47 min práce na JEDNÉ
+      // vadné dávce (prod, tender-1779109774773).
+      if (parsed === null) {
+        if (allowRetry && sliceItems.length > 1) {
+          const mid = Math.ceil(sliceItems.length / 2);
+          console.warn(`  ⚠ Nevalidní JSON dávky ${label} — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);
+          await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
+          await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        throw new Error(`AI matching vrátilo nevalidní JSON i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
       }
 
       // Úplnost dávky: model musí vrátit match pro KAŽDOU položku dávky. Neúplný
