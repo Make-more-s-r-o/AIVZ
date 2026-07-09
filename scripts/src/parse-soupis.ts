@@ -36,8 +36,11 @@ export function extractCastIdFromFilename(filename: string): string | undefined 
 }
 
 // Common header patterns for auto-detection (Czech tender soupis files)
+// POZOR na `cislo`: dřívější holé `pol` greedy matchlo i „Položka" (názvový sloupec) →
+// cislo i nazev ukazovaly na TENTÝŽ sloupec a numerický P.č. filtr zahodil VŠECHNY řádky
+// (kancelarsky-material: 132 položek → tiše 0 → 1 lumpovaná). Proto jen „Pol. č." varianty.
 const HEADER_PATTERNS = {
-  cislo: /^(č[ií]slo|po[řr]\.?\s*[čc]|#|p\.č\.|pol)/i,
+  cislo: /^(č[ií]slo|po[řr]\.?\s*[čc]|#|p\.č\.|pol\.?\s*[čc]|č\.)/i,
   nazev: /^(n[áa]zev|polo[žz]ka|popis\s*polo|ozna[čc]en[ií])/i,
   specifikace: /^(popis|specifikace|minim[áa]ln[ií]|tech.*param|pozn[áa]mka)/i,
   mnozstvi: /^(mno[žz]stv[ií]|po[čc]et|ks|mn\.|mj)/i,
@@ -80,6 +83,13 @@ function detectHeaders(sheet: ExcelJS.Worksheet): {
         }
       }
     });
+
+    // Jeden sloupec nesmí sloužit zároveň jako číslo I název — název má prioritu.
+    // (Obrana proti pattern kolizi: kdyby se to stalo, P.č. filtr by porovnával názvy
+    // položek s /^\d+$/ a tiše zahodil všechny datové řádky.)
+    if (cols.cislo !== undefined && cols.cislo === cols.nazev) {
+      delete cols.cislo;
+    }
 
     // Need at least nazev column to be useful
     if (cols.nazev && matchCount >= 2) {
