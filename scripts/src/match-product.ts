@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
-import { callClaude, AICallTimeoutError } from './lib/ai-client.js';
+import { callClaude, AICallTimeoutError, getMatchCallDeadlineMs } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
@@ -406,6 +406,10 @@ async function main() {
   // Step 1: Match products + accessories via AI (in batches of BATCH_SIZE)
   // BATCH_SIZE 8 (dřív 15) — menší dávka = ohraničenější délka jednoho AI volání.
   const BATCH_SIZE = 8;
+  // Wall-clock deadline JEDNOHO batch volání. Musí být pohodlně POD idle-watchdogem rodiče
+  // v serve-api (300s), aby při vypršení stihl doběhnout graceful retry (rozpůlení dávky)
+  // dřív, než rodič pošle SIGTERM. Jen match tento deadline zapíná (opt-in přes deadlineMs).
+  const MATCH_DEADLINE_MS = getMatchCallDeadlineMs();
   if (items.length > 0) {
     const totalBatches = Math.ceil(items.length / BATCH_SIZE);
     console.log(`\nMatching ${items.length} product/accessory item(s) with ${requirements.length} technical requirements...`);
@@ -453,9 +457,15 @@ async function main() {
         result = await callClaude(
           PRODUCT_MATCH_SYSTEM,
           userMessage,
-          { maxTokens, temperature: 0.3 }
+          { maxTokens, temperature: 0.3, deadlineMs: MATCH_DEADLINE_MS }
         );
       } catch (err) {
+        // Zaúčtuj náklady abortovaného pokusu (Anthropic účtuje i tokeny do abortu),
+        // ať reportovaná cena kroku neklame — token counts nese sama chyba.
+        if (err instanceof AICallTimeoutError && (err.inputTokens > 0 || err.outputTokens > 0)) {
+          await logCost(tenderId, `match-batch-${label}-timeout`, err.modelId, err.inputTokens, err.outputTokens, err.costCZK);
+          totalCost += err.costCZK;
+        }
         if (err instanceof AICallTimeoutError && allowRetry && sliceItems.length > 1) {
           const mid = Math.ceil(sliceItems.length / 2);
           console.warn(`  ⚠ AI timeout u dávky ${label} — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);

@@ -226,11 +226,19 @@ function processQueue() {
   }
 
   // Watchdog (dřív fixní 600s pro match/generate → dlouhá, ale živá generace umřela na SIGTERM):
-  //  (a) IDLE timeout — když dítě 240s nic nevypíše, považuj ho za zaseknuté a ukonči.
+  //  (a) IDLE timeout — když dítě 300s nic nevypíše, považuj ho za zaseknuté a ukonči.
   //  (b) absolutní strop — tvrdý horní limit i pro aktivně tekoucí proces; match a verify-prices
   //      mají velkorysých 1800s (desítky položek × web search), generate 600s, ostatní 300s.
   //  (c) po SIGTERM eskaluj na SIGKILL po 10s, pokud proces stále žije.
-  const IDLE_TIMEOUT_MS = 240000;
+  //
+  // IDLE_TIMEOUT_MS (300s) MUSÍ být komfortně VĚTŠÍ než wall-clock deadline match volání v
+  // ai-client (240s). Během tichého AI volání dítě nic nevypisuje, takže idle timer běží proti
+  // in-script deadlinu. Kdyby byly stejné (dřív obojí 240s), rodič by mohl SIGTERMnout child
+  // přesně ve chvíli, kdy má naskočit graceful rozpůlení dávky (AICallTimeoutError) → celý retry
+  // mechanismus by se negoval. S 60s marginem dítě abortuje první, vypíše varování (to resetuje
+  // idle timer) a salvage přes půlení dávky proběhne. Idle watchdog tak chytá jen skutečně
+  // zaseknuté (žádný progres) procesy.
+  const IDLE_TIMEOUT_MS = 300000;
   const ABSOLUTE_CAP_MS =
     (job.step === 'match' || job.step === 'verify-prices') ? 1800000
     : job.step === 'generate' ? 600000
