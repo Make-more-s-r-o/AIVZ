@@ -506,9 +506,6 @@ async function main() {
               parsed = JSON.parse(fixed);
               const got = parsed.polozky_match?.length ?? (parsed.kandidati ? 1 : 0);
               console.log(`  Recovery successful — parsed ${got} items`);
-              if (got < sliceItems.length) {
-                console.warn(`  ⚠ Recovery DROPPED ${sliceItems.length - got} item(s) (got ${got}/${sliceItems.length}) — bid would be incomplete; rerun match or lower BATCH_SIZE.`);
-              }
             } catch {
               throw parseErr;
             }
@@ -518,6 +515,22 @@ async function main() {
         } else {
           throw parseErr;
         }
+      }
+
+      // Úplnost dávky: model musí vrátit match pro KAŽDOU položku dávky. Neúplný
+      // (typicky useknutý a recovery-oříznutý) výsledek se nesmí tiše propustit —
+      // submit-gate chybějící položky nevidí a neúplná nabídka by prošla. Řešíme
+      // stejně jako timeout: jednou rozpůlit dávku, pak teprve selhat nahlas.
+      const gotCount = parsed.kandidati ? 1 : (parsed.polozky_match?.length ?? 0);
+      if (gotCount < sliceItems.length) {
+        if (allowRetry && sliceItems.length > 1) {
+          const mid = Math.ceil(sliceItems.length / 2);
+          console.warn(`  ⚠ Neúplný výsledek dávky ${label} (${gotCount}/${sliceItems.length}) — zkouším znovu s poloviční dávkou (${mid}+${sliceItems.length - mid})`);
+          await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
+          await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        throw new Error(`AI matching vrátilo neúplný výsledek (${gotCount}/${sliceItems.length} položek, dávka ${label}) i po zmenšení dávky. Zkuste krok spustit znovu.`);
       }
 
       // Enrich and collect results from this slice
