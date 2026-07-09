@@ -18,6 +18,7 @@ import ItemPriceCalculator from './ItemPriceCalculator';
 import { useToast } from './ui';
 import { getErrorMessage } from '../types/tender';
 import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
+import { safeHttpUrl } from '../lib/url';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -188,17 +189,6 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
       </button>
     </div>
   );
-}
-
-/**
- * Sanitizace URL pro render jako href / skládání do textu. Backend `zdroj_url` už čistí
- * u zdroje (price-verifier.ts), tohle je druhá vrstva (defense-in-depth) — cokoli, co není
- * absolutní http(s) URL (např. `javascript:`), zahodíme, aby se nedalo zneužít k XSS.
- */
-function safeHttpUrl(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  const trimmed = url.trim();
-  return /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
 }
 
 /**

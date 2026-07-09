@@ -1,8 +1,9 @@
-import { readFile, readdir, writeFile as fsWriteFile } from 'fs/promises';
+import { readFile, writeFile as fsWriteFile } from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { callClaude } from './ai-client.js';
+import { discoverInputFiles } from './input-discovery.js';
 import { TEMPLATE_FILL_SYSTEM, CONTRACT_FILL_SYSTEM, buildTemplateFillUserMessage } from '../prompts/template-fill.js';
 import {
   Document,
@@ -20,7 +21,7 @@ import {
   LevelFormat,
   convertMillimetersToTwip,
 } from 'docx';
-import { parseDocx, parseExcel } from './document-parser.js';
+import { parseDocx, parseExcel, convertDocToDocx } from './document-parser.js';
 import type { TenderAnalysis, ProductCandidate } from './types.js';
 
 interface CompanyProfile {
@@ -1424,18 +1425,51 @@ export async function docHasResidualPlaceholders(docxPath: string): Promise<bool
  * Uses filename regex first, then falls back to content-based detection.
  */
 export async function discoverTemplates(inputDir: string): Promise<DiscoveredTemplate[]> {
-  const files = await readdir(inputDir);
+  // Robustní discovery (stejná jako v extract kroku): rekurzivně projde podadresáře
+  // + rozbalí ZIPy do .extracted/. Nutné, protože .doc→.docx konverze tenderových
+  // šablon vzniká VEDLE zdroje (i uvnitř .extracted/), takže plochý readdir(inputDir)
+  // by konvertovanou smlouvu/šablonu ve vnořené složce nenašel.
+  const { files: discovered } = await discoverInputFiles(inputDir);
   const templates: DiscoveredTemplate[] = [];
   const typeCounts = new Map<string, number>();
 
-  for (const filename of files) {
-    const lowerFilename = filename.toLowerCase();
+  // Set objevených .docx basenamů (lowercase) — aby se .doc, který má vedle sebe
+  // i .docx dvojče, nekonvertoval zbytečně (a nezdvojil se výstup).
+  const discoveredDocxLower = new Set(
+    discovered
+      .map((d) => basename(d.relPath).toLowerCase())
+      .filter((n) => n.endsWith('.docx'))
+  );
+
+  for (const df of discovered) {
+    // Pro klasifikaci používáme čistý basename (display name může být při kolizi
+    // relativní cesta se separátory " / ", což by pattern matching mátlo).
+    let filename = basename(df.relPath);
+    let lowerFilename = filename.toLowerCase();
+    let filePath = df.absPath;
+
+    // .doc šablony (typicky kupní smlouva) konvertuj na .docx. discoverInputFiles()
+    // na začátku smazal .extracted/ a ZIP rozbalil znovu → .doc ze ZIPu je tu jako
+    // originál BEZ .docx (ten z analyze kroku se smazáním .extracted/ ztratil). Bez
+    // konverze by tento krok .doc přeskočil (skenuje jen .docx/.xls/.xlsx) a smlouva
+    // by se nikdy nevygenerovala — kupni_smlouva/technicka_specifikace nemají global
+    // fallback. Konverze je sdílená s extract krokem (document-parser.convertDocToDocx).
+    if (lowerFilename.endsWith('.doc')) {
+      const docxTwin = filename.slice(0, -'.doc'.length) + '.docx';
+      // Když už objeven .docx téhož názvu (tender veze .doc i .docx), .doc přeskoč —
+      // .docx zpracuje jeho vlastní iterace.
+      if (discoveredDocxLower.has(docxTwin.toLowerCase())) continue;
+      const converted = convertDocToDocx(df.absPath);
+      if (!converted) continue;
+      filePath = converted;
+      filename = basename(converted);
+      lowerFilename = filename.toLowerCase();
+    }
+
     // Support both .docx and .xls/.xlsx templates
     if (!lowerFilename.endsWith('.docx') && !lowerFilename.endsWith('.xls') && !lowerFilename.endsWith('.xlsx')) continue;
     // Skip non-template files by filename
     if (SKIP_FILENAME_PATTERNS.some(p => p.test(filename))) continue;
-
-    const filePath = join(inputDir, filename);
 
     // 1. Try filename-based classification first (fast)
     // Normalize underscores to spaces so patterns like /kupn[ií]\s*smlouv/ match "Navrh_kupni_smlouvy.docx"

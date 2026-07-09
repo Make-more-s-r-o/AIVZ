@@ -482,7 +482,7 @@ function TerminyTab({ tenderId }: { tenderId: string }) {
             připomínka {t.pripominka} {dayLabel(t.pripominka)} předem
           </span>
         )}
-        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat termín">
+        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat termín" aria-label="Smazat termín">
           <Trash2 size={14} />
         </Button>
       </div>
@@ -1181,7 +1181,7 @@ function UkolyTab({ tenderId }: { tenderId: string }) {
           </span>
         )}
         {t.assignee && <Avatar name={usersMap.get(t.assignee) ?? t.assignee} size={22} />}
-        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat úkol">
+        <Button variant="ghost" size="sm" onClick={() => void handleDelete(t)} title="Smazat úkol" aria-label="Smazat úkol">
           <Trash2 size={14} />
         </Button>
       </div>
@@ -1404,7 +1404,7 @@ function CommentsTab({ tenderId }: { tenderId: string }) {
                         {relativeTime(c.created_at)}
                       </span>
                       {canDelete && (
-                        <Button variant="ghost" size="sm" onClick={() => void handleDelete(c)} title="Smazat komentář" style={{ marginLeft: 'auto' }}>
+                        <Button variant="ghost" size="sm" onClick={() => void handleDelete(c)} title="Smazat komentář" aria-label="Smazat komentář" style={{ marginLeft: 'auto' }}>
                           <Trash2 size={14} />
                         </Button>
                       )}

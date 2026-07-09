@@ -1,12 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type CSSProperties, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getAnalysis, getParts, saveParts, type Cast } from '../lib/api';
-import { cn } from '../lib/cn';
 import type { TenderAnalysis } from '../types/tender';
 
 interface AnalysisViewProps {
   tenderId: string;
 }
+
+const DECISION_STYLE: Record<string, CSSProperties> = {
+  GO: { background: 'var(--success-bg)', color: 'var(--success-fg)' },
+  NOGO: { background: 'var(--danger-bg)', color: 'var(--danger-fg)' },
+  ZVAZIT: { background: 'var(--warning-bg)', color: 'var(--warning-fg)' },
+};
 
 export default function AnalysisView({ tenderId }: AnalysisViewProps) {
   const { data, isLoading, error } = useQuery({
@@ -14,8 +19,8 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
     queryFn: () => getAnalysis(tenderId),
   });
 
-  if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám analýzu...</div>;
-  if (error) return <div className="py-8 text-center text-gray-500">Analýza zatím není k dispozici. Spusťte krok "AI analýza".</div>;
+  if (isLoading) return <div className="py-8 text-center" style={{ color: 'var(--text-secondary)' }}>Načítám analýzu...</div>;
+  if (error) return <div className="py-8 text-center" style={{ color: 'var(--text-secondary)' }}>Analýza zatím není k dispozici. Spusťte krok "AI analýza".</div>;
   if (!data) return null;
 
   const analysis = data as TenderAnalysis;
@@ -30,12 +35,10 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
       )}
 
       {analysis.doporuceni && (
-        <div className={cn(
-          'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold',
-          analysis.doporuceni.rozhodnuti === 'GO' && 'bg-green-100 text-green-800',
-          analysis.doporuceni.rozhodnuti === 'NOGO' && 'bg-red-100 text-red-800',
-          analysis.doporuceni.rozhodnuti === 'ZVAZIT' && 'bg-yellow-100 text-yellow-800',
-        )}>
+        <div
+          className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold"
+          style={DECISION_STYLE[analysis.doporuceni.rozhodnuti] ?? DECISION_STYLE.ZVAZIT}
+        >
           {analysis.doporuceni.rozhodnuti}
           <span className="font-normal">— {analysis.doporuceni.oduvodneni}</span>
         </div>
@@ -69,12 +72,15 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
           <div className="space-y-2">
             {analysis.hodnotici_kriteria.map((k, i: number) => (
               <div key={i} className="flex items-center gap-3">
-                <div className="flex h-8 w-16 items-center justify-center rounded bg-blue-100 text-sm font-bold text-blue-800">
+                <div
+                  className="flex h-8 w-16 items-center justify-center rounded text-sm font-bold"
+                  style={{ background: 'var(--info-bg)', color: 'var(--info-fg)' }}
+                >
                   {k.vaha_procent}%
                 </div>
                 <div>
-                  <div className="text-sm font-medium">{k.nazev}</div>
-                  <div className="text-xs text-gray-500">{k.popis}</div>
+                  <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{k.nazev}</div>
+                  <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>{k.popis}</div>
                 </div>
               </div>
             ))}
@@ -87,22 +93,24 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b text-left">
-                  <th className="pb-2 font-medium">Parametr</th>
-                  <th className="pb-2 font-medium">Požadovaná hodnota</th>
-                  <th className="pb-2 font-medium">Povinné</th>
+                <tr style={{ borderBottom: '1px solid var(--border-default)', textAlign: 'left' }}>
+                  <th className="pb-2 font-medium" style={{ color: 'var(--text-primary)' }}>Parametr</th>
+                  <th className="pb-2 font-medium" style={{ color: 'var(--text-primary)' }}>Požadovaná hodnota</th>
+                  <th className="pb-2 font-medium" style={{ color: 'var(--text-primary)' }}>Povinné</th>
                 </tr>
               </thead>
               <tbody>
                 {analysis.technicke_pozadavky.map((r, i: number) => (
-                  <tr key={i} className="border-b last:border-0">
-                    <td className="py-2">{r.parametr}</td>
-                    <td className="py-2">{r.pozadovana_hodnota} {r.jednotka || ''}</td>
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border-default)' }}>
+                    <td className="py-2" style={{ color: 'var(--text-primary)' }}>{r.parametr}</td>
+                    <td className="py-2" style={{ color: 'var(--text-primary)' }}>{r.pozadovana_hodnota} {r.jednotka || ''}</td>
                     <td className="py-2">
-                      <span className={cn(
-                        'rounded px-2 py-0.5 text-xs',
-                        r.povinny ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
-                      )}>
+                      <span
+                        className="rounded px-2 py-0.5 text-xs"
+                        style={r.povinny
+                          ? { background: 'var(--danger-bg)', color: 'var(--danger-fg)' }
+                          : { background: 'var(--gray-100)', color: 'var(--text-secondary)' }}
+                      >
                         {r.povinny ? 'Ano' : 'Ne'}
                       </span>
                     </td>
@@ -118,13 +126,15 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
         <Section title="Kvalifikační požadavky">
           {analysis.kvalifikace.map((k, i: number) => (
             <div key={i} className="flex items-start gap-2 py-1">
-              <span className={cn(
-                'mt-0.5 rounded px-2 py-0.5 text-xs font-medium',
-                k.splnitelne ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-              )}>
+              <span
+                className="mt-0.5 rounded px-2 py-0.5 text-xs font-medium"
+                style={k.splnitelne
+                  ? { background: 'var(--success-bg)', color: 'var(--success-fg)' }
+                  : { background: 'var(--danger-bg)', color: 'var(--danger-fg)' }}
+              >
                 {k.typ}
               </span>
-              <span className="text-sm">{k.popis}</span>
+              <span className="text-sm" style={{ color: 'var(--text-primary)' }}>{k.popis}</span>
             </div>
           ))}
         </Section>
@@ -133,19 +143,21 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
       {analysis.rizika?.length > 0 && (
         <Section title="Rizika">
           {analysis.rizika.map((r, i: number) => (
-            <div key={i} className="rounded border p-3">
+            <div key={i} className="rounded p-3" style={{ border: '1px solid var(--border-default)' }}>
               <div className="flex items-center gap-2">
-                <span className={cn(
-                  'rounded px-2 py-0.5 text-xs font-medium',
-                  r.zavaznost === 'vysoka' && 'bg-red-100 text-red-700',
-                  r.zavaznost === 'stredni' && 'bg-yellow-100 text-yellow-700',
-                  r.zavaznost === 'nizka' && 'bg-green-100 text-green-700',
-                )}>
+                <span
+                  className="rounded px-2 py-0.5 text-xs font-medium"
+                  style={
+                    r.zavaznost === 'vysoka' ? { background: 'var(--danger-bg)', color: 'var(--danger-fg)' }
+                      : r.zavaznost === 'stredni' ? { background: 'var(--warning-bg)', color: 'var(--warning-fg)' }
+                        : { background: 'var(--success-bg)', color: 'var(--success-fg)' }
+                  }
+                >
                   {r.zavaznost}
                 </span>
-                <span className="text-sm font-medium">{r.popis}</span>
+                <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{r.popis}</span>
               </div>
-              <p className="mt-1 text-xs text-gray-600">Mitigace: {r.mitigace}</p>
+              <p className="mt-1 text-xs" style={{ color: 'var(--text-secondary)' }}>Mitigace: {r.mitigace}</p>
             </div>
           ))}
         </Section>
@@ -154,10 +166,10 @@ export default function AnalysisView({ tenderId }: AnalysisViewProps) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border bg-white p-4">
-      <h3 className="mb-3 text-sm font-semibold text-gray-900">{title}</h3>
+    <div className="rounded-lg p-4" style={{ border: '1px solid var(--border-default)', background: 'var(--surface-card)' }}>
+      <h3 className="mb-3 text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h3>
       {children}
     </div>
   );
@@ -167,8 +179,8 @@ function InfoRow({ label, value }: { label: string; value?: string | null }) {
   if (!value) return null;
   return (
     <div className="flex gap-2 py-1 text-sm">
-      <span className="w-40 shrink-0 font-medium text-gray-500">{label}</span>
-      <span>{value}</span>
+      <span className="w-40 shrink-0 font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</span>
+      <span style={{ color: 'var(--text-primary)' }}>{value}</span>
     </div>
   );
 }
@@ -179,6 +191,7 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveHover, setSaveHover] = useState(false);
 
   const { data: partsData } = useQuery({
     queryKey: ['parts', tenderId],
@@ -217,18 +230,18 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
   }, [tenderId, selected, queryClient]);
 
   return (
-    <div className="rounded-lg border bg-white p-4">
+    <div className="rounded-lg p-4" style={{ border: '1px solid var(--border-default)', background: 'var(--surface-card)' }}>
       <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-900">Části zakázky</h3>
+        <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Části zakázky</h3>
         <button
           onClick={handleSave}
           disabled={saving || !dirty}
-          className={cn(
-            'rounded px-3 py-1.5 text-xs font-medium transition-colors',
-            dirty
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-          )}
+          onMouseEnter={() => setSaveHover(true)}
+          onMouseLeave={() => setSaveHover(false)}
+          className="rounded px-3 py-1.5 text-xs font-medium transition-colors"
+          style={dirty
+            ? { background: saveHover ? 'var(--accent-hover)' : 'var(--accent)', color: 'var(--text-on-accent)', cursor: 'pointer' }
+            : { background: 'var(--gray-100)', color: 'var(--text-tertiary)', cursor: 'not-allowed' }}
         >
           {saving ? 'Ukládám...' : 'Uložit výběr'}
         </button>
@@ -237,29 +250,28 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
         {casti.map(cast => (
           <label
             key={cast.id}
-            className={cn(
-              'flex items-center justify-between rounded-md border px-3 py-2.5 cursor-pointer transition-colors',
-              selected.has(cast.id)
-                ? 'border-blue-300 bg-blue-50'
-                : 'border-gray-200 bg-gray-50 opacity-60'
-            )}
+            className="flex items-center justify-between rounded-md px-3 py-2.5 cursor-pointer transition-colors"
+            style={selected.has(cast.id)
+              ? { border: '1px solid var(--blue-300)', background: 'var(--accent-soft-bg)' }
+              : { border: '1px solid var(--border-default)', background: 'var(--surface-sunken)', opacity: 0.6 }}
           >
             <div className="flex items-center gap-3">
               <input
                 type="checkbox"
                 checked={selected.has(cast.id)}
                 onChange={() => toggle(cast.id)}
-                className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                className="h-4 w-4 rounded"
+                style={{ borderColor: 'var(--border-strong)', accentColor: 'var(--accent)' }}
               />
               <div>
-                <div className="text-sm font-medium">{cast.nazev}</div>
-                <div className="text-xs text-gray-500">
+                <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{cast.nazev}</div>
+                <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
                   {cast.pocet_polozek} {cast.pocet_polozek === 1 ? 'položka' : cast.pocet_polozek < 5 ? 'položky' : 'položek'}
                 </div>
               </div>
             </div>
             {cast.predpokladana_hodnota && (
-              <div className="text-sm font-semibold text-gray-700">
+              <div className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
                 {cast.predpokladana_hodnota.toLocaleString('cs-CZ')} Kč
               </div>
             )}
@@ -267,10 +279,10 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
         ))}
       </div>
       {saveError && (
-        <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{saveError}</div>
+        <div className="mt-2 rounded px-2 py-1 text-xs" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{saveError}</div>
       )}
       {selected.size === 0 && (
-        <p className="mt-2 text-xs text-red-600">Vyberte alespoň jednu část.</p>
+        <p className="mt-2 text-xs" style={{ color: 'var(--danger-solid)' }}>Vyberte alespoň jednu část.</p>
       )}
     </div>
   );

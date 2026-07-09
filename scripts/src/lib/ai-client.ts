@@ -18,6 +18,8 @@ export interface AICallResult {
   outputTokens: number;
   costCZK: number;
   modelId: string;
+  /** stop_reason z API — 'max_tokens' znamená useknutou (nekompletní) odpověď */
+  stopReason: string | null;
 }
 
 // Tvrdý wall-clock deadline na JEDNO volání modelu. Na rozdíl od socket-idle timeoutu
@@ -174,7 +176,7 @@ export async function callClaude(
         `  AI call [${modelLabel}]: ${inputTokens} in / ${outputTokens} out tokens, cost: ${costCZK.toFixed(2)} CZK`,
       );
 
-      return { content, inputTokens, outputTokens, costCZK, modelId };
+      return { content, inputTokens, outputTokens, costCZK, modelId, stopReason: response.stop_reason };
     } catch (error) {
       lastError = error as Error;
       // Wall-clock deadline vypršel → vyhoď typovanou chybu a NEretryuj uvnitř klienta.

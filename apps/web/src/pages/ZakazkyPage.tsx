@@ -1,6 +1,6 @@
 import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Search, Plus, Inbox, Save, Trash2 } from 'lucide-react';
+import { Search, Plus, Inbox, Save, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 import { Button, Input, Select, Avatar, Badge, useToast } from '../components/ui';
 import { StageBadge, DecisionPill, DeadlineCountdown } from '../components/crm';
 import {
@@ -11,7 +11,7 @@ import {
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays, normalizeDecision, type Decision } from '../lib/crm-adapters';
 import { fmtCZK } from '../lib/format';
-import type { StageKey } from '../lib/stages';
+import { STAGES, type StageKey } from '../lib/stages';
 
 export interface ZakazkyPageProps {
   onOpen?: (id: string) => void;
@@ -48,15 +48,21 @@ interface Row {
   stitky: Stitek[];
 }
 
-const HEAD: { label: string; align?: 'right' }[] = [
-  { label: 'Název' },
-  { label: 'Zadavatel' },
-  { label: 'Hodnota', align: 'right' },
-  { label: 'Lhůta' },
-  { label: 'Stav' },
-  { label: 'Doporučení' },
+type SortKey = 'nazev' | 'zadavatel' | 'hodnota' | 'lhuta' | 'stage' | 'decision';
+
+const HEAD: { label: string; align?: 'right'; sortKey?: SortKey }[] = [
+  { label: 'Název', sortKey: 'nazev' },
+  { label: 'Zadavatel', sortKey: 'zadavatel' },
+  { label: 'Hodnota', align: 'right', sortKey: 'hodnota' },
+  { label: 'Lhůta', sortKey: 'lhuta' },
+  { label: 'Stav', sortKey: 'stage' },
+  { label: 'Doporučení', sortKey: 'decision' },
   { label: 'Řeší' },
 ];
+
+// Pořadí pro řazení kategoriálních sloupců (Stav dle životního cyklu, Doporučení dle priority).
+const STAGE_ORDER: Record<StageKey, number> = Object.fromEntries(STAGES.map((s, i) => [s.key, i])) as Record<StageKey, number>;
+const DECISION_ORDER: Record<Decision, number> = { GO: 0, ZVAZIT: 1, NOGO: 2 };
 
 const mono: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-2xs)', color: 'var(--text-tertiary)' };
 
@@ -67,6 +73,9 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const [tagId, setTagId] = useState('');
   const [savingView, setSavingView] = useState(false);
   const [viewName, setViewName] = useState('');
+  // Sloupcové řazení — bez kliknutí zůstává výchozí pořadí (dle pipeline/API).
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
   const currentUserId = getStoredUser()?.id ?? null;
   const qc = useQueryClient();
@@ -138,6 +147,55 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
       return true;
     });
   }, [rows, query, decision, tagId, view, currentUserId]);
+
+  const sorted = useMemo(() => {
+    if (!sortKey) return filtered;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const nullsLast = (v: boolean) => (v ? 1 : -1); // null/prázdné vždy na konec bez ohledu na směr
+    return [...filtered].sort((a, b) => {
+      switch (sortKey) {
+        case 'nazev':
+          return dir * a.nazev.localeCompare(b.nazev, 'cs');
+        case 'zadavatel': {
+          if (!a.zadavatel || !b.zadavatel) return nullsLast(!a.zadavatel) - nullsLast(!b.zadavatel);
+          return dir * a.zadavatel.localeCompare(b.zadavatel, 'cs');
+        }
+        case 'hodnota': {
+          if (a.hodnota == null || b.hodnota == null) return nullsLast(a.hodnota == null) - nullsLast(b.hodnota == null);
+          return dir * (a.hodnota - b.hodnota);
+        }
+        case 'lhuta': {
+          if (a.days == null || b.days == null) return nullsLast(a.days == null) - nullsLast(b.days == null);
+          return dir * (a.days - b.days);
+        }
+        case 'stage':
+          return dir * (STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage]);
+        case 'decision': {
+          if (!a.decision || !b.decision) return nullsLast(!a.decision) - nullsLast(!b.decision);
+          return dir * (DECISION_ORDER[a.decision] - DECISION_ORDER[b.decision]);
+        }
+        default:
+          return 0;
+      }
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  const totalHodnota = useMemo(
+    () => filtered.reduce((sum, r) => sum + (r.hodnota ?? 0), 0),
+    [filtered],
+  );
+
+  function handleSort(key: SortKey) {
+    if (sortKey !== key) {
+      setSortKey(key);
+      setSortDir('asc');
+    } else if (sortDir === 'asc') {
+      setSortDir('desc');
+    } else {
+      setSortKey(null);
+      setSortDir('asc');
+    }
+  }
 
   const hasFilters = query.trim() !== '' || view !== 'Všechny' || decision !== '' || tagId !== '';
   const resetFilters = () => {
@@ -323,27 +381,83 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
                 background: 'var(--surface-sunken)', borderBottom: '1px solid var(--border-default)',
               }}
             >
-              {HEAD.map((h) => (
-                <span
-                  key={h.label}
-                  style={{
-                    fontSize: 'var(--font-size-2xs)', fontWeight: 'var(--weight-semibold)',
-                    textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-tertiary)',
-                    textAlign: h.align ?? 'left',
-                  }}
-                >
-                  {h.label}
-                </span>
-              ))}
+              {HEAD.map((h) => {
+                const active = h.sortKey != null && sortKey === h.sortKey;
+                const ariaSort: 'ascending' | 'descending' | 'none' | undefined = active
+                  ? (sortDir === 'asc' ? 'ascending' : 'descending')
+                  : h.sortKey ? 'none' : undefined;
+                const content = (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, justifyContent: h.align === 'right' ? 'flex-end' : 'flex-start' }}>
+                    {h.label}
+                    {h.sortKey && (
+                      active ? (
+                        sortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : (
+                        <ChevronDown size={12} style={{ opacity: 0.25 }} />
+                      )
+                    )}
+                  </span>
+                );
+                const baseStyle: CSSProperties = {
+                  fontSize: 'var(--font-size-2xs)', fontWeight: 'var(--weight-semibold)',
+                  textTransform: 'uppercase', letterSpacing: '0.04em', color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                  textAlign: h.align ?? 'left',
+                };
+                if (!h.sortKey) {
+                  return <span key={h.label} style={baseStyle}>{content}</span>;
+                }
+                return (
+                  <button
+                    key={h.label}
+                    onClick={() => handleSort(h.sortKey!)}
+                    aria-sort={ariaSort}
+                    style={{
+                      ...baseStyle, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {content}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Tělo */}
             {isLoading ? (
               <SkeletonRows />
-            ) : filtered.length === 0 ? (
+            ) : sorted.length === 0 ? (
               <EmptyState hasFilters={hasFilters} onReset={resetFilters} />
             ) : (
-              filtered.map((r) => <TableRow key={r.id} row={r} usersMap={usersMap} onOpen={onOpen} />)
+              sorted.map((r) => <TableRow key={r.id} row={r} usersMap={usersMap} onOpen={onOpen} />)
+            )}
+
+            {/* Souhrn — Σ hodnota aktuálně vyfiltrovaných zakázek */}
+            {!isLoading && sorted.length > 0 && (
+              <div
+                style={{
+                  display: 'grid', gridTemplateColumns: GRID, alignItems: 'center', gap: 12,
+                  padding: '0 16px', height: 44, position: 'sticky', bottom: 0,
+                  background: 'var(--surface-sunken)', borderTop: '1px solid var(--border-default)',
+                }}
+              >
+                <span style={{ fontSize: 'var(--font-size-xs)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-secondary)' }}>
+                  Σ {sorted.length} {plural(sorted.length)}
+                </span>
+                <span />
+                <span
+                  className="tnum"
+                  style={{
+                    textAlign: 'right', fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)',
+                    color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums',
+                  }}
+                >
+                  {fmtCZK(totalHodnota)}
+                </span>
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
             )}
           </div>
         </div>
