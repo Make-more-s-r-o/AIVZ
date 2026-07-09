@@ -20,6 +20,27 @@ export interface AICallResult {
   modelId: string;
 }
 
+// Tvrdý wall-clock deadline na JEDNO volání modelu. Na rozdíl od socket-idle timeoutu
+// v SDK (3 min, resetuje se každou přijatou událostí streamu) tenhle limit skutečně
+// přeruší i aktivně tekoucí, jen příliš dlouhou generaci (příčina zaseknutého kroku
+// „Produkty" — dávka s desítkami tisíc output tokenů generovala > 600s a rodičovský
+// watchdog ji zabil). Volající to pozná podle typu chyby (AICallTimeoutError).
+const DEFAULT_AI_CALL_DEADLINE_MS = 240000;
+function getCallDeadlineMs(): number {
+  const raw = Number(process.env.AI_CALL_DEADLINE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_AI_CALL_DEADLINE_MS;
+}
+
+/** Volání modelu překročilo tvrdý wall-clock deadline a bylo abortnuto. */
+export class AICallTimeoutError extends Error {
+  readonly deadlineMs: number;
+  constructor(deadlineMs: number) {
+    super(`AI volání překročilo časový limit ${Math.round(deadlineMs / 1000)}s a bylo přerušeno.`);
+    this.name = 'AICallTimeoutError';
+    this.deadlineMs = deadlineMs;
+  }
+}
+
 // Friendly name → actual model ID
 const MODEL_IDS: Record<string, string> = {
   sonnet: 'claude-sonnet-4-6',
@@ -71,20 +92,27 @@ export async function callClaude(
 
   const modelId = resolveModelId(modelOption);
   const pricing = getModelPricing(modelId);
+  const deadlineMs = getCallDeadlineMs();
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // Tvrdý wall-clock deadline per pokus — abortne i aktivně tekoucí stream.
+    const controller = new AbortController();
+    const deadlineTimer = setTimeout(() => controller.abort(), deadlineMs);
     try {
       // Stream the response so long generations (large multi-item JSON) keep the connection
       // alive and don't trip the request timeout; finalMessage() resolves with the full reply.
-      const response = await client.messages.stream({
-        model: modelId,
-        max_tokens: maxTokens,
-        temperature,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
-      }).finalMessage();
+      const response = await client.messages.stream(
+        {
+          model: modelId,
+          max_tokens: maxTokens,
+          temperature,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+        },
+        { signal: controller.signal },
+      ).finalMessage();
 
       const content = response.content
         .filter((block): block is Anthropic.TextBlock => block.type === 'text')
@@ -103,6 +131,12 @@ export async function callClaude(
       return { content, inputTokens, outputTokens, costCZK, modelId };
     } catch (error) {
       lastError = error as Error;
+      // Wall-clock deadline vypršel → vyhoď typovanou chybu a NEretryuj uvnitř klienta.
+      // Retry (např. s poloviční dávkou) je rozhodnutí volajícího — jinak by se dlouhá
+      // generace jen několikrát zopakovala a snědla celý rozpočet kroku.
+      if (controller.signal.aborted) {
+        throw new AICallTimeoutError(deadlineMs);
+      }
       // Don't retry non-retryable errors (credit exhausted, invalid API key, etc.)
       const status = (error as any)?.status;
       const shouldRetry = (error as any)?.headers?.['x-should-retry'];
@@ -115,6 +149,8 @@ export async function callClaude(
         console.log(`  Retry ${attempt + 1}/${retries} in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
+    } finally {
+      clearTimeout(deadlineTimer);
     }
   }
 
