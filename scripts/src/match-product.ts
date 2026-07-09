@@ -446,6 +446,7 @@ async function main() {
       globalOffset: number,
       allowRetry: boolean,
       label: string,
+      boostTokens = false,
     ): Promise<void> => {
       if (sliceItems.length === 0) return;
 
@@ -459,7 +460,12 @@ async function main() {
       // Střízlivý strop output tokenů, tvrdý cap 16384 (dřív až 65536 → generace přes 600s).
       // 700 tokenů/kandidáta: 400 bylo poddimenzované — upovídané české oduvodneni_vyberu
       // narazilo na strop přesně (prod job 084394f2: 10496/10496 out) a useknulo JSON.
-      const maxTokens = Math.min(16384, 4096 + sliceItems.length * candidateCount * 700);
+      // Floor 8192: i 1položková dávka s mnoha požadavky potřebuje slušný budget
+      // (prod: 1 položka / 13 požadavků useknuta na 5496). boostTokens = poslední
+      // pokus jednopoložkové dávky s plným stropem.
+      const maxTokens = boostTokens
+        ? 16384
+        : Math.min(16384, Math.max(8192, 4096 + sliceItems.length * candidateCount * 700));
 
       // Přidej warehouse kontext do AI promptu
       let userMessage = buildProductMatchUserMessage(
@@ -513,6 +519,12 @@ async function main() {
           console.warn(`  ⚠ Odpověď dávky ${label} useknuta stropem max_tokens — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);
           await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
           await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        if (allowRetry && sliceItems.length === 1 && !boostTokens) {
+          // Jednopoložkovou dávku nejde půlit — zkusit jednou s plným token stropem.
+          console.warn(`  ⚠ Odpověď dávky ${label} (1 položka) useknuta — zkouším znovu s plným stropem 16384 tokenů`);
+          await processSlice(sliceItems, globalOffset, false, `${label}x`, true);
           return;
         }
         throw new Error(`AI matching: odpověď useknuta limitem tokenů i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
