@@ -1,0 +1,132 @@
+/**
+ * Win-price query — hledání podobných historických výher/smluv dle předmětu.
+ *
+ * Kombinuje dvě strategie: fulltext (tsvector, přesné termy) + trigram similarity
+ * (pg_trgm, fuzzy překlepy/varianty). Vrací záznamy s cenou seřazené dle relevance.
+ *
+ * Samostatný modul — do serve-api.ts se NEZASAHUJE (API endpoint se přidá později).
+ */
+import { query } from './db.js';
+import type { KomoditaKategorie } from './winprice-store.js';
+
+export interface SimilarWin {
+  id: number;
+  zdroj: string;
+  datum: string | null;
+  zadavatel_nazev: string | null;
+  dodavatel_nazev: string | null;
+  dodavatel_ico: string | null;
+  predmet: string;
+  komodita_kategorie: string;
+  cena_bez_dph: number | null;
+  cena_s_dph: number | null;
+  mena: string;
+  url: string | null;
+  similarity: number; // 0..1 trigram podobnost předmětu vůči dotazu
+}
+
+export interface FindSimilarOptions {
+  kategorie?: KomoditaKategorie;
+  limit?: number;
+  minSimilarity?: number; // práh trigram podobnosti (0..1)
+  onlyWithPrice?: boolean; // jen záznamy s cenou (default true)
+}
+
+/**
+ * Najde historické záznamy s předmětem podobným dotazu.
+ *
+ * Skóre relevance = kombinace trigram similarity a fulltext match.
+ * Řadí primárně dle toho, zda záznam vyhověl fulltextu, pak dle similarity.
+ */
+export async function findSimilarWins(
+  predmet: string,
+  options: FindSimilarOptions = {},
+): Promise<SimilarWin[]> {
+  const {
+    kategorie,
+    limit = 20,
+    minSimilarity = 0.1,
+    onlyWithPrice = true,
+  } = options;
+
+  const params: unknown[] = [predmet, minSimilarity];
+  const where: string[] = [
+    // Kandidát = trigram podobný NEBO fulltext match (websearch nad simple config).
+    `(similarity(predmet, $1) >= $2 OR search_vector @@ websearch_to_tsquery('simple', $1))`,
+  ];
+
+  if (onlyWithPrice) {
+    where.push('(cena_bez_dph IS NOT NULL OR cena_s_dph IS NOT NULL)');
+  }
+  if (kategorie) {
+    params.push(kategorie);
+    where.push(`komodita_kategorie = $${params.length}`);
+  }
+
+  params.push(limit);
+  const limitParam = `$${params.length}`;
+
+  // ORDER BY nesmí odkazovat na output-aliasy uvnitř výrazu → subquery.
+  const sql = `
+    SELECT id, zdroj, datum, zadavatel_nazev, dodavatel_nazev, dodavatel_ico,
+           predmet, komodita_kategorie, cena_bez_dph, cena_s_dph, mena, url, similarity
+    FROM (
+      SELECT id, zdroj, datum::text AS datum, zadavatel_nazev, dodavatel_nazev,
+             dodavatel_ico, predmet, komodita_kategorie,
+             cena_bez_dph, cena_s_dph, mena, url,
+             ROUND(similarity(predmet, $1)::numeric, 3)::float8 AS similarity,
+             ts_rank(search_vector, websearch_to_tsquery('simple', $1)) AS rank
+      FROM win_prices
+      WHERE ${where.join(' AND ')}
+    ) q
+    ORDER BY (rank * 2 + similarity) DESC, datum DESC NULLS LAST
+    LIMIT ${limitParam}
+  `;
+
+  const { rows } = await query<SimilarWin>(sql, params);
+  // pg vrací NUMERIC jako string → převedeme cenové sloupce na number.
+  return rows.map((r) => ({
+    ...r,
+    cena_bez_dph: r.cena_bez_dph === null ? null : Number(r.cena_bez_dph),
+    cena_s_dph: r.cena_s_dph === null ? null : Number(r.cena_s_dph),
+    similarity: Number(r.similarity),
+  }));
+}
+
+/** Agregovaná cenová statistika nad množinou podobných výher (pro pozdější nacenění). */
+export interface PriceBand {
+  pocet: number;
+  min: number | null;
+  median: number | null;
+  max: number | null;
+  prumer: number | null;
+}
+
+/**
+ * Vrátí cenové pásmo (min/median/max/průměr cen bez DPH) pro předmět.
+ * Podklad pro budoucí win-price signál v nacenění (go/no-go, doporučená cena).
+ */
+export async function priceBandForSubject(
+  predmet: string,
+  options: FindSimilarOptions = {},
+): Promise<PriceBand> {
+  const wins = await findSimilarWins(predmet, { ...options, limit: options.limit ?? 200 });
+  const ceny = wins
+    .map((w) => w.cena_bez_dph)
+    .filter((c): c is number => c !== null && c > 0)
+    .sort((a, b) => a - b);
+
+  if (ceny.length === 0) {
+    return { pocet: 0, min: null, median: null, max: null, prumer: null };
+  }
+  const mid = Math.floor(ceny.length / 2);
+  const median = ceny.length % 2 ? ceny[mid] : (ceny[mid - 1] + ceny[mid]) / 2;
+  const prumer = ceny.reduce((a, b) => a + b, 0) / ceny.length;
+  return {
+    pocet: ceny.length,
+    min: ceny[0],
+    median,
+    max: ceny[ceny.length - 1],
+    prumer: Math.round(prumer * 100) / 100,
+  };
+}
