@@ -523,11 +523,11 @@ async function main() {
         jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
       }
 
-      let parsed: any;
+      let parsed: any = null;
       try {
         parsed = JSON.parse(jsonStr);
-      } catch (parseErr) {
-        // Try to recover truncated JSON by finding the last complete polozky_match entry
+      } catch {
+        // Pokus o záchranu rozbitého JSON dořezáním k poslednímu kompletnímu záznamu.
         console.log(`  Warning: JSON parse failed, attempting recovery...`);
         const lastComplete = jsonStr.lastIndexOf('"oduvodneni_vyberu"');
         if (lastComplete > 0) {
@@ -537,20 +537,28 @@ async function main() {
             const opens = (truncated.match(/[\[{]/g) || []).length;
             const closes = (truncated.match(/[\]}]/g) || []).length;
             const closers = ']}'.repeat(Math.max(0, opens - closes));
-            const fixed = truncated + closers;
             try {
-              parsed = JSON.parse(fixed);
+              parsed = JSON.parse(truncated + closers);
               const got = parsed.polozky_match?.length ?? (parsed.kandidati ? 1 : 0);
               console.log(`  Recovery successful — parsed ${got} items`);
-            } catch {
-              throw parseErr;
-            }
-          } else {
-            throw parseErr;
+            } catch { /* recovery nevyšlo — řeší salvage níž */ }
           }
-        } else {
-          throw parseErr;
         }
+      }
+
+      // Nevalidní JSON i po recovery: stejná salvage cesta jako timeout/truncation —
+      // rozpůlit dávku (menší výstup = spolehlivější JSON), teprve pak selhat nahlas.
+      // Dřív se tady tvrdě throwlo → 188položkový match umřel po 47 min práce na JEDNÉ
+      // vadné dávce (prod, tender-1779109774773).
+      if (parsed === null) {
+        if (allowRetry && sliceItems.length > 1) {
+          const mid = Math.ceil(sliceItems.length / 2);
+          console.warn(`  ⚠ Nevalidní JSON dávky ${label} — zkouším znovu s poloviční dávkou (${sliceItems.length} → ${mid}+${sliceItems.length - mid})`);
+          await processSlice(sliceItems.slice(0, mid), globalOffset, false, `${label}a`);
+          await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
+          return;
+        }
+        throw new Error(`AI matching vrátilo nevalidní JSON i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
       }
 
       // Úplnost dávky: model musí vrátit match pro KAŽDOU položku dávky. Neúplný
