@@ -21,6 +21,7 @@ export default function CompanySettings() {
   const [error, setError] = useState('');
   const [editId, setEditId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [addHover, setAddHover] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -47,22 +48,25 @@ export default function CompanySettings() {
     }
   };
 
-  if (loading) return <div className="py-8 text-center text-gray-500">Načítání firem...</div>;
+  if (loading) return <div className="py-8 text-center" style={{ color: 'var(--text-secondary)' }}>Načítání firem...</div>;
 
   return (
     <div>
       <div className="mb-6 flex items-center justify-between">
-        <h2 className="text-xl font-bold text-gray-900">Správa firem</h2>
+        <h2 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>Správa firem</h2>
         <button
           onClick={() => { setShowForm(!showForm); setEditId(null); }}
-          className="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          onMouseEnter={() => setAddHover(true)}
+          onMouseLeave={() => setAddHover(false)}
+          className="flex items-center gap-2 rounded px-4 py-2 text-sm font-medium"
+          style={{ background: addHover ? 'var(--accent-hover)' : 'var(--accent)', color: 'var(--text-on-accent)' }}
         >
           {showForm ? <><X className="h-4 w-4" /> Zrušit</> : <><Plus className="h-4 w-4" /> Přidat firmu</>}
         </button>
       </div>
 
       {error && (
-        <div className="mb-4 rounded bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+        <div className="mb-4 rounded px-3 py-2 text-sm" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{error}</div>
       )}
 
       {showForm && (
@@ -84,7 +88,7 @@ export default function CompanySettings() {
           />
         ))}
         {companies.length === 0 && !showForm && (
-          <div className="py-8 text-center text-gray-500">Žádné firmy. Přidejte firmu výše.</div>
+          <div className="py-8 text-center" style={{ color: 'var(--text-secondary)' }}>Žádné firmy. Přidejte firmu výše.</div>
         )}
       </div>
     </div>
@@ -114,6 +118,8 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
   });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const [submitHover, setSubmitHover] = useState(false);
+  const [cancelHover, setCancelHover] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -137,12 +143,12 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
     setForm(prev => ({ ...prev, [key]: e.target.value }));
 
   return (
-    <form onSubmit={handleSubmit} className="mb-6 rounded-lg border bg-gray-50 p-4">
-      <h3 className="mb-3 text-sm font-semibold text-gray-700">
+    <form onSubmit={handleSubmit} className="mb-6 rounded-lg p-4" style={{ border: '1px solid var(--border-default)', background: 'var(--surface-sunken)' }}>
+      <h3 className="mb-3 text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
         {company ? 'Upravit firmu' : 'Nová firma'}
       </h3>
       {formError && (
-        <div className="mb-3 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{formError}</div>
+        <div className="mb-3 rounded px-2 py-1 text-xs" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{formError}</div>
       )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="Název firmy *" value={form.nazev} onChange={set('nazev')} required placeholder="Make more s.r.o." />
@@ -160,14 +166,26 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
         <button
           type="submit"
           disabled={saving}
-          className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
+          onMouseEnter={() => setSubmitHover(true)}
+          onMouseLeave={() => setSubmitHover(false)}
+          className="rounded px-4 py-2 text-sm font-medium"
+          style={{
+            background: submitHover && !saving ? 'var(--green-700)' : 'var(--success-solid)',
+            color: 'var(--text-on-accent)', opacity: saving ? 0.5 : 1,
+          }}
         >
           {saving ? 'Ukládám...' : company ? 'Uložit' : 'Vytvořit'}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="rounded border px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+          onMouseEnter={() => setCancelHover(true)}
+          onMouseLeave={() => setCancelHover(false)}
+          className="rounded px-4 py-2 text-sm"
+          style={{
+            border: '1px solid var(--border-default)', color: 'var(--text-secondary)',
+            background: cancelHover ? 'var(--surface-hover)' : 'transparent',
+          }}
         >
           Zrušit
         </button>
@@ -179,10 +197,13 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
 function Field({ label, className, ...props }: { label: string; className?: string } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <div className={className}>
-      <label className="mb-1 block text-xs font-medium text-gray-600">{label}</label>
+      <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</label>
       <input
         {...props}
-        className="w-full rounded border px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        className="w-full rounded px-3 py-2 text-sm focus:outline-none"
+        style={{ border: '1px solid var(--border-strong)', background: 'var(--surface-card)', color: 'var(--text-primary)' }}
+        onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--border-focus)'; props.onFocus?.(e); }}
+        onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border-strong)'; props.onBlur?.(e); }}
       />
     </div>
   );
@@ -199,14 +220,17 @@ interface CompanyCardProps {
 }
 
 function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyCardProps) {
+  const [editHover, setEditHover] = useState(false);
+  const [deleteHover, setDeleteHover] = useState(false);
+
   return (
-    <div className="rounded-lg border bg-white">
+    <div className="rounded-lg" style={{ border: '1px solid var(--border-default)', background: 'var(--surface-card)' }}>
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-3">
-          <Building2 className="h-5 w-5 text-gray-400" />
+          <Building2 className="h-5 w-5" style={{ color: 'var(--text-tertiary)' }} />
           <div>
-            <div className="font-medium text-gray-900">{company.nazev}</div>
-            <div className="text-xs text-gray-500">
+            <div className="font-medium" style={{ color: 'var(--text-primary)' }}>{company.nazev}</div>
+            <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
               IČO: {company.ico} | {company.jednajici_osoba}
             </div>
           </div>
@@ -214,15 +238,29 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
         <div className="flex items-center gap-2">
           <button
             onClick={onEdit}
-            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            onMouseEnter={() => setEditHover(true)}
+            onMouseLeave={() => setEditHover(false)}
+            className="rounded p-1.5"
+            style={{
+              color: editHover ? 'var(--text-secondary)' : 'var(--text-tertiary)',
+              background: editHover ? 'var(--surface-hover)' : 'transparent',
+            }}
             title="Upravit"
+            aria-label="Upravit firmu"
           >
             <Pencil className="h-4 w-4" />
           </button>
           <button
             onClick={onDelete}
-            className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-500"
+            onMouseEnter={() => setDeleteHover(true)}
+            onMouseLeave={() => setDeleteHover(false)}
+            className="rounded p-1.5"
+            style={{
+              color: deleteHover ? 'var(--danger-solid)' : 'var(--text-tertiary)',
+              background: deleteHover ? 'var(--danger-soft-bg)' : 'transparent',
+            }}
             title="Smazat"
+            aria-label="Smazat firmu"
           >
             <Trash2 className="h-4 w-4" />
           </button>
@@ -230,7 +268,7 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
       </div>
 
       {isEditing && (
-        <div className="border-t px-4 py-3">
+        <div className="px-4 py-3" style={{ borderTop: '1px solid var(--border-default)' }}>
           <CompanyForm
             company={company}
             onSave={async () => { onEdit(); await onSaved(); }}
@@ -292,68 +330,118 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
   };
 
   return (
-    <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-3">
+    <div className="mt-4 rounded-lg p-3" style={{ border: '1px dashed var(--border-strong)' }}>
       {docError && (
-        <div className="mb-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{docError}</div>
+        <div className="mb-2 rounded px-2 py-1 text-xs" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{docError}</div>
       )}
-      <h4 className="mb-3 text-xs font-semibold text-gray-600 uppercase">Výchozí kvalifikační doklady</h4>
+      <h4 className="mb-3 text-xs font-semibold uppercase" style={{ color: 'var(--text-secondary)' }}>Výchozí kvalifikační doklady</h4>
       <div className="space-y-2">
         {DOC_SLOTS.map(slot => {
           const slotEntries = entries.filter(e => e.slot === slot.type);
           const isUploading = uploading === slot.type;
 
           return (
-            <div key={slot.type} className="flex items-start gap-3 rounded px-2 py-1.5 hover:bg-gray-50">
-              {/* Label */}
-              <div className="w-56 shrink-0 text-xs font-medium text-gray-600 pt-0.5">
-                {slot.label}
-              </div>
-
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                {slotEntries.length === 0 ? (
-                  <div className="flex items-center gap-1.5 text-xs text-amber-600">
-                    <AlertTriangle className="h-3 w-3" />
-                    <span>Nenahrán</span>
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {slotEntries.map(entry => (
-                      <div key={entry.filename} className="flex items-center gap-2 text-xs">
-                        <Check className="h-3 w-3 text-green-600 shrink-0" />
-                        <FileText className="h-3 w-3 text-gray-400 shrink-0" />
-                        <span className="truncate text-gray-700">{entry.filename}</span>
-                        <button
-                          onClick={() => handleDelete(entry.slot, entry.filename)}
-                          className="ml-auto shrink-0 text-gray-400 hover:text-red-500"
-                          title="Smazat"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Upload button */}
-              <label className="shrink-0 flex cursor-pointer items-center gap-1 rounded border border-dashed border-gray-300 px-2 py-1 text-xs text-gray-500 hover:border-blue-400 hover:text-blue-600">
-                <Upload className="h-3 w-3" />
-                {isUploading ? '...' : slot.multi && slotEntries.length > 0 ? '+ Nahrát' : 'Nahrát'}
-                <input
-                  ref={(el) => { fileRefs.current[slot.type] = el; }}
-                  type="file"
-                  multiple={slot.multi}
-                  accept=".pdf,.docx,.doc,.xls,.xlsx,.jpg,.jpeg,.png"
-                  onChange={(e) => handleUpload(slot.type, e)}
-                  className="hidden"
-                  disabled={isUploading}
-                />
-              </label>
-            </div>
+            <DocSlotRow
+              key={slot.type}
+              slot={slot}
+              slotEntries={slotEntries}
+              isUploading={isUploading}
+              fileRefs={fileRefs}
+              onUpload={handleUpload}
+              onDelete={handleDelete}
+            />
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function DocSlotRow({
+  slot, slotEntries, isUploading, fileRefs, onUpload, onDelete,
+}: {
+  slot: (typeof DOC_SLOTS)[number];
+  slotEntries: DocSlotEntry[];
+  isUploading: boolean;
+  fileRefs: React.MutableRefObject<Record<string, HTMLInputElement | null>>;
+  onUpload: (slotType: string, e: React.ChangeEvent<HTMLInputElement>) => void;
+  onDelete: (slot: string, filename: string) => void;
+}) {
+  const [rowHover, setRowHover] = useState(false);
+  const [uploadHover, setUploadHover] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setRowHover(true)}
+      onMouseLeave={() => setRowHover(false)}
+      className="flex items-start gap-3 rounded px-2 py-1.5"
+      style={{ background: rowHover ? 'var(--surface-hover)' : 'transparent' }}
+    >
+      {/* Label */}
+      <div className="w-56 shrink-0 text-xs font-medium pt-0.5" style={{ color: 'var(--text-secondary)' }}>
+        {slot.label}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        {slotEntries.length === 0 ? (
+          <div className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--warning-solid)' }}>
+            <AlertTriangle className="h-3 w-3" />
+            <span>Nenahrán</span>
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {slotEntries.map(entry => (
+              <DocEntryRow key={entry.filename} entry={entry} onDelete={onDelete} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Upload button */}
+      <label
+        onMouseEnter={() => setUploadHover(true)}
+        onMouseLeave={() => setUploadHover(false)}
+        className="shrink-0 flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs"
+        style={{
+          border: `1px dashed ${uploadHover ? 'var(--blue-400)' : 'var(--border-strong)'}`,
+          color: uploadHover ? 'var(--accent)' : 'var(--text-secondary)',
+        }}
+      >
+        <Upload className="h-3 w-3" />
+        {isUploading ? '...' : slot.multi && slotEntries.length > 0 ? '+ Nahrát' : 'Nahrát'}
+        <input
+          ref={(el) => { fileRefs.current[slot.type] = el; }}
+          type="file"
+          multiple={slot.multi}
+          accept=".pdf,.docx,.doc,.xls,.xlsx,.jpg,.jpeg,.png"
+          onChange={(e) => onUpload(slot.type, e)}
+          className="hidden"
+          disabled={isUploading}
+        />
+      </label>
+    </div>
+  );
+}
+
+function DocEntryRow({ entry, onDelete }: { entry: DocSlotEntry; onDelete: (slot: string, filename: string) => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <Check className="h-3 w-3 shrink-0" style={{ color: 'var(--success-solid)' }} />
+      <FileText className="h-3 w-3 shrink-0" style={{ color: 'var(--text-tertiary)' }} />
+      <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{entry.filename}</span>
+      <button
+        onClick={() => onDelete(entry.slot, entry.filename)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        className="ml-auto shrink-0"
+        style={{ color: hover ? 'var(--danger-solid)' : 'var(--text-tertiary)' }}
+        title="Smazat"
+        aria-label={`Smazat dokument ${entry.filename}`}
+      >
+        <Trash2 className="h-3 w-3" />
+      </button>
     </div>
   );
 }
