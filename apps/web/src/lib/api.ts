@@ -290,6 +290,26 @@ export async function bulkUpdateItemPriceOverride(
   return res.json();
 }
 
+/**
+ * Ruční výběr produktového kandidáta operátorem (AI někdy vybere špatný produkt).
+ * itemIndex = `polozka_index` položky (u legacy single-product formátu se ignoruje, pošli -1).
+ * Když měla položka potvrzenou cenu, backend ji smaže a vrátí `priceCleared: true`.
+ */
+export async function selectProductCandidate(
+  id: string, itemIndex: number, candidateIndex: number
+): Promise<{ success: boolean; priceCleared?: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/product-match/select`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ itemIndex, candidateIndex }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Nepodařilo se vybrat produkt');
+  }
+  return res.json();
+}
+
 export async function deleteTender(id: string): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) {

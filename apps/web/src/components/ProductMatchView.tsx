@@ -6,6 +6,7 @@ import {
   updatePriceOverride,
   updateItemPriceOverride,
   bulkUpdateItemPriceOverride,
+  selectProductCandidate,
   verifyPrices,
   getJobStatus,
   JobNotFoundError,
@@ -306,16 +307,33 @@ interface SingleItemViewProps {
 }
 
 function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemViewProps) {
+  const { toast } = useToast();
   const selectedProduct = match?.kandidati?.[match?.vybrany_index ?? 0];
   const existingOverride = match?.cenova_uprava;
   const overeni = match?.overeni_ceny;
   // Návrh ceny z webu předvyplněný přes „Použít"; přednost před cenova_uprava do potvrzení.
   const [webDraft, setWebDraft] = useState<PriceOverride | null>(null);
+  const [selecting, setSelecting] = useState(false);
 
   const handleConfirm = useCallback(async (priceData: PriceOverrideData) => {
     await updatePriceOverride(tenderId, priceData);
     queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
   }, [tenderId, queryClient]);
+
+  // Legacy single-product: itemIndex se na backendu ignoruje, posíláme -1 (konvence jako verify-prices).
+  const handleSelect = useCallback(async (candidateIndex: number) => {
+    if (selecting) return;
+    setSelecting(true);
+    try {
+      const { priceCleared } = await selectProductCandidate(tenderId, -1, candidateIndex);
+      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      if (priceCleared) toast('Vybrán jiný produkt — cenu je potřeba znovu potvrdit', 'info');
+    } catch (err: unknown) {
+      toast(getErrorMessage(err), 'danger');
+    } finally {
+      setSelecting(false);
+    }
+  }, [selecting, tenderId, queryClient, toast]);
 
   return (
     <div className="space-y-6">
@@ -331,6 +349,8 @@ function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemView
             key={i}
             product={product}
             isSelected={i === match.vybrany_index}
+            onSelect={() => handleSelect(i)}
+            selecting={selecting}
           />
         ))}
       </div>
@@ -373,6 +393,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
   // Hromadné potvrzení cen: výběr řádků (checkboxy) + probíhající uložení.
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [bulkSaving, setBulkSaving] = useState(false);
+  // Právě ukládaný výběr kandidáta — klíč = polozka_index (backend klíčuje stejně).
+  const [selectingItem, setSelectingItem] = useState<number | null>(null);
 
   const toggleSelect = (index: number) => {
     setSelected((prev) => {
@@ -410,6 +432,22 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
     await updateItemPriceOverride(tenderId, itemIndex, priceData);
     queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
   }, [tenderId, queryClient]);
+
+  // Ruční přepnutí kandidáta. Klíčujeme přes `polozka_index` (ne pozici v poli) — backend hledá
+  // položku stejně. Když měla položka potvrzenou cenu, backend ji smaže → upozorni operátora.
+  const handleSelectCandidate = useCallback(async (polozkaIndex: number, candidateIndex: number) => {
+    if (selectingItem !== null) return;
+    setSelectingItem(polozkaIndex);
+    try {
+      const { priceCleared } = await selectProductCandidate(tenderId, polozkaIndex, candidateIndex);
+      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      if (priceCleared) toast('Vybrán jiný produkt — cenu je potřeba znovu potvrdit', 'info');
+    } catch (err: unknown) {
+      toast(getErrorMessage(err), 'danger');
+    } finally {
+      setSelectingItem(null);
+    }
+  }, [selectingItem, tenderId, queryClient, toast]);
 
   const polozky = match.polozky_match!;
 
@@ -678,6 +716,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                       key={i}
                       product={product}
                       isSelected={i === pm.vybrany_index}
+                      onSelect={() => handleSelectCandidate(pm.polozka_index, i)}
+                      selecting={selectingItem === pm.polozka_index}
                     />
                   ))}
                 </div>
