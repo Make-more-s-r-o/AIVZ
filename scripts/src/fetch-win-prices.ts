@@ -3,8 +3,12 @@
  *
  * Prototyp podporuje zdroj `registr_smluv` — denní XML dumpy z data.smlouvy.gov.cz.
  * Stáhne index.xml, vybere denní dumpy v daném rozsahu, naparsuje záznamy
- * (zadavatel = subjekt, dodavatel = smluvní strana, předmět, cena, datum),
- * heuristicky kategorizuje komoditu a idempotentně upsertne do DB.
+ * (strany smlouvy, předmět, cena, datum), heuristicky kategorizuje komoditu
+ * a idempotentně upsertne do DB.
+ *
+ * POZOR: role stran (zadavatel vs. dodavatel/vítěz) NENÍ v Registru smluv dána
+ * pořadím — určuje se heuristikou (resolvePartyRoles), viz „Známá omezení"
+ * v docs/win-price-design.md.
  *
  * NEVOLÁ žádné AI API — kategorizace je čistě klíčovými slovy.
  *
@@ -19,6 +23,7 @@ import { closePool } from './lib/db.js';
 import {
   upsertWinPrices,
   categorizeCommodity,
+  resolvePartyRoles,
   getWinPriceStats,
   type WinPriceRecord,
 } from './lib/winprice-store.js';
@@ -103,15 +108,26 @@ function parseDump(xml: string, limit: number, collected: number): WinPriceRecor
     const predmet = z.find('smlouva > predmet').first().text().trim();
     if (!predmet) return; // bez předmětu je záznam pro win-price bezcenný
 
-    // zadavatel = subjekt s uveřejňovací povinností (typicky kupující/veřejný subjekt)
+    // POZOR: role stran NENÍ dána pořadím. `<subjekt>` = ten, kdo má uveřejňovací
+    // povinnost a smlouvu publikoval — často je to DODAVATEL, ne kupující (ověřeno
+    // na reálném dumpu). Role proto určujeme heuristikou (resolvePartyRoles), ne
+    // natvrdo subjekt→zadavatel. Viz docs/win-price-design.md „Známá omezení".
     const subjekt = z.find('smlouva > subjekt').first();
-    const zadavatel_nazev = subjekt.find('nazev').first().text().trim() || null;
-    const zadavatel_ico = subjekt.find('ico').first().text().trim() || null;
-
-    // dodavatel = smluvní strana (protistrana / vítěz)
+    const subjektParty = {
+      nazev: subjekt.find('nazev').first().text().trim() || null,
+      ico: subjekt.find('ico').first().text().trim() || null,
+    };
     const strana = z.find('smlouva > smluvniStrana').first();
-    const dodavatel_nazev = strana.find('nazev').first().text().trim() || null;
-    const dodavatel_ico = strana.find('ico').first().text().trim() || null;
+    const stranaParty = {
+      nazev: strana.find('nazev').first().text().trim() || null,
+      ico: strana.find('ico').first().text().trim() || null,
+    };
+    const role = resolvePartyRoles(subjektParty, stranaParty);
+    const { zadavatel, dodavatel } = role;
+    const zadavatel_nazev = zadavatel.nazev;
+    const zadavatel_ico = zadavatel.ico;
+    const dodavatel_nazev = dodavatel.nazev;
+    const dodavatel_ico = dodavatel.ico;
 
     // datum: uzavření smlouvy, fallback zveřejnění
     let datum: string | null = z.find('smlouva > datumUzavreni').first().text().trim() || null;
@@ -154,6 +170,11 @@ function parseDump(xml: string, limit: number, collected: number): WinPriceRecor
         idSmlouvy: idSmlouvy || null,
         evidencniCisloZakazky: evidencniCislo,
         casZverejneni: z.find('casZverejneni').first().text().trim() || null,
+        // Audit role stran: true = heuristika roli jednoznačně určila (právě jedna
+        // strana je veřejný zadavatel); false = nespolehlivé, zachováno pořadí subjekt→zadavatel.
+        role_spolehliva: role.spolehlive,
+        subjekt_ico: subjektParty.ico,
+        smluvni_strana_ico: stranaParty.ico,
       },
     });
   });

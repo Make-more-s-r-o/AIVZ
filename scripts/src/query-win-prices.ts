@@ -60,6 +60,11 @@ async function main(): Promise<void> {
     if (w.url) console.log(`     ${w.url}`);
   }
 
+  console.log(
+    '\nPozn.: role zadavatel/dodavatel je určena heuristikou z Registru smluv ' +
+      '(pořadí stran není spolehlivé) — ověřte přes odkaz na smlouvu.',
+  );
+
   await closePool();
 }
 

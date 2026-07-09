@@ -41,8 +41,9 @@ data.smlouvy.gov.cz/index.xml            (seznam dumpů: denní + měsíční)
         │  fetch-win-prices.ts --source=registr_smluv --from --to --limit
         ▼
   denní dump_YYYY_MM_DD.xml  ──parse (cheerio, xml mode)──► WinPriceRecord[]
-        │                         ├─ zadavatel = <subjekt> (uveřejňovatel/kupující)
-        │                         ├─ dodavatel = <smluvniStrana> (protistrana/vítěz)
+        │                         ├─ strany = <subjekt> + <smluvniStrana>
+        │                         │    role (zadavatel/dodavatel) = heuristika resolvePartyRoles()
+        │                         │    (pořadí NENÍ spolehlivé — viz Známá omezení)
         │                         ├─ predmet, datumUzavreni, hodnotaBezDph/VcetneDph, ciziMena
         │                         └─ komodita_kategorie = heuristika klíč. slovy (BEZ AI)
         ▼
@@ -94,6 +95,13 @@ Ukázkové dotazy (`query-win-prices.ts`):
 ```
 
 Dotazy vracejí reálné, smysluplné výsledky. `vrtačka` zároveň ukazuje limit trigramů (fuzzy match „vrtaná studna") → v produkci ošetřit kategorií + CPV filtrem.
+
+## 5b. Známá omezení
+
+- **Role stran (zadavatel vs. dodavatel) není v Registru smluv spolehlivá.** `<subjekt>` je ten, kdo má uveřejňovací povinnost a smlouvu publikoval — může to být kterákoli strana. Na reálném dumpu (`dump_2025_12_17.xml`) je v mnoha záznamech `<subjekt>` naopak DODAVATEL (např. PHOENIX lékárenský velkoobchod) a `<smluvniStrana>` KUPUJÍCÍ (nemocnice). Proto **nelze** natvrdo mapovat `subjekt→zadavatel` / `smluvniStrana→dodavatel` — dělalo by to systematickou inverzi v indexovaných/dotazovaných sloupcích `dodavatel_ico`/`dodavatel_nazev` (zobrazovaných jako „vítěz").
+  - **Řešení v prototypu:** `resolvePartyRoles()` (winprice-store.ts) roli určuje heuristikou — pokud právě jedna strana vypadá podle názvu jako veřejný zadavatel (nemocnice, město, kraj, ministerstvo, úřad, škola, …), přiřadí jí roli zadavatele a druhé dodavatele. Když vypadají obě/žádná, roli nelze určit → zachová se vstupní pořadí a do `raw.role_spolehliva=false` se zapíše příznak nespolehlivosti (audit). CLI výstup navíc tiskne caveat, že role je heuristická.
+  - **Zbytkové riziko:** heuristika je jen jmenná — dodavatele s „úřad"/„správa" v názvu nebo obce nakupující od jiné obce může splést; nespolehlivé záznamy nadále nesou pořadové mapování. **Nepoužívat `dodavatel_*` jako spolehlivého vítěze** bez ověření přes `url` na smlouvu.
+  - **Produkční fix (§7):** křížit s VVZ/ISVZ award notice (nese jednoznačného vítěze) přes IČO + evidenční číslo zakázky, případně detekovat veřejného zadavatele proti registru subjektů (ne jen podle názvu).
 
 ## 6. Návrh napojení (NEIMPLEMENTOVÁNO)
 
