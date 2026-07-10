@@ -181,7 +181,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
     enabled: steps.validate === 'done',
   });
 
-  const decision = normalizeDecision(analysis?.doporuceni?.rozhodnuti);
+  const decision = normalizeDecision(analysis?.go_no_go?.doporuceni ?? analysis?.doporuceni?.rozhodnuti);
   const nazev = analysis?.zakazka?.nazev || summary?.name || tenderId;
   const evidence = analysis?.zakazka?.evidencni_cislo || tenderId;
 
@@ -213,9 +213,12 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <StageBadge status={currentStage} />
             {decision && (
-              <Badge tone={decision === 'GO' ? 'success' : decision === 'NOGO' ? 'danger' : 'warning'}>
-                {decision === 'ZVAZIT' ? 'ZVÁŽIT' : decision}
-              </Badge>
+              <DecisionPill
+                decision={decision}
+                score={analysis?.go_no_go?.score}
+                reasons={analysis?.go_no_go?.duvody}
+                style={{ padding: '3px 10px', fontSize: 'var(--font-size-xs)' }}
+              />
             )}
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
               {evidence}
@@ -311,7 +314,12 @@ function PrehledTab({ analysis, decision }: { analysis: TenderAnalysis | undefin
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {decision && (
-        <DecisionPill decision={decision} reason={analysis.doporuceni?.oduvodneni} />
+        <DecisionPill
+          decision={decision}
+          score={analysis.go_no_go?.score}
+          reasons={analysis.go_no_go?.duvody}
+          reason={analysis.doporuceni?.oduvodneni}
+        />
       )}
 
       <Card title="Základní údaje">

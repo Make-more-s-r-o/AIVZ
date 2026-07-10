@@ -46,6 +46,25 @@ export interface TenderAnalysisSummary {
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null;
   rozhodnuti: string | null;
+  go_no_go?: GoNoGo | null;
+}
+
+export interface GoNoGo {
+  score: number;
+  doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+  duvody: string[];
+}
+
+export interface HlidacTenderCandidate {
+  id: string;
+  nazev: string;
+  zadavatel: string;
+  budget: number | null;
+  lhuta: string | null;
+  stavVZ: string | null;
+  url: string;
+  dokumenty: Array<{ nazev: string; url: string }>;
+  cpv: unknown[];
 }
 
 export interface TenderSummary {
@@ -116,6 +135,10 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 export async function getTenders(): Promise<TenderSummary[]> {
   return fetchJson('/tenders');
+}
+
+export async function getHlidacTenders(query: string): Promise<HlidacTenderCandidate[]> {
+  return fetchJson(`/monitoring/hlidac?q=${encodeURIComponent(query)}`);
 }
 
 /**

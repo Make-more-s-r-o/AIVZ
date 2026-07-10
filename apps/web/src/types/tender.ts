@@ -23,6 +23,11 @@ export interface TenderAnalysis {
   technicke_pozadavky: Array<{ parametr: string; pozadovana_hodnota: string; jednotka?: string | null; povinny: boolean }>;
   rizika: Array<{ popis: string; zavaznost: string; mitigace: string }>;
   doporuceni: { rozhodnuti: string; oduvodneni: string; klicove_body: string[] };
+  go_no_go?: {
+    score: number;
+    doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+    duvody: string[];
+  };
 }
 
 export interface ProductCandidate {

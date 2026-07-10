@@ -6,6 +6,10 @@ import { logCost } from './lib/cost-tracker.js';
 import { TenderAnalysisSchema, type ExtractedText, type Cast } from './lib/types.js';
 import { ANALYZE_TENDER_SYSTEM, buildAnalyzeUserMessage } from './prompts/analyze-tender.js';
 import { parseSoupis, type SoupisResult } from './parse-soupis.js';
+import { scoreGoNoGo } from './lib/go-no-go.js';
+import { getCompany, getTenderCompanyId } from './lib/company-store.js';
+import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
+import { closePool } from './lib/db.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -123,6 +127,23 @@ async function main() {
     }
   }
 
+  // Scorer zůstává čistý: firemní profil, čas extrakce a historie cen se načtou zde
+  // a předají se mu jako vstup. Nedostupná DB pouze vynechá win-price signál.
+  const companyId = await getTenderCompanyId(tenderId);
+  const company = (companyId ? await getCompany(companyId) : null) ?? await getCompany('default');
+  let winBand: PriceBand | undefined;
+  try {
+    winBand = await priceBandForSubject(analysis.zakazka.predmet);
+  } catch {
+    console.warn('  Win-price historie není dostupná — skóre ji vynechá.');
+  }
+  analysis.go_no_go = scoreGoNoGo({
+    ...analysis,
+    extractedAt: extracted.extractedAt,
+    obory: company?.obory,
+    keyword_filters: company?.keyword_filters,
+  }, undefined, winBand);
+
   const outputPath = join(outputDir, 'analysis.json');
   await writeFile(outputPath, JSON.stringify(analysis, null, 2), 'utf-8');
 
@@ -146,11 +167,19 @@ async function main() {
   console.log(`  Technical requirements: ${analysis.technicke_pozadavky.length}`);
   console.log(`  Risks: ${analysis.rizika.length}`);
   console.log(`  Decision: ${analysis.doporuceni.rozhodnuti}`);
+  console.log(`  Go/no-go score: ${analysis.go_no_go.score}/100 (${analysis.go_no_go.doporuceni})`);
   console.log(`  AI cost: ${result.costCZK.toFixed(2)} CZK`);
   console.log(`Output: ${outputPath}`);
 }
 
-main().catch((err) => {
-  console.error('Analysis failed:', err);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    // Win-price lookup (priceBandForSubject) otevře pooled DB spojení; bez zavření pool drží
+    // event loop ~30 s (idleTimeoutMillis) → analyze krok by v produkci končil o 30 s později.
+    await closePool();
+  })
+  .catch(async (err) => {
+    console.error('Analysis failed:', err);
+    await closePool().catch(() => {});
+    process.exit(1);
+  });
