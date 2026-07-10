@@ -158,7 +158,11 @@ async function main() {
     }, {} as Record<string, number>);
     console.log(`  Multi-product mode: ${filteredMatch.length} items (${Object.entries(itemTypes).map(([k,v]) => `${v} ${k}`).join(', ')})`);
     selectedProducts = filteredMatch.map(pm => {
-      const product = pm.kandidati[pm.vybrany_index];
+      // Defenzivně proti neplatnému vybrany_index (mimo pole) — fallback na 0. kandidáta,
+      // ať generování dokumentů nespadne na undefined.product (viz match-product clamp).
+      const idx = Number.isInteger(pm.vybrany_index) && pm.vybrany_index >= 0 && pm.vybrany_index < (pm.kandidati?.length ?? 0)
+        ? pm.vybrany_index : 0;
+      const product = pm.kandidati?.[idx] ?? { vyrobce: '', model: pm.polozka_nazev, popis: pm.polozka_nazev, cena_bez_dph: 0, cena_s_dph: 0 } as any;
       const override = pm.cenova_uprava;
       return {
         polozka: pm.polozka_nazev,
