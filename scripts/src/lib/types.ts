@@ -93,6 +93,11 @@ export const TenderAnalysisSchema = z.object({
     oduvodneni: z.string(),
     klicove_body: z.array(z.string()),
   }),
+  go_no_go: z.object({
+    score: z.number().min(0).max(100),
+    doporuceni: z.enum(['GO', 'ZVAZIT', 'NOGO']),
+    duvody: z.array(z.string()),
+  }).optional(),
 });
 
 // Čísla z AI výstupů občas přijdou jako string („12 990,50 Kč", „1.299,-") — bez koerce

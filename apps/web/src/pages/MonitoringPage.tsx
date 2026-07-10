@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Inbox, FileText, ArrowRight } from 'lucide-react';
+import { Inbox, FileText, ArrowRight, Radar, ExternalLink } from 'lucide-react';
 import FileUpload from '../components/FileUpload';
-import { Card, useToast } from '../components/ui';
+import { Button, Card, useToast } from '../components/ui';
 import { StageBadge } from '../components/crm';
-import { getTenders, uploadFiles, type TenderSummary } from '../lib/api';
+import { getHlidacTenders, getTenders, uploadFiles, type HlidacTenderCandidate, type TenderSummary } from '../lib/api';
 import { effectiveStage } from '../lib/crm-adapters';
+import { fmtCZK } from '../lib/format';
+
+const DEFAULT_HLIDAC_QUERY = '(CPV:30000000 OR CPV:48000000 OR CPV:72000000 OR "informační technologie" OR "IT vybavení" OR "tiskárna" OR "projektor" OR "počítač" OR "notebook" OR "server") AND stavVZ:zadpisp';
 
 export interface MonitoringPageProps {
   onOpen?: (id: string) => void;
@@ -25,15 +28,15 @@ const STEP_STATUS_LABEL: Record<string, string> = {
 };
 
 /**
- * Monitoring = ruční ingest inbox. Automatické sledování zdrojů (Hlídač státu, NEN,
- * TenderArena…) je pozdější milník; do té doby je vstup zakázek manuální: nahraj
- * zadávací dokumentaci a otevři zakázku ke zpracování. Nedokončené (bez hotové
- * analýzy) se řadí nahoru jako „čeká na zpracování".
+ * Monitoring spojuje ruční ingest s živým přehledem kandidátů z Hlídače státu.
+ * Nedokončené zakázky bez analýzy se řadí nahoru jako „čeká na zpracování".
  */
 export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [uploading, setUploading] = useState(false);
+  const [loadingHlidac, setLoadingHlidac] = useState(false);
+  const [hlidacResults, setHlidacResults] = useState<HlidacTenderCandidate[] | null>(null);
 
   const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
 
@@ -59,6 +62,18 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     }
   }
 
+  async function handleLoadHlidac() {
+    if (loadingHlidac) return;
+    setLoadingHlidac(true);
+    try {
+      setHlidacResults(await getHlidacTenders(DEFAULT_HLIDAC_QUERY));
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Načtení z Hlídače selhalo', 'danger');
+    } finally {
+      setLoadingHlidac(false);
+    }
+  }
+
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto' }}>
       <div>
@@ -66,17 +81,36 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
           Monitoring
         </h1>
         <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', marginTop: 2 }}>
-          Ruční ingest zakázek — nahrajte zadávací dokumentaci a spusťte zpracování. Automatické
-          napojení zdrojů (Hlídač státu, NEN, TenderArena…) je v přípravě.
+          Nahrajte zadávací dokumentaci ručně nebo načtěte nové kandidáty z Hlídače státu.
         </p>
       </div>
 
       {/* Upload CTA */}
       <div style={{ marginTop: 20 }}>
-        <Card title="Nahrát novou zakázku">
+        <Card
+          title="Nahrát novou zakázku"
+          action={(
+            <Button variant="secondary" size="sm" iconLeft={<Radar size={15} />} onClick={handleLoadHlidac} disabled={loadingHlidac}>
+              {loadingHlidac ? 'Načítám…' : 'Načíst z Hlídače'}
+            </Button>
+          )}
+        >
           <FileUpload onUpload={handleUpload} isUploading={uploading} />
         </Card>
       </div>
+
+      {hlidacResults !== null && (
+        <div style={{ marginTop: 20 }}>
+          <SectionTitle>Kandidáti z Hlídače {hlidacResults.length > 0 && <Count n={hlidacResults.length} />}</SectionTitle>
+          {hlidacResults.length === 0 ? (
+            <Muted>Bez výsledků</Muted>
+          ) : (
+            <CardGrid>
+              {hlidacResults.map((candidate) => <HlidacCard key={candidate.id} candidate={candidate} />)}
+            </CardGrid>
+          )}
+        </div>
+      )}
 
       {/* Fronta ke zpracování */}
       <div style={{ marginTop: 20 }}>
@@ -102,6 +136,43 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
         </div>
       )}
     </div>
+  );
+}
+
+function HlidacCard({ candidate }: { candidate: HlidacTenderCandidate }) {
+  return (
+    <a
+      href={candidate.url}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 8, padding: 14, textDecoration: 'none',
+        background: 'var(--surface-card)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-lg)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <span style={{
+          flexShrink: 0, width: 32, height: 32, borderRadius: 'var(--radius-md)', background: 'var(--accent-soft-bg)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)',
+        }}>
+          <Radar size={16} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+            {candidate.nazev}
+          </div>
+          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>
+            {candidate.zadavatel}
+          </div>
+        </div>
+        <ExternalLink size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
+        <span>{candidate.budget != null ? fmtCZK(candidate.budget) : 'Hodnota neuvedena'}</span>
+        <span>{candidate.lhuta ? `Lhůta: ${candidate.lhuta}` : 'Lhůta neuvedena'}</span>
+        {candidate.dokumenty.length > 0 && <span>{candidate.dokumenty.length} dokumentů</span>}
+      </div>
+    </a>
   );
 }
 

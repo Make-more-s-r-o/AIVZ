@@ -58,6 +58,7 @@ import { getImportPreview, runImport, type ColumnMapping } from './lib/csv-impor
 import { generateMissingEmbeddings } from './lib/embedding-service.js';
 import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
+import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -609,6 +610,9 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 
 // --- User management endpoints ---
 
+// GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
+app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
+
 // GET /api/users - list all users
 app.get('/api/users', requireJwt, async (_req, res) => {
   try {
@@ -720,6 +724,7 @@ app.get('/api/tenders', async (req, res) => {
               zadavatel_nazev: string | null; zadavatel_ico: string | null;
               predpokladana_hodnota: number | null; lhuta_nabidek: string | null;
               rozhodnuti: string | null;
+              go_no_go: { score: number; doporuceni: 'GO' | 'ZVAZIT' | 'NOGO'; duvody: string[] } | null;
             } | null = null;
             if ((pipeline as any)?.steps?.analyze === 'done') {
               try {
@@ -732,6 +737,7 @@ app.get('/api/tenders', async (req, res) => {
                   predpokladana_hodnota: a?.zakazka?.predpokladana_hodnota ?? null,
                   lhuta_nabidek: a?.terminy?.lhuta_nabidek ?? null,
                   rozhodnuti: a?.doporuceni?.rozhodnuti ?? null,
+                  go_no_go: a?.go_no_go ?? null,
                 };
               } catch {}
             }
