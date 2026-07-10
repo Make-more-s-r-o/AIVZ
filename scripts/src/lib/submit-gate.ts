@@ -11,7 +11,7 @@
  */
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import type { ProductMatch } from './types.js';
+import type { ProductMatch, PolozkaMatch } from './types.js';
 import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
 
@@ -21,14 +21,56 @@ export interface SubmitGateResult {
   warnings: string[];
 }
 
+/**
+ * Vrátí množinu vybraných částí (parts-selection.json). Null = zakázka bez částí (jedna
+ * část) → filtrování se neuplatní. Chybějící/nečitelný soubor u vícečástové zakázky ⇒
+ * bereme všechny části (konzervativně, jako validate-bid).
+ */
+async function loadSelectedPartIds(outputDir: string, items: PolozkaMatch[]): Promise<Set<string> | null> {
+  const castIds = new Set(items.map((i) => (i as any).cast_id).filter(Boolean));
+  if (castIds.size <= 1) return null; // jedna nebo žádná část → nefiltruj
+  try {
+    const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
+    const selected = new Set<string>(sel.selected_parts || []);
+    return selected.size > 0 ? selected : castIds;
+  } catch {
+    return castIds;
+  }
+}
+
+function filterBySelectedParts(items: PolozkaMatch[], selected: Set<string> | null): PolozkaMatch[] {
+  if (!selected) return items;
+  return items.filter((pm) => {
+    const castId = (pm as any).cast_id;
+    return !castId || selected.has(castId);
+  });
+}
+
 export async function computeSubmitGate(outputDir: string): Promise<SubmitGateResult> {
   const problems: string[] = [];
   const warnings: string[] = [];
 
   // Cenové kontroly pro multi-item zakázky vždy přepočítáme z aktuálních dat.
+  let productMatchRaw: string | null = null;
   try {
-    const pm: ProductMatch = JSON.parse(await readFile(join(outputDir, 'product-match.json'), 'utf-8'));
-    const items = pm.polozky_match || [];
+    productMatchRaw = await readFile(join(outputDir, 'product-match.json'), 'utf-8');
+  } catch {
+    // Soubor chybí = single-product zakázka nebo krok match ještě neproběhl → cenové
+    // kontroly se přeskočí (ENOENT je legitimní). Jiné chyby čtení řešíme níž fail-closed.
+    productMatchRaw = null;
+  }
+  if (productMatchRaw !== null) {
+    let pm: ProductMatch;
+    try {
+      pm = JSON.parse(productMatchRaw);
+    } catch (err) {
+      // Poškozený product-match.json NESMÍ tiše propustit money gate (fail-closed).
+      return { ready: false, problems: [`Nelze načíst cenová data (product-match.json je poškozený): ${err}`], warnings };
+    }
+    const allItems = pm.polozky_match || [];
+    // Filtruj jen položky vybraných částí — u vícečástových zakázek se podává jedna část
+    // a položky ostatních částí zůstanou nepotvrzené (jinak by gate byl navždy ready=false).
+    const items = filterBySelectedParts(allItems, await loadSelectedPartIds(outputDir, allItems));
     const sanityFindings = checkPriceSanity(items, {});
     const names = new Map(items.map((item) => [item.polozka_index, item.polozka_nazev]));
     for (const finding of sanityFindings) {
@@ -51,8 +93,6 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
         `${unconfirmed.length > 5 ? ` (mj. ${preview}, …)` : ` (${preview})`}.`,
       );
     }
-  } catch {
-    // Bez product-match (single-product zakázka) — cenové kontroly se přeskočí.
   }
 
   // Field-validace dokumentů musí projít (chybějící soubor = neprošlo).

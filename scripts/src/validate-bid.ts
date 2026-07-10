@@ -127,9 +127,16 @@ ${selectedProduct.shoda_s_pozadavky.map((s: any) => `- ${s.pozadavek}: ${s.splne
   }
 
   // Deterministické kontroly běží před AI a jako jediné mohou později blokovat podání.
-  const company = await loadCompany(tenderId);
+  // loadCompany může vyhodit (chybí tender-meta/company.json); to NESMÍ shodit celý krok
+  // Validace ještě před zápisem reportu — degradujeme na prázdnou identitu (kontrola pak fail).
+  let company: Awaited<ReturnType<typeof loadCompany>> | null = null;
+  try {
+    company = await loadCompany(tenderId);
+  } catch (err) {
+    console.warn(`  ⚠ Firemní údaje nelze načíst (${err instanceof Error ? err.message : String(err)}) — identita se nezkontroluje.`);
+  }
   const deterministicChecks = runDeterministicValidation({
-    company,
+    company: company ?? { nazev: '', ico: '', dic: '' },
     productMatch,
     documents: generatedDocuments,
     selectedPartIds,
