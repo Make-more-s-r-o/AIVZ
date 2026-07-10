@@ -9,6 +9,7 @@ import { parseSoupis, type SoupisResult } from './parse-soupis.js';
 import { scoreGoNoGo } from './lib/go-no-go.js';
 import { getCompany, getTenderCompanyId } from './lib/company-store.js';
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
+import { closePool } from './lib/db.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -171,7 +172,14 @@ async function main() {
   console.log(`Output: ${outputPath}`);
 }
 
-main().catch((err) => {
-  console.error('Analysis failed:', err);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    // Win-price lookup (priceBandForSubject) otevře pooled DB spojení; bez zavření pool drží
+    // event loop ~30 s (idleTimeoutMillis) → analyze krok by v produkci končil o 30 s později.
+    await closePool();
+  })
+  .catch(async (err) => {
+    console.error('Analysis failed:', err);
+    await closePool().catch(() => {});
+    process.exit(1);
+  });
