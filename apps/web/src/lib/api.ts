@@ -172,6 +172,31 @@ export async function getProductMatch(id: string) {
   return fetchJson<ProductMatch>(`/tenders/${id}/product-match`);
 }
 
+export interface WinPriceSample {
+  predmet: string;
+  cena_bez_dph: number;
+  dodavatel_nazev: string | null;
+  datum: string | null;
+  url: string | null;
+}
+
+export interface WinPriceBand {
+  n: number;
+  median_bez_dph?: number;
+  p25?: number;
+  p75?: number;
+  min?: number;
+  max?: number;
+  samples?: WinPriceSample[];
+}
+
+/** Historické ceny jsou pouze informační podklad; tato funkce nic nezapisuje. */
+export async function getWinPriceBand(subject: string, category?: string): Promise<WinPriceBand> {
+  const params = new URLSearchParams({ q: subject });
+  if (category) params.set('kategorie', category);
+  return fetchJson(`/winprice/band?${params.toString()}`);
+}
+
 export async function getDocuments(id: string): Promise<string[]> {
   return fetchJson(`/tenders/${id}/documents`);
 }

@@ -58,6 +58,7 @@ import { getImportPreview, runImport, type ColumnMapping } from './lib/csv-impor
 import { generateMissingEmbeddings } from './lib/embedding-service.js';
 import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
+import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -2564,6 +2565,11 @@ app.post('/api/notifications/read', async (req, res) => {
     res.status(500).json({ error: String(err) });
   }
 });
+
+// --- Win-price API (historické vítězné ceny, pouze informační vrstva) ---
+
+app.get('/api/winprice/band', winPriceBandHandler);
+app.get('/api/winprice/stats', winPriceStatsHandler);
 
 // --- Warehouse API (cenový sklad) ---
 
