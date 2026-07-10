@@ -5,34 +5,43 @@ import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ValidationReportSchema, type TenderAnalysis, type ProductMatch } from './lib/types.js';
-import { resolveDocumentData, type GenerationMeta } from './lib/data-resolver.js';
-import { validateAllDocuments, type ValidationResult } from './lib/doc-validator.js';
+import { loadCompany, resolveDocumentData, type GenerationMeta } from './lib/data-resolver.js';
+import { validateAllDocuments } from './lib/doc-validator.js';
 import { computeSubmitGate } from './lib/submit-gate.js';
+import {
+  buildDocumentsPromptSection,
+  loadGeneratedDocumentTexts,
+  runDeterministicValidation,
+} from './lib/validation-deterministic.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 
-const VALIDATE_SYSTEM = `Jsi expert na kontrolu nabídek do veřejných zakázek v České republice. Zkontroluj, zda nabídka splňuje všechny požadavky zadávací dokumentace.
+const VALIDATE_SYSTEM = `Jsi expert na věcnou kontrolu nabídek do veřejných zakázek v České republice. Dostaneš skutečné texty vygenerovaných nabídkových dokumentů, ne jen názvy souborů.
 
 Zkontroluj:
 1. Kompletnost dokumentace (všechny požadované přílohy)
 2. Soulad technických parametrů s požadavky
-3. Správnost cenového rozpočtu (cena bez DPH, DPH 21%, cena s DPH)
-4. Formální náležitosti (IČO, DIČ, podpis, datum)
-5. Soulad s kvalifikačními požadavky
-6. Splnění hodnotících kritérií
+3. Věcná rizika v nabízeném plnění a formulacích dokumentů
+4. Formální a kvalifikační rizika, která vyplývají z reálného textu dokumentů
+5. Splnění hodnotících kritérií
+
+NEKONTROLUJ aritmetiku cen, DPH, výskyt IČO/DIČ/názvu firmy ani tvrdé placeholdery. Tyto věci kontroluje deterministická vrstva mimo AI. Pokud reálný text dokumentu hodnotu obsahuje, nesmíš tvrdit, že chybí.
+
+AI nálezy jsou pouze advisory. Nikdy nerozhodují o blokaci podání.
 
 Pro každou kontrolu uveď:
 - Kategorii (kompletnost/technicka_shoda/cenova_spravnost/formalni/kvalifikace)
 - Konkrétní kontrolu
 - Status: pass/fail/warning
 - Detail
+- zdroj: vždy "ai"
 
 Na konci uveď:
 - Celkové skóre 1-10
-- ready_to_submit: true/false
-- Kritické problémy (pokud existují)
+- ready_to_submit: vždy true (blokaci řídí deterministický gate mimo AI)
+- Kritické problémy ponech prázdné; rizika dej do checks nebo doporučení
 - Doporučení
 
 Odpověz POUZE validním JSON.`;
@@ -40,6 +49,7 @@ Odpověz POUZE validním JSON.`;
 async function main() {
   const tenderIdArg = process.argv.find((a) => a.startsWith('--tender-id='));
   const tenderId = tenderIdArg?.split('=')[1] || '3d-tiskarna';
+  const deterministicOnly = process.argv.includes('--deterministic-only') || process.env.VALIDATE_DETERMINISTIC_ONLY === '1';
 
   console.log(`\n=== Step 5: Validate Bid ===`);
   console.log(`Tender ID: ${tenderId}`);
@@ -47,7 +57,7 @@ async function main() {
   const outputDir = join(ROOT, 'output', tenderId);
   await mkdir(outputDir, { recursive: true });
 
-  // Read analysis and product match
+  // Načíst analýzu a product-match.
   const analysis: TenderAnalysis = JSON.parse(
     await readFile(join(outputDir, 'analysis.json'), 'utf-8')
   );
@@ -55,11 +65,11 @@ async function main() {
     await readFile(join(outputDir, 'product-match.json'), 'utf-8')
   );
 
-  // List generated documents
-  const files = await readdir(outputDir);
-  const docxFiles = files.filter((f) => f.endsWith('.docx'));
+  // Načíst vygenerované DOCX pro deterministické kontroly i AI kontext.
+  const generatedDocuments = await loadGeneratedDocumentTexts(outputDir);
+  const docxFiles = generatedDocuments.map((doc) => doc.filename);
 
-  // List qualification attachments
+  // Vypsat kvalifikační přílohy.
   let attachments: string[] = [];
   try {
     const prilohyDir = join(outputDir, 'prilohy');
@@ -68,11 +78,14 @@ async function main() {
   } catch {}
 
   console.log(`\nFound ${docxFiles.length} DOCX documents to validate`);
+  if (docxFiles.length > 0) {
+    console.log(`  Documents: ${docxFiles.join(', ')}`);
+  }
   if (attachments.length > 0) {
     console.log(`Found ${attachments.length} qualification attachments: ${attachments.join(', ')}`);
   }
 
-  // Read parts selection for filtering
+  // Načíst výběr částí pro filtrování.
   let selectedPartIds: Set<string> | null = null;
   const hasParts = analysis.casti && analysis.casti.length > 1;
   if (hasParts) {
@@ -84,10 +97,10 @@ async function main() {
     }
   }
 
-  // Resolve selected products for both single and multi-product paths
+  // Připravit vybrané produkty pro single i multi-product cestu.
   let productsSection: string;
   if (productMatch.polozky_match) {
-    // Filter by selected parts
+    // Filtrovat podle vybraných částí.
     let filteredMatch = productMatch.polozky_match;
     if (selectedPartIds) {
       filteredMatch = filteredMatch.filter(pm => {
@@ -113,6 +126,29 @@ Shoda parametrů:
 ${selectedProduct.shoda_s_pozadavky.map((s: any) => `- ${s.pozadavek}: ${s.splneno ? 'OK' : 'NESPLNĚNO'} (${s.hodnota})`).join('\n')}`;
   }
 
+  // Deterministické kontroly běží před AI a jako jediné mohou později blokovat podání.
+  // loadCompany může vyhodit (chybí tender-meta/company.json); to NESMÍ shodit celý krok
+  // Validace ještě před zápisem reportu — degradujeme na prázdnou identitu (kontrola pak fail).
+  let company: Awaited<ReturnType<typeof loadCompany>> | null = null;
+  try {
+    company = await loadCompany(tenderId);
+  } catch (err) {
+    console.warn(`  ⚠ Firemní údaje nelze načíst (${err instanceof Error ? err.message : String(err)}) — identita se nezkontroluje.`);
+  }
+  const deterministicChecks = runDeterministicValidation({
+    company: company ?? { nazev: '', ico: '', dic: '' },
+    productMatch,
+    documents: generatedDocuments,
+    selectedPartIds,
+  });
+  const deterministicFailCount = deterministicChecks.filter((c) => c.status === 'fail').length;
+  console.log(`\n--- Deterministic validation ---`);
+  for (const check of deterministicChecks) {
+    console.log(`  [${check.status.toUpperCase()}] ${check.kontrola}: ${check.detail}`);
+  }
+
+  const documentsSection = buildDocumentsPromptSection(generatedDocuments);
+
   const userMessage = `Zadávací dokumentace požaduje:
 
 Zakázka: ${analysis.zakazka.nazev}
@@ -130,8 +166,8 @@ ${analysis.technicke_pozadavky.map((r) => `- ${r.parametr}: ${r.pozadovana_hodno
 
 ${productsSection}
 
-Vygenerované dokumenty:
-${docxFiles.map((f) => `- ${f}`).join('\n')}
+Skutečné texty vygenerovaných dokumentů (každý dokument je oříznutý na rozumný limit, prioritně krycí list, cenová nabídka a čestné prohlášení):
+${documentsSection}
 ${attachments.length > 0 ? `\nKvalifikační přílohy (nahrané uživatelem):\n${attachments.map((f) => `- ${f}`).join('\n')}` : '\nKvalifikační přílohy: ŽÁDNÉ (uživatel zatím nenahrál výpis z OR, reference apod.)'}
 
 Odpověz ve formátu:
@@ -139,84 +175,108 @@ Odpověz ve formátu:
   "overall_score": 8,
   "ready_to_submit": true,
   "checks": [
-    {"kategorie": "kompletnost", "kontrola": "...", "status": "pass", "detail": "..."}
+    {"kategorie": "kompletnost", "kontrola": "...", "status": "pass", "detail": "...", "zdroj": "ai"}
   ],
   "kriticke_problemy": [],
   "doporuceni": ["..."]
 }`;
 
-  // Scale maxTokens for multi-item tenders (more checks = longer response)
-  const itemCount = productMatch.polozky_match?.length ?? 1;
-  const maxTokens = Math.min(4096 + itemCount * 1500, 16384);
-
-  const result = await callClaude(VALIDATE_SYSTEM, userMessage, {
-    maxTokens,
-    temperature: 0.1,
-  });
-
-  let jsonStr = result.content.trim();
-  if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-  }
-
   let aiRecovered = false;
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch (e) {
-    // Try to recover truncated JSON
-    console.log(`  Warning: JSON parse failed, attempting recovery...`);
-    // Find last complete "checks" array entry
-    const lastBrace = jsonStr.lastIndexOf('}');
-    if (lastBrace > 0) {
-      // Try closing arrays/objects
-      let recovered = jsonStr.substring(0, lastBrace + 1);
-      // Close checks array if open
-      if (recovered.includes('"checks"') && !recovered.match(/\]\s*,?\s*"kriticke_problemy"/)) {
-        recovered += ']';
+  let parsed: any = {
+    overall_score: deterministicFailCount === 0 ? 10 : 5,
+    ready_to_submit: true,
+    checks: [],
+    kriticke_problemy: [],
+    doporuceni: ['AI posouzení bylo přeskočeno; report obsahuje pouze deterministické kontroly a submit-gate.'],
+  };
+  let aiCostCZK = 0;
+
+  if (deterministicOnly) {
+    console.log(`\nAI validation skipped (--deterministic-only).`);
+  } else {
+    try {
+      // Škálování pro multi-item zakázky; limit nezvyšovat nad původní hodnotu.
+      const itemCount = productMatch.polozky_match?.length ?? 1;
+      const maxTokens = Math.min(4096 + itemCount * 1500, 16384);
+
+      const result = await callClaude(VALIDATE_SYSTEM, userMessage, {
+        maxTokens,
+        temperature: 0.1,
+      });
+      aiCostCZK = result.costCZK;
+
+      let jsonStr = result.content.trim();
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
       }
-      // Add missing fields and close
-      if (!recovered.includes('"kriticke_problemy"')) {
-        recovered += ', "kriticke_problemy": [], "doporuceni": []}';
-      } else if (!recovered.includes('"doporuceni"')) {
-        const lastBracket = recovered.lastIndexOf(']');
-        recovered = recovered.substring(0, lastBracket + 1) + ', "doporuceni": []}';
-      }
+
       try {
-        parsed = JSON.parse(recovered);
-        console.log(`  Recovery successful!`);
-        aiRecovered = true;
-      } catch {
-        // Last resort: extract what we can
-        throw new Error(`JSON recovery failed. First 500 chars: ${jsonStr.substring(0, 500)}`);
+        parsed = JSON.parse(jsonStr);
+      } catch (e) {
+        // Zkusit obnovit uříznuté JSON.
+        console.log(`  Warning: JSON parse failed, attempting recovery...`);
+        // Najít poslední kompletní objekt.
+        const lastBrace = jsonStr.lastIndexOf('}');
+        if (lastBrace > 0) {
+          // Zkusit dovřít pole/objekty.
+          let recovered = jsonStr.substring(0, lastBrace + 1);
+          // Dovřít checks pole, pokud zůstalo otevřené.
+          if (recovered.includes('"checks"') && !recovered.match(/\]\s*,?\s*"kriticke_problemy"/)) {
+            recovered += ']';
+          }
+          // Doplnit povinná pole a zavřít objekt.
+          if (!recovered.includes('"kriticke_problemy"')) {
+            recovered += ', "kriticke_problemy": [], "doporuceni": []}';
+          } else if (!recovered.includes('"doporuceni"')) {
+            const lastBracket = recovered.lastIndexOf(']');
+            recovered = recovered.substring(0, lastBracket + 1) + ', "doporuceni": []}';
+          }
+          try {
+            parsed = JSON.parse(recovered);
+            console.log(`  Recovery successful!`);
+            aiRecovered = true;
+          } catch {
+            // Poslední pokus: vypiš začátek odpovědi pro diagnostiku.
+            throw new Error(`JSON recovery failed. First 500 chars: ${jsonStr.substring(0, 500)}`);
+          }
+        } else {
+          throw e;
+        }
       }
-    } else {
-      throw e;
+
+      await logCost(tenderId, 'validate', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
+    } catch (err) {
+      const detail = `AI posouzení se nepodařilo provést: ${err instanceof Error ? err.message : String(err)}`;
+      parsed.doporuceni = [detail];
+      console.log(`  ${detail}`);
     }
   }
-  const report = ValidationReportSchema.parse({
+
+  const aiReport = ValidationReportSchema.parse({
     tenderId,
     validatedAt: new Date().toISOString(),
     ...parsed,
+    checks: Array.isArray(parsed.checks)
+      ? parsed.checks.map((check: any) => ({ ...check, zdroj: 'ai' }))
+      : [],
+  });
+  const report = ValidationReportSchema.parse({
+    tenderId,
+    validatedAt: aiReport.validatedAt,
+    overall_score: aiReport.overall_score,
+    ready_to_submit: true,
+    checks: [...deterministicChecks, ...aiReport.checks],
+    kriticke_problemy: [],
+    doporuceni: [
+      ...(aiRecovered ? ['AI posouzení bylo obnoveno z neúplné JSON odpovědi; advisory část zkontrolujte ručně.'] : []),
+      ...aiReport.kriticke_problemy.map((p) => `AI upozornění: ${p}`),
+      ...aiReport.doporuceni,
+    ],
   });
 
-  await logCost(tenderId, 'validate', result.modelId, result.inputTokens, result.outputTokens, result.costCZK);
-
   const outputPath = join(outputDir, 'validation-report.json');
-  await writeFile(outputPath, JSON.stringify(report, null, 2), 'utf-8');
 
-  console.log(`\nValidation complete:`);
-  console.log(`  Overall score: ${report.overall_score}/10`);
-  console.log(`  Ready to submit: ${report.ready_to_submit ? 'YES' : 'NO'}`);
-  console.log(`  Checks: ${report.checks.filter((c) => c.status === 'pass').length} pass, ${report.checks.filter((c) => c.status === 'fail').length} fail, ${report.checks.filter((c) => c.status === 'warning').length} warnings`);
-  if (report.kriticke_problemy.length > 0) {
-    console.log(`  Critical issues:`);
-    report.kriticke_problemy.forEach((p) => console.log(`    - ${p}`));
-  }
-  console.log(`  AI cost: ${result.costCZK.toFixed(2)} CZK`);
-  console.log(`Output: ${outputPath}`);
-
-  // Programmatic validation (field-by-field checks)
+  // Programatická field-by-field validace.
   console.log(`\n--- Programmatic field validation ---`);
   try {
     const docData = await resolveDocumentData(tenderId);
@@ -228,11 +288,11 @@ Odpověz ve formátu:
 
     const fieldResults = await validateAllDocuments(outputDir, docData, genMeta);
 
-    // Save programmatic validation results
+    // Uložit výsledky programatické validace.
     const fieldValidationPath = join(outputDir, 'field-validation.json');
     await writeFile(fieldValidationPath, JSON.stringify(fieldResults, null, 2), 'utf-8');
 
-    // Summary
+    // Souhrn do konzole.
     for (const r of fieldResults) {
       const passCount = r.checks.filter(c => c.status === 'pass').length;
       const failCount = r.checks.filter(c => c.status === 'fail').length;
@@ -249,26 +309,56 @@ Odpověz ve formátu:
   }
 
   // --- Deterministický submit-gate: ready_to_submit na reálných kontrolách (cenový strop,
-  // úplnost nacenění, field-validace, zbytkové placeholdery), ne jen AI sebehodnocení.
+  // úplnost nacenění, field-validace, zbytkové placeholdery). AI je jen advisory.
   // Sdílená logika s POST /finalize (lib/submit-gate.ts). ---
+  const blockingProblems = deterministicChecks
+    .filter((check) => check.status === 'fail')
+    .map((check) => `${check.kontrola}: ${check.detail}`);
   try {
     const gate = await computeSubmitGate(outputDir);
     const gateProblems = [...gate.problems];
-    if (aiRecovered) gateProblems.push('Odpověď validace byla uříznuta a obnovena — nutná manuální kontrola.');
     console.log(`\n--- Submit gate ---`);
+    if (gate.warnings.length) {
+      report.checks.push({
+        kategorie: 'cena',
+        kontrola: 'Price sanity varování',
+        status: 'warning',
+        detail: gate.warnings.join(' | '),
+      });
+      for (const warning of gate.warnings) report.doporuceni.push(warning);
+      console.log(`  Varování:`);
+      gate.warnings.forEach((warning) => console.log(`    - ${warning}`));
+    }
     if (gateProblems.length) {
-      report.ready_to_submit = false;
-      for (const gp of gateProblems) report.kriticke_problemy.push(gp);
-      report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'fail', detail: gateProblems.join(' | ') });
-      await writeFile(join(outputDir, 'validation-report.json'), JSON.stringify(report, null, 2), 'utf-8');
-      console.log(`  ready_to_submit -> NO`);
+      blockingProblems.push(...gateProblems);
+      report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'fail', detail: gateProblems.join(' | '), zdroj: 'deterministic' });
       gateProblems.forEach((gp) => console.log(`    - ${gp}`));
     } else {
+      report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'pass', detail: 'Strop dodržen, vše oceněno, field-validace prošla a dokumenty neobsahují zbytkové placeholdery.', zdroj: 'deterministic' });
       console.log(`  Gate OK (strop dodržen, vše oceněno, žádné placeholdery).`);
     }
+    await writeFile(join(outputDir, 'validation-report.json'), JSON.stringify(report, null, 2), 'utf-8');
   } catch (err) {
-    console.log(`  Submit gate skipped: ${err}`);
+    const detail = `Submit-gate nelze vyhodnotit: ${err}`;
+    blockingProblems.push(detail);
+    report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'fail', detail, zdroj: 'deterministic' });
+    console.log(`  ${detail}`);
   }
+
+  report.ready_to_submit = blockingProblems.length === 0;
+  report.kriticke_problemy = blockingProblems;
+  await writeFile(outputPath, JSON.stringify(report, null, 2), 'utf-8');
+
+  console.log(`\nValidation complete:`);
+  console.log(`  Overall score: ${report.overall_score}/10`);
+  console.log(`  Ready to submit: ${report.ready_to_submit ? 'YES' : 'NO'}`);
+  console.log(`  Checks: ${report.checks.filter((c) => c.status === 'pass').length} pass, ${report.checks.filter((c) => c.status === 'fail').length} fail, ${report.checks.filter((c) => c.status === 'warning').length} warnings`);
+  if (report.kriticke_problemy.length > 0) {
+    console.log(`  Critical issues:`);
+    report.kriticke_problemy.forEach((p) => console.log(`    - ${p}`));
+  }
+  console.log(`  AI cost: ${aiCostCZK.toFixed(2)} CZK`);
+  console.log(`Output: ${outputPath}`);
 }
 
 main().catch((err) => {

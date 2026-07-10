@@ -149,6 +149,20 @@ export const PriceOverrideSchema = z.object({
   poznamka: z.string().optional(),
 });
 
+export const PriceSanityFlagSchema = z.object({
+  polozka_index: z.number(),
+  level: z.enum(['hard', 'warn']),
+  code: z.enum([
+    'overcap',
+    'zero_price',
+    'below_cost',
+    'bid_share',
+    'low_confidence_big',
+    'outlier_vs_batch',
+  ]),
+  message: z.string(),
+});
+
 export const PolozkaMatchSchema = z.object({
   polozka_nazev: z.string(),
   polozka_index: z.number(),
@@ -162,6 +176,7 @@ export const PolozkaMatchSchema = z.object({
   vybrany_index: aiNumber(),
   oduvodneni_vyberu: z.string(),
   cenova_uprava: PriceOverrideSchema.optional(),
+  sanity_flags: z.array(PriceSanityFlagSchema).optional(),
 });
 
 export const ProductMatchSchema = z.object({
@@ -184,6 +199,7 @@ export const ValidationCheckSchema = z.object({
   kontrola: z.string(),
   status: z.enum(['pass', 'fail', 'warning']),
   detail: z.string(),
+  zdroj: z.enum(['deterministic', 'ai']).default('ai'),
 });
 
 export const ValidationReportSchema = z.object({
@@ -220,6 +236,7 @@ export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
 export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
 export type PriceOverride = z.infer<typeof PriceOverrideSchema>;
+export type PriceSanityFlag = z.infer<typeof PriceSanityFlagSchema>;
 export type PolozkaMatch = z.infer<typeof PolozkaMatchSchema>;
 export type ProductMatch = z.infer<typeof ProductMatchSchema>;
 export type ValidationCheck = z.infer<typeof ValidationCheckSchema>;

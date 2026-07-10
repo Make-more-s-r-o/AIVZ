@@ -20,6 +20,7 @@ import { useToast } from './ui';
 import { getErrorMessage } from '../types/tender';
 import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
 import { safeHttpUrl } from '../lib/url';
+import { calculateItemPrice, roundCurrency } from '../lib/price-calculator';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -199,8 +200,8 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
  */
 function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
   const bez = overeni.web_cena_bez_dph
-    ?? (overeni.web_cena_s_dph != null ? Math.round(overeni.web_cena_s_dph / 1.21) : 0);
-  const sdph = overeni.web_cena_s_dph ?? Math.round(bez * 1.21);
+    ?? (overeni.web_cena_s_dph != null ? roundCurrency(overeni.web_cena_s_dph / 1.21) : 0);
+  const sdph = overeni.web_cena_s_dph ?? calculateItemPrice(bez, 0).nakupni_cena_s_dph;
   const safeUrl = safeHttpUrl(overeni.zdroj_url);
   return {
     nakupni_cena_bez_dph: bez,
@@ -226,13 +227,9 @@ function buildConfirmData(pm: PolozkaMatch, draft?: PriceOverride): PriceOverrid
   const nakupni = draft?.nakupni_cena_bez_dph ?? existing?.nakupni_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
   if (!(nakupni > 0)) return null;
   const marze = draft?.marze_procent ?? existing?.marze_procent ?? 0;
-  const nabidkovaBez = Math.round(nakupni * (1 + marze / 100));
+  const calculatedPrice = calculateItemPrice(nakupni, marze);
   return {
-    nakupni_cena_bez_dph: nakupni,
-    nakupni_cena_s_dph: Math.round(nakupni * 1.21),
-    marze_procent: marze,
-    nabidkova_cena_bez_dph: nabidkovaBez,
-    nabidkova_cena_s_dph: Math.round(nabidkovaBez * 1.21),
+    ...calculatedPrice,
     potvrzeno: true,
     poznamka: draft?.poznamka ?? existing?.poznamka ?? undefined,
   };
@@ -247,7 +244,7 @@ interface OvereniCenyChipProps {
 function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
   if (overeni.stav === 'nalezeno') {
     const cenaSdph = overeni.web_cena_s_dph
-      ?? (overeni.web_cena_bez_dph != null ? Math.round(overeni.web_cena_bez_dph * 1.21) : undefined);
+      ?? (overeni.web_cena_bez_dph != null ? calculateItemPrice(overeni.web_cena_bez_dph, 0).nakupni_cena_s_dph : undefined);
     return (
       <div className={cn(
         'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-xs',
@@ -451,15 +448,24 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
 
   const polozky = match.polozky_match!;
 
-  // Total confirmed price
-  const totalBezDph = polozky.reduce((sum: number, pm: PolozkaMatch) => {
+  // Souhrn money-pathu: nákup a nabídka se váží množstvím každé položky.
+  const totalBezDph = roundCurrency(polozky.reduce((sum: number, pm: PolozkaMatch) => {
     const product = pm.kandidati[pm.vybrany_index] as ProductCandidate | undefined;
     const override = pm.cenova_uprava;
     const price = override?.nabidkova_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
     const mnozstvi = pm.mnozstvi || 1;
     return sum + price * mnozstvi;
-  }, 0);
-  const totalSdph = Math.round(totalBezDph * 1.21);
+  }, 0));
+  const totalNakupniBezDph = roundCurrency(polozky.reduce((sum: number, pm: PolozkaMatch) => {
+    const product = pm.kandidati[pm.vybrany_index] as ProductCandidate | undefined;
+    const purchasePrice = pm.cenova_uprava?.nakupni_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
+    return sum + purchasePrice * (pm.mnozstvi || 1);
+  }, 0));
+  const totalSdph = roundCurrency(totalBezDph * 1.21);
+  const totalMarzeKc = roundCurrency(totalBezDph - totalNakupniBezDph);
+  const totalMarzeProcent = totalNakupniBezDph > 0
+    ? roundCurrency(totalMarzeKc / totalNakupniBezDph * 100)
+    : 0;
 
   const allConfirmed = polozky.every((pm) => pm.cenova_uprava?.potvrzeno);
   const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
@@ -470,25 +476,35 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
     .filter((i) => i >= 0);
 
   // Hromadné potvrzení: pro každou vybranou položku dopočítá cenu (buildConfirmData) a pošle
-  // JEDNÍM requestem (bulk endpoint, transakčně nad souborem). Položky bez ceny přeskočí.
+  // JEDNÍM requestem (bulk endpoint, transakčně nad souborem). Položky bez ceny nebo s HARD
+  // sanity nálezem přeskočí; backend stejnou podmínku znovu autoritativně ověří.
   const confirmBulk = useCallback(async (indices: number[]) => {
     if (bulkSaving) return;
     const payload: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }> = [];
-    let skipped = 0;
+    let skippedWithoutPrice = 0;
+    let skippedHard = 0;
     for (const idx of indices) {
       const pm = polozky[idx];
       if (!pm) continue;
+      if (pm.sanity_flags?.some((finding) => finding.level === 'hard')) {
+        skippedHard++;
+        continue;
+      }
       const data = buildConfirmData(pm, priceDrafts.get(idx));
-      if (!data) { skipped++; continue; }
+      if (!data) { skippedWithoutPrice++; continue; }
       payload.push({ itemIndex: idx, cenova_uprava: data });
     }
     if (payload.length === 0) {
-      toast(skipped > 0 ? 'Vybrané položky nelze automaticky ocenit (chybí cena)' : 'Není co potvrdit', 'danger');
+      const reasons = [
+        skippedHard > 0 ? `${skippedHard} přeskočeno kvůli blokujícímu cenovému nálezu` : null,
+        skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno kvůli chybějící ceně` : null,
+      ].filter(Boolean).join(', ');
+      toast(reasons || 'Není co potvrdit', 'danger');
       return;
     }
     setBulkSaving(true);
     try {
-      const { updated } = await bulkUpdateItemPriceOverride(tenderId, payload);
+      const { updated, warnings } = await bulkUpdateItemPriceOverride(tenderId, payload);
       // Web-drafty potvrzených položek zahoď (stejně jako po per-item potvrzení).
       setPriceDrafts((prev) => {
         const next = new Map(prev);
@@ -497,7 +513,12 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
       });
       setSelected(new Set());
       queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
-      toast(`Potvrzeno ${updated} položek${skipped ? ` (${skipped} přeskočeno — bez ceny)` : ''}`, 'success');
+      const skippedParts = [
+        skippedHard > 0 ? `${skippedHard} přeskočeno — blokující cenový nález` : null,
+        skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno — bez ceny` : null,
+      ].filter(Boolean);
+      const warningPart = warnings.length > 0 ? `, ${warnings.length} varování ke kontrole` : '';
+      toast(`Potvrzeno ${updated} položek${skippedParts.length ? ` (${skippedParts.join(', ')})` : ''}${warningPart}`, 'success');
     } catch (err: unknown) {
       toast(getErrorMessage(err), 'danger');
     } finally {
@@ -557,6 +578,9 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
           </div>
           <div className="text-xs text-gray-500">
             s DPH: {totalSdph.toLocaleString('cs-CZ')} Kč
+          </div>
+          <div className="text-xs font-medium text-gray-600">
+            Celková marže: {totalMarzeKc.toLocaleString('cs-CZ')} Kč ({totalMarzeProcent.toLocaleString('cs-CZ')} %)
           </div>
         </div>
       </div>
@@ -668,6 +692,23 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                     {pm.mnozstvi ? `${pm.mnozstvi} ${pm.jednotka || 'ks'}` : ''}
                     {selectedProduct && itemType !== 'sluzba' && ` — ${selectedProduct.vyrobce} ${selectedProduct.model}`}
                   </div>
+                  {pm.sanity_flags && pm.sanity_flags.length > 0 && (
+                    <div className="mt-1 flex max-w-2xl flex-wrap gap-1">
+                      {pm.sanity_flags.map((finding) => (
+                        <span
+                          key={finding.code}
+                          className={cn(
+                            'rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-normal',
+                            finding.level === 'hard'
+                              ? 'border-red-200 bg-red-100 text-red-800'
+                              : 'border-orange-200 bg-orange-100 text-orange-800'
+                          )}
+                        >
+                          {finding.level === 'hard' ? 'BLOKUJE' : 'ZKONTROLUJTE'}: {finding.message}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-3">

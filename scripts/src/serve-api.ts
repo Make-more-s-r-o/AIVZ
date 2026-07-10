@@ -36,6 +36,8 @@ import {
   canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, type StageKey, type StepFlags,
 } from './lib/stage-machine.js';
 import { computeSubmitGate } from './lib/submit-gate.js';
+import { checkPriceSanity } from './lib/price-sanity.js';
+import type { PriceSanityFlag } from './lib/types.js';
 import {
   getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy, getDueReminders, markReminded,
 } from './lib/terminy-store.js';
@@ -1290,6 +1292,37 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
   }
 });
 
+/** Přepočítá a uloží flagy všech položek v objektu, aniž by měnil jejich ceny nebo potvrzení. */
+function refreshPriceSanityFlags(productMatch: any): PriceSanityFlag[] {
+  if (!Array.isArray(productMatch.polozky_match)) return [];
+  const findings = checkPriceSanity(productMatch.polozky_match, {});
+  for (const item of productMatch.polozky_match) {
+    item.sanity_flags = findings.filter((finding) => finding.polozka_index === item.polozka_index);
+  }
+  return findings;
+}
+
+/** Vrátí nálezy patřící pozicím položek, které právě potvrzujeme. */
+function findingsForItemPositions(
+  productMatch: any,
+  findings: PriceSanityFlag[],
+  itemPositions: readonly number[],
+): PriceSanityFlag[] {
+  const polozkaIndexes = new Set(
+    itemPositions.map((position) => productMatch.polozky_match[position]?.polozka_index),
+  );
+  return findings.filter((finding) => polozkaIndexes.has(finding.polozka_index));
+}
+
+function formatSanityBlockingMessage(productMatch: any, findings: PriceSanityFlag[]): string {
+  const names = new Map(
+    productMatch.polozky_match.map((item: any) => [item.polozka_index, item.polozka_nazev]),
+  );
+  return findings
+    .map((finding) => `„${names.get(finding.polozka_index) ?? `položka #${finding.polozka_index + 1}`}“: ${finding.message}`)
+    .join(' ');
+}
+
 // PUT /api/tenders/:id/product-match/price/bulk - hromadné potvrzení cen více položek.
 // MUSÍ být registrováno PŘED `/price/:itemIndex`, jinak by Express „bulk" chytil jako :itemIndex.
 // Transakčně nad souborem product-match.json: jedno čtení → aplikace všech → jeden zápis
@@ -1329,9 +1362,26 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     for (const v of validated) {
       productMatch.polozky_match[v.idx].cenova_uprava = v.cenova_uprava;
     }
+
+    let warnings: PriceSanityFlag[] = [];
+    const confirmedPositions = validated
+      .filter((value) => value.cenova_uprava.potvrzeno)
+      .map((value) => value.idx);
+    if (confirmedPositions.length > 0) {
+      const findings = refreshPriceSanityFlags(productMatch);
+      const confirmedFindings = findingsForItemPositions(productMatch, findings, confirmedPositions);
+      const hardFindings = confirmedFindings.filter((finding) => finding.level === 'hard');
+      if (hardFindings.length > 0) {
+        return res.status(409).json({
+          error: `Ceny nelze potvrdit: ${formatSanityBlockingMessage(productMatch, hardFindings)}`,
+          sanity_flags: hardFindings,
+        });
+      }
+      warnings = confirmedFindings.filter((finding) => finding.level === 'warn');
+    }
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
-    res.json({ success: true, updated: validated.length });
+    res.json({ success: true, updated: validated.length, warnings });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
@@ -1356,9 +1406,23 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
 
     const parsed = PriceOverrideSchema.parse(req.body);
     productMatch.polozky_match[idx].cenova_uprava = parsed;
+
+    let warnings: PriceSanityFlag[] = [];
+    if (parsed.potvrzeno) {
+      const findings = refreshPriceSanityFlags(productMatch);
+      const itemFindings = findingsForItemPositions(productMatch, findings, [idx]);
+      const hardFindings = itemFindings.filter((finding) => finding.level === 'hard');
+      if (hardFindings.length > 0) {
+        return res.status(409).json({
+          error: `Cenu nelze potvrdit: ${formatSanityBlockingMessage(productMatch, hardFindings)}`,
+          sanity_flags: hardFindings,
+        });
+      }
+      warnings = itemFindings.filter((finding) => finding.level === 'warn');
+    }
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
-    res.json({ success: true, itemIndex: idx, cenova_uprava: parsed });
+    res.json({ success: true, itemIndex: idx, cenova_uprava: parsed, warnings });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
@@ -2110,7 +2174,12 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
   try {
     const gate = await computeSubmitGate(join(OUTPUT_DIR, id));
     if (!gate.ready) {
-      return res.status(409).json({ error: 'not_ready', reason: 'Nabídka není připravená k podání.', problems: gate.problems });
+      return res.status(409).json({
+        error: 'not_ready',
+        reason: 'Nabídka není připravená k podání.',
+        problems: gate.problems,
+        warnings: gate.warnings,
+      });
     }
     const pipeline = await getPipelineStatus(id);
     const done = stepsDone(pipeline.steps);
@@ -2124,7 +2193,7 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
     const actor = (req as any).user?.sub ?? null;
     const actorName = (req as any).user?.name ?? null;
     await logActivity(id, 'finalized', actor, { actor_name: actorName });
-    res.json({ success: true, status: 'odeslana' });
+    res.json({ success: true, status: 'odeslana', warnings: gate.warnings });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

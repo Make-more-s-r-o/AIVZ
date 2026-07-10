@@ -5,8 +5,11 @@ import { config } from 'dotenv';
 import { callClaude, AICallTimeoutError, getMatchCallDeadlineMs } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
+import { checkPriceSanity } from './lib/price-sanity.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
+import { getCompany, getTenderCompanyId, resolveDefaultMarzeProcent } from './lib/company-store.js';
+import { calculateItemPrice } from './lib/price-calculator.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -250,9 +253,12 @@ async function main() {
     await readFile(analysisPath, 'utf-8')
   );
 
-  const company = JSON.parse(
-    await readFile(join(ROOT, 'config', 'company.json'), 'utf-8')
-  );
+  // Produkce ukládá firmy do config/companies ve volume. Respektuj firmu přiřazenou
+  // zakázce, potom default firmu a až nakonec legacy company.json.
+  const companyId = await getTenderCompanyId(tenderId);
+  const company = (companyId ? await getCompany(companyId) : null)
+    ?? await getCompany('default')
+    ?? JSON.parse(await readFile(join(ROOT, 'config', 'company.json'), 'utf-8'));
   const companyObory: string[] = company.obory || [];
   const companyKeywordFilters: Record<string, string[]> = company.keyword_filters || {};
 
@@ -754,25 +760,32 @@ async function main() {
     console.log(`  Price caps applied to ${capped} item(s).`);
   }
 
-  // Pre-fill prices from the AI-recommended candidate. Margin is configurable
-  // (company.default_marze_procent, default 0 %). potvrzeno=false ON PURPOSE — a binding price
-  // must be reviewed/confirmed by the user before submission (H3). Items breaching the hard
-  // cap are flagged in poznamka and warned (C3).
-  const defaultMarze = Number(company.default_marze_procent) || 0;
+  // Normalizuj vybrany_index do platného rozsahu. AI ho občas vrátí mimo pole kandidátů
+  // (prod tender-1779109774773 pol. „Projektor (P5)": vybrany_index mířil za konec) →
+  // později `kandidati[vybrany_index]` = undefined a summary logging / generate spadl.
+  for (const pm of polozkyMatch) {
+    const n = pm.kandidati?.length ?? 0;
+    if (n === 0) continue;
+    if (!Number.isInteger(pm.vybrany_index) || pm.vybrany_index < 0 || pm.vybrany_index >= n) {
+      console.warn(`  ⚠ Neplatný vybrany_index (${pm.vybrany_index}/${n}) u „${pm.polozka_nazev}" — nastavuji na 0`);
+      pm.vybrany_index = 0;
+    }
+  }
+
+  // Předvyplň ceny z AI kandidáta. Výchozí marže firmy má v kódu fallback 10 %,
+  // protože produkční volume může obsahovat starý config bez nového klíče.
+  // potvrzeno=false zůstává záměrně — závaznou cenu musí uživatel zkontrolovat (H3).
+  const defaultMarze = resolveDefaultMarzeProcent(company.default_marze_procent);
   for (const pm of polozkyMatch) {
     const selected = pm.kandidati?.[pm.vybrany_index];
     if (selected && !pm.cenova_uprava) {
       const bez = selected.cena_bez_dph || 0;
-      const nabBez = Math.round(bez * (1 + defaultMarze / 100) * 100) / 100;
-      const nabS = Math.round(nabBez * 1.21 * 100) / 100;
+      const calculatedPrice = calculateItemPrice(bez, defaultMarze);
+      const nabS = calculatedPrice.nabidkova_cena_s_dph;
       const cap = pm.cena_max_s_dph;
       const overCap = cap != null && nabS > cap;
       pm.cenova_uprava = {
-        nakupni_cena_bez_dph: bez,
-        nakupni_cena_s_dph: Math.round(bez * 1.21 * 100) / 100,
-        marze_procent: defaultMarze,
-        nabidkova_cena_bez_dph: nabBez,
-        nabidkova_cena_s_dph: nabS,
+        ...calculatedPrice,
         potvrzeno: false,
         poznamka: overCap
           ? `⚠ PŘEKRAČUJE STROP ${cap} Kč s DPH — uprav cenu. Cena z AI odhadu, nutné potvrzení.`
@@ -781,6 +794,15 @@ async function main() {
       if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
     }
   }
+
+  // Sanity nálezy pouze čteme a zapisujeme jako flagy; ceny ani potvrzení tím neměníme.
+  const sanityFindings = checkPriceSanity(polozkyMatch, {});
+  for (const pm of polozkyMatch) {
+    pm.sanity_flags = sanityFindings.filter((finding) => finding.polozka_index === pm.polozka_index);
+  }
+  const hardSanityCount = sanityFindings.filter((finding) => finding.level === 'hard').length;
+  const warnSanityCount = sanityFindings.filter((finding) => finding.level === 'warn').length;
+  console.log(`  Price sanity: ${hardSanityCount} hard, ${warnSanityCount} warn.`);
 
   // Build final ProductMatch object — always use polozky_match format now
   const finalParse = ProductMatchSchema.safeParse({
@@ -800,15 +822,21 @@ async function main() {
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
-  // Summary logging
+  // Summary logging — defenzivně: product-match.json je už úspěšně uložen VÝŠE, takže
+  // pouhý výpis NESMÍ shodit celý krok (dřív undefined `selected` → TypeError → exit 1 →
+  // job „error" i když byla práce hotová a uložená).
   console.log(`\nMatching complete — ${polozkyMatch.length} items:`);
   for (const pm of productMatch.polozky_match || []) {
-    const selected = pm.kandidati[pm.vybrany_index];
+    const selected = pm.kandidati?.[pm.vybrany_index];
     const typeLabel = (pm as any).typ === 'sluzba' ? ' [služba]' : (pm as any).typ === 'prislusenstvi' ? ' [přísl.]' : '';
     console.log(`  ${pm.polozka_nazev}${typeLabel}:`);
-    console.log(`    Candidates: ${pm.kandidati.length}`);
-    console.log(`    Selected: ${selected.vyrobce} ${selected.model}`);
-    console.log(`    Price (bez DPH): ${selected.cena_bez_dph.toLocaleString('cs-CZ')} Kč`);
+    console.log(`    Candidates: ${pm.kandidati?.length ?? 0}`);
+    if (selected) {
+      console.log(`    Selected: ${selected.vyrobce} ${selected.model}`);
+      console.log(`    Price (bez DPH): ${(selected.cena_bez_dph ?? 0).toLocaleString('cs-CZ')} Kč`);
+    } else {
+      console.log('    Selected: (žádný platný kandidát)');
+    }
   }
 
   console.log(`\nOutput: ${outputPath}`);

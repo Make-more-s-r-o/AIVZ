@@ -47,6 +47,7 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 async function makeCase(files: {
   productMatch?: unknown;
   fieldValidation?: unknown;
+  partsSelection?: unknown;
 }): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'vz-submit-gate-'));
   tempDirs.push(dir);
@@ -56,21 +57,30 @@ async function makeCase(files: {
   if (files.fieldValidation !== undefined) {
     await writeFile(join(dir, 'field-validation.json'), JSON.stringify(files.fieldValidation), 'utf-8');
   }
+  if (files.partsSelection !== undefined) {
+    await writeFile(join(dir, 'parts-selection.json'), JSON.stringify(files.partsSelection), 'utf-8');
+  }
   return dir;
 }
 
+// Položka s cast_id pro test vícečástových zakázek.
+function partItem(polozka_index: number, cast_id: string, potvrzeno: boolean) {
+  return { ...item(polozka_index, null, 1000, potvrzeno), cast_id };
+}
+
 // Tvar položky odpovídá reálnému PolozkaMatch (viz types.ts): pole, která gate
-// čte, jsou polozka_index, cena_max_s_dph a cenova_uprava.nabidkova_cena_s_dph.
+// čte, jsou polozka_index, cena_max_s_dph a cenova_uprava (cena + potvrzeno).
 function item(
   polozka_index: number,
   cena_max_s_dph: number | null,
   nabidkova_cena_s_dph: number,
+  potvrzeno = true,
 ) {
   return {
     polozka_nazev: `Položka ${polozka_index + 1}`,
     polozka_index,
     cena_max_s_dph,
-    cenova_uprava: { nabidkova_cena_s_dph },
+    cenova_uprava: { nabidkova_cena_s_dph, potvrzeno },
   };
 }
 
@@ -93,6 +103,38 @@ async function run(): Promise<void> {
     const res = await computeSubmitGate(dir);
     assert.equal(res.ready, true);
     assert.deepEqual(res.problems, []);
+  });
+
+  // 1b) Nepotvrzená cena → ready=false (kryje i scénář „přepnutí kandidáta smazalo
+  // potvrzení, dokumenty zůstaly stale" — sanity fallback na cenu kandidáta nesmí stačit).
+  await test('unconfirmed → ready=false, problém zmiňuje "potvrzenou cenu"', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        polozky_match: [item(0, null, 1000), item(1, 50000, 45000, false)],
+      },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.some((p) => p.includes('potvrzenou cenu')));
+  });
+
+  // 1c) Vícečástová zakázka: nepotvrzené položky NEVYBRANÉ části nesmí blokovat gate
+  // (podává se jen část A; položky části B zůstanou nepotvrzené a musí se ignorovat).
+  await test('multi-part → nepotvrzené položky nevybrané části neblokují', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        polozky_match: [
+          partItem(0, 'A', true),   // vybraná část, potvrzeno
+          partItem(1, 'A', true),   // vybraná část, potvrzeno
+          partItem(2, 'B', false),  // NEvybraná část, nepotvrzeno — musí být ignorováno
+        ],
+      },
+      partsSelection: { selected_parts: ['A'] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, true, `problems: ${res.problems.join(' | ')}`);
   });
 
   // 2) Překročený cenový strop → ready=false + problém zmiňuje "strop".
