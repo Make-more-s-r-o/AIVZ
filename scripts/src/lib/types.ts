@@ -159,6 +159,7 @@ export const PriceSanityFlagSchema = z.object({
     'bid_share',
     'low_confidence_big',
     'outlier_vs_batch',
+    'extreme_outlier',
   ]),
   message: z.string(),
 });

@@ -54,7 +54,7 @@ export interface PriceOverride {
 export interface PriceSanityFlag {
   polozka_index: number;
   level: 'hard' | 'warn';
-  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch';
+  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch' | 'extreme_outlier';
   message: string;
 }
 

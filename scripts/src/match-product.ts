@@ -44,6 +44,20 @@ const WAREHOUSE_MATCH_ENABLED = process.env.WAREHOUSE_MATCH_ENABLED === '1';
 const WAREHOUSE_MIN_SCORE = 0.35;
 const WAREHOUSE_AUTOSELECT_SCORE = 0.75;
 
+// Zástupná / prázdná hodnota názvu produktu (AI někdy vrátí „None", „-", prázdno místo reálného
+// produktu). Kandidát bez reálného produktu NESMÍ dostat auto-předvyplněnou závaznou cenu k podání.
+function isPlaceholderProductName(value: unknown): boolean {
+  const v = String(value ?? '').trim().toLowerCase();
+  return v === '' || v === '-' || v === '–' || v === '—' || v === 'none' || v === 'null' || v === 'n/a';
+}
+
+// Reálný produkt = má smysluplný model NEBO popis. Samotný výrobce nestačí (služby mají
+// záměrně `vyrobce: '-'` a přesto jsou legitimní — jejich model je název služby).
+function candidateHasRealProduct(candidate: { vyrobce?: string; model?: string; popis?: string } | undefined): boolean {
+  if (!candidate) return false;
+  return !isPlaceholderProductName(candidate.model) || !isPlaceholderProductName(candidate.popis);
+}
+
 // Service keywords — fixed-price services, no product matching needed
 const SERVICE_KEYWORDS = [
   'doprava', 'transport', 'doručení', 'dodání',
@@ -784,14 +798,25 @@ async function main() {
       const nabS = calculatedPrice.nabidkova_cena_s_dph;
       const cap = pm.cena_max_s_dph;
       const overCap = cap != null && nabS > cap;
+      // Kandidát bez reálného produktu (halucinace / prázdný název) NIKDY nedostane
+      // auto-potvrzenou cenu — cena je čirý AI odhad bez ověřeného produktu. potvrzeno
+      // zůstává false (viz H3) a poznámka to výslovně označí jako nutnou kontrolu.
+      const hasRealProduct = candidateHasRealProduct(selected);
+      let poznamka: string;
+      if (!hasRealProduct) {
+        poznamka = 'VYŽADUJE KONTROLU: bez reálného produktu — cena je AI odhad bez ověřeného produktu, potvrďte až po výběru reálného produktu.';
+      } else if (overCap) {
+        poznamka = `⚠ PŘEKRAČUJE STROP ${cap} Kč s DPH — uprav cenu. Cena z AI odhadu, nutné potvrzení.`;
+      } else {
+        poznamka = 'Cena z AI odhadu — zkontrolujte a potvrďte před podáním.';
+      }
       pm.cenova_uprava = {
         ...calculatedPrice,
         potvrzeno: false,
-        poznamka: overCap
-          ? `⚠ PŘEKRAČUJE STROP ${cap} Kč s DPH — uprav cenu. Cena z AI odhadu, nutné potvrzení.`
-          : 'Cena z AI odhadu — zkontrolujte a potvrďte před podáním.',
+        poznamka,
       };
       if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
+      if (!hasRealProduct) console.warn(`  ⚠ Bez reálného produktu: "${pm.polozka_nazev}" — cena ${nabS} Kč je AI odhad, vyžaduje kontrolu.`);
     }
   }
 
