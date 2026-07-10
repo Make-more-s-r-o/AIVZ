@@ -17,6 +17,8 @@ const ROOT = new URL('../../../', import.meta.url).pathname;
 const COMPANIES_DIR = join(ROOT, 'config', 'companies');
 const LEGACY_PATH = join(ROOT, 'config', 'company.json');
 
+export const DEFAULT_MARZE_PROCENT = 10;
+
 export interface CompanyData {
   id: string;
   nazev: string;
@@ -31,10 +33,30 @@ export interface CompanyData {
   jednajici_osoba: string;
   telefon?: string;
   email?: string;
+  default_marze_procent?: number;
   obory?: string[];
   keyword_filters?: Record<string, string[]>;
   created_at: string;
   updated_at: string;
+}
+
+/** Staré config volume marži nemají; v paměti jim proto doplníme bezpečný výchozí stav. */
+export function resolveDefaultMarzeProcent(value: unknown): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : Number.NaN;
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100
+    ? parsed
+    : DEFAULT_MARZE_PROCENT;
+}
+
+function withCompanyDefaults(company: CompanyData): CompanyData {
+  return {
+    ...company,
+    default_marze_procent: resolveDefaultMarzeProcent(company.default_marze_procent),
+  };
 }
 
 /** One-time migration from config/company.json → config/companies/default.json */
@@ -65,6 +87,7 @@ export async function migrateFromLegacy(): Promise<void> {
       jednajici_osoba: legacy.jednajici_osoba || '',
       telefon: legacy.telefon,
       email: legacy.email,
+      default_marze_procent: resolveDefaultMarzeProcent(legacy.default_marze_procent),
       obory: legacy.obory,
       keyword_filters: legacy.keyword_filters,
       created_at: now,
@@ -86,7 +109,7 @@ export async function getAllCompanies(): Promise<CompanyData[]> {
   for (const f of jsonFiles) {
     try {
       const data = JSON.parse(await readFile(join(COMPANIES_DIR, f), 'utf-8'));
-      companies.push(data);
+      companies.push(withCompanyDefaults(data));
     } catch {}
   }
   return companies.sort((a, b) => a.nazev.localeCompare(b.nazev, 'cs'));
@@ -94,7 +117,8 @@ export async function getAllCompanies(): Promise<CompanyData[]> {
 
 export async function getCompany(id: string): Promise<CompanyData | null> {
   try {
-    return JSON.parse(await readFile(join(COMPANIES_DIR, `${id}.json`), 'utf-8'));
+    const company: CompanyData = JSON.parse(await readFile(join(COMPANIES_DIR, `${id}.json`), 'utf-8'));
+    return withCompanyDefaults(company);
   } catch {
     return null;
   }
@@ -103,7 +127,7 @@ export async function getCompany(id: string): Promise<CompanyData | null> {
 export async function createCompany(data: Omit<CompanyData, 'id' | 'created_at' | 'updated_at'>): Promise<CompanyData> {
   const id = randomUUID().slice(0, 8);
   const now = new Date().toISOString();
-  const company: CompanyData = { ...data, id, created_at: now, updated_at: now };
+  const company = withCompanyDefaults({ ...data, id, created_at: now, updated_at: now });
   await mkdir(COMPANIES_DIR, { recursive: true });
   await writeFile(join(COMPANIES_DIR, `${id}.json`), JSON.stringify(company, null, 2), 'utf-8');
   await mkdir(join(COMPANIES_DIR, id, 'documents'), { recursive: true });
@@ -113,13 +137,13 @@ export async function createCompany(data: Omit<CompanyData, 'id' | 'created_at' 
 export async function updateCompany(id: string, data: Partial<CompanyData>): Promise<CompanyData | null> {
   const existing = await getCompany(id);
   if (!existing) return null;
-  const updated: CompanyData = {
+  const updated = withCompanyDefaults({
     ...existing,
     ...data,
     id, // prevent id change
     created_at: existing.created_at,
     updated_at: new Date().toISOString(),
-  };
+  });
   await writeFile(join(COMPANIES_DIR, `${id}.json`), JSON.stringify(updated, null, 2), 'utf-8');
   return updated;
 }

@@ -115,6 +115,7 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
     ucet: company?.ucet || '',
     datova_schranka: company?.datova_schranka || '',
     rejstrik: company?.rejstrik || '',
+    default_marze_procent: company?.default_marze_procent ?? 10,
   });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
@@ -160,6 +161,16 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
         <Field label="E-mail" value={form.email} onChange={set('email')} type="email" placeholder="info@firma.cz" />
         <Field label="Bankovní účet" value={form.ucet} onChange={set('ucet')} placeholder="283090885/0300" />
         <Field label="Datová schránka" value={form.datova_schranka} onChange={set('datova_schranka')} placeholder="abc123" />
+        <Field
+          label="Výchozí marže (%)"
+          value={form.default_marze_procent}
+          onChange={(e) => setForm(prev => ({ ...prev, default_marze_procent: Number(e.target.value) }))}
+          type="number"
+          min={0}
+          max={100}
+          step={1}
+          required
+        />
         <Field label="Zápis v rejstříku" value={form.rejstrik} onChange={set('rejstrik')} placeholder="C 293255 u Městského soudu" className="sm:col-span-2 lg:col-span-3" />
       </div>
       <div className="mt-4 flex gap-2">
@@ -231,7 +242,7 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
           <div>
             <div className="font-medium" style={{ color: 'var(--text-primary)' }}>{company.nazev}</div>
             <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-              IČO: {company.ico} | {company.jednajici_osoba}
+              IČO: {company.ico} | {company.jednajici_osoba} | Výchozí marže: {company.default_marze_procent ?? 10} %
             </div>
           </div>
         </div>

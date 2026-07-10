@@ -4,6 +4,7 @@ import type { PriceOverrideData } from '../lib/api';
 import type { ProductCandidate, PriceOverride } from '../types/tender';
 import { getErrorMessage } from '../types/tender';
 import { Input } from './ui';
+import { calculateItemPrice, roundCurrency } from '../lib/price-calculator';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; bg: string; fg: string }> = {
   vysoka: { label: 'Vysoká', bg: 'var(--success-bg)', fg: 'var(--success-fg)' },
@@ -50,9 +51,11 @@ export default function ItemPriceCalculator({
     }
   }, [existingOverride, selectedProduct]);
 
-  const nabidkovaCenaBezDph = Math.round(nakupniCena * (1 + marzeProcent / 100));
-  const nabidkovaCenaSdph = Math.round(nabidkovaCenaBezDph * 1.21);
-  const nakupniCenaSdph = Math.round(nakupniCena * 1.21);
+  const calculatedPrice = calculateItemPrice(nakupniCena, marzeProcent);
+  const nabidkovaCenaBezDph = calculatedPrice.nabidkova_cena_bez_dph;
+  const nabidkovaCenaSdph = calculatedPrice.nabidkova_cena_s_dph;
+  const nakupniCenaSdph = calculatedPrice.nakupni_cena_s_dph;
+  const hasZeroMargin = nakupniCena > 0 && nabidkovaCenaBezDph === roundCurrency(nakupniCena);
 
   const handleConfirm = useCallback(async () => {
     setIsSaving(true);
@@ -202,6 +205,16 @@ export default function ItemPriceCalculator({
           />
         </div>
       </div>
+
+      {hasZeroMargin && (
+        <div
+          className="mb-3 flex items-start gap-2 rounded-md px-2 py-1.5 text-xs"
+          style={{ border: '1px solid var(--warning-bg)', background: 'var(--warning-soft-bg)', color: 'var(--warning-fg)' }}
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>Marže 0 % — nabídka bez zisku</span>
+        </div>
+      )}
 
       {/* Line total for qty > 1 */}
       {mnozstvi && mnozstvi > 1 && (
