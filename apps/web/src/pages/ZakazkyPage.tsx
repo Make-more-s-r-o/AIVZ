@@ -43,12 +43,14 @@ interface Row {
   hodnota: number | null | undefined;
   lhuta: string | null | undefined;
   decision: Decision | null;
+  score: number | null;
+  scoreReasons: string[];
   days: number | null;
   assignee: string | null;
   stitky: Stitek[];
 }
 
-type SortKey = 'nazev' | 'zadavatel' | 'hodnota' | 'lhuta' | 'stage' | 'decision';
+type SortKey = 'nazev' | 'zadavatel' | 'hodnota' | 'lhuta' | 'stage' | 'score';
 
 const HEAD: { label: string; align?: 'right'; sortKey?: SortKey }[] = [
   { label: 'Název', sortKey: 'nazev' },
@@ -56,13 +58,12 @@ const HEAD: { label: string; align?: 'right'; sortKey?: SortKey }[] = [
   { label: 'Hodnota', align: 'right', sortKey: 'hodnota' },
   { label: 'Lhůta', sortKey: 'lhuta' },
   { label: 'Stav', sortKey: 'stage' },
-  { label: 'Doporučení', sortKey: 'decision' },
+  { label: 'Skóre', sortKey: 'score' },
   { label: 'Řeší' },
 ];
 
-// Pořadí pro řazení kategoriálních sloupců (Stav dle životního cyklu, Doporučení dle priority).
+// Pořadí pro řazení stavů dle životního cyklu.
 const STAGE_ORDER: Record<StageKey, number> = Object.fromEntries(STAGES.map((s, i) => [s.key, i])) as Record<StageKey, number>;
-const DECISION_ORDER: Record<Decision, number> = { GO: 0, ZVAZIT: 1, NOGO: 2 };
 
 const mono: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-2xs)', color: 'var(--text-tertiary)' };
 
@@ -109,7 +110,9 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           ico: a?.zadavatel_ico || '',
           hodnota: a?.predpokladana_hodnota ?? undefined,
           lhuta,
-          decision: normalizeDecision(a?.rozhodnuti ?? undefined),
+          decision: normalizeDecision(a?.go_no_go?.doporuceni ?? a?.rozhodnuti ?? undefined),
+          score: a?.go_no_go?.score ?? null,
+          scoreReasons: a?.go_no_go?.duvody ?? [],
           days: deadlineDays(lhuta),
           assignee: t.assignee ?? null,
           stitky: t.stitky ?? [],
@@ -170,9 +173,9 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
         }
         case 'stage':
           return dir * (STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage]);
-        case 'decision': {
-          if (!a.decision || !b.decision) return nullsLast(!a.decision) - nullsLast(!b.decision);
-          return dir * (DECISION_ORDER[a.decision] - DECISION_ORDER[b.decision]);
+        case 'score': {
+          if (a.score == null || b.score == null) return nullsLast(a.score == null) - nullsLast(b.score == null);
+          return dir * (a.score - b.score);
         }
         default:
           return 0;
@@ -548,10 +551,15 @@ function TableRow({ row, usersMap, onOpen }: { row: Row; usersMap: Map<string, s
         <StageBadge status={row.stage} size="sm" />
       </div>
 
-      {/* Doporučení — GO/NOGO/ZVÁŽIT z AI analýzy (dokud není analýza, prázdné). */}
+      {/* Skóre — číselný go/no-go výsledek; staré analýzy mají fallback bez čísla. */}
       <div>
         {row.decision ? (
-          <DecisionPill decision={row.decision} style={{ padding: '3px 10px', fontSize: 'var(--font-size-2xs)' }} />
+          <DecisionPill
+            decision={row.decision}
+            score={row.score ?? undefined}
+            reasons={row.scoreReasons}
+            style={{ padding: '3px 10px', fontSize: 'var(--font-size-2xs)' }}
+          />
         ) : (
           dash
         )}

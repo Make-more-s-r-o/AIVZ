@@ -11,9 +11,10 @@ import {
   getJobStatus,
   JobNotFoundError,
   type PriceOverrideData,
+  type WinPriceBand,
 } from '../lib/api';
 import { cn } from '../lib/cn';
-import { ChevronDown, ChevronRight, Package, Wrench, Mouse, Globe, ExternalLink, Loader2, CheckCheck } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, Package, Wrench, Mouse, Globe, ExternalLink, Loader2, CheckCheck } from 'lucide-react';
 import ProductCandidateCard from './ProductCandidateCard';
 import ItemPriceCalculator from './ItemPriceCalculator';
 import { useToast } from './ui';
@@ -67,6 +68,7 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
           tenderId={tenderId}
           budget={budget}
           queryClient={queryClient}
+          historySubject={analysis?.polozky?.[0]?.nazev ?? analysis?.zakazka?.predmet}
         />
       )}
     </div>
@@ -301,9 +303,10 @@ interface SingleItemViewProps {
   tenderId: string;
   budget?: number;
   queryClient: QueryClient;
+  historySubject?: string;
 }
 
-function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemViewProps) {
+function SingleItemView({ match, tenderId, budget, queryClient, historySubject }: SingleItemViewProps) {
   const { toast } = useToast();
   const selectedProduct = match?.kandidati?.[match?.vybrany_index ?? 0];
   const existingOverride = match?.cenova_uprava;
@@ -366,6 +369,8 @@ function SingleItemView({ match, tenderId, budget, queryClient }: SingleItemView
           budget={budget}
           onConfirm={async (data) => { await handleConfirm(data); setWebDraft(null); }}
           label="Cenová kalkulace"
+          historySubject={historySubject ?? `${selectedProduct.vyrobce} ${selectedProduct.model}`}
+          historyCacheKey={`${tenderId}:single`}
         />
       )}
     </div>
@@ -392,6 +397,17 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
   const [bulkSaving, setBulkSaving] = useState(false);
   // Právě ukládaný výběr kandidáta — klíč = polozka_index (backend klíčuje stejně).
   const [selectingItem, setSelectingItem] = useState<number | null>(null);
+  const [winPriceBands, setWinPriceBands] = useState<Map<string, { subject: string; band: WinPriceBand }>>(
+    () => new Map(),
+  );
+
+  const handleWinPriceBandLoaded = useCallback((cacheKey: string, subject: string, band: WinPriceBand) => {
+    setWinPriceBands((previous) => {
+      const current = previous.get(cacheKey);
+      if (current?.subject === subject && current.band === band) return previous;
+      return new Map(previous).set(cacheKey, { subject, band });
+    });
+  }, []);
 
   const toggleSelect = (index: number) => {
     setSelected((prev) => {
@@ -466,6 +482,24 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
   const totalMarzeProcent = totalNakupniBezDph > 0
     ? roundCurrency(totalMarzeKc / totalNakupniBezDph * 100)
     : 0;
+
+  // Srovnání používá stejné množství jako celková nabídka. Data se načítají výhradně po
+  // kliknutí na „Historie cen"; upozornění se ukáže až při pokrytí alespoň poloviny položek.
+  const historicalBands = polozky.flatMap((pm, index) => {
+    const cacheKey = `${tenderId}:${index}`;
+    const loaded = winPriceBands.get(cacheKey);
+    if (!loaded || loaded.subject !== pm.polozka_nazev || loaded.band.n <= 0
+      || loaded.band.median_bez_dph === undefined) return [];
+    return [{ median: loaded.band.median_bez_dph, quantity: pm.mnozstvi || 1 }];
+  });
+  const historicalMedianTotal = historicalBands.reduce(
+    (sum, item) => sum + item.median * item.quantity,
+    0,
+  );
+  const hasHistoricalCoverage = polozky.length > 0 && historicalBands.length / polozky.length >= 0.5;
+  const isMarkedlyAboveHistory = hasHistoricalCoverage
+    && historicalMedianTotal > 0
+    && totalBezDph > historicalMedianTotal * 1.5;
 
   const allConfirmed = polozky.every((pm) => pm.cenova_uprava?.potvrzeno);
   const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
@@ -591,6 +625,13 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
           <span>
             Celková cena ({totalBezDph.toLocaleString('cs-CZ')} Kč) překračuje rozpočet zakázky ({budget.toLocaleString('cs-CZ')} Kč).
           </span>
+        </div>
+      )}
+
+      {isMarkedlyAboveHistory && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>Nabídka je výrazně nad historickými cenami — zkontrolujte konkurenceschopnost</span>
         </div>
       )}
 
@@ -779,6 +820,9 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                     label={`Cenová kalkulace: ${pm.polozka_nazev}`}
                     mnozstvi={pm.mnozstvi}
                     jednotka={pm.jednotka}
+                    historySubject={pm.polozka_nazev}
+                    historyCacheKey={`${tenderId}:${idx}`}
+                    onWinPriceBandLoaded={handleWinPriceBandLoaded}
                   />
                 )}
               </div>

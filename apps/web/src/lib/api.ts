@@ -46,6 +46,25 @@ export interface TenderAnalysisSummary {
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null;
   rozhodnuti: string | null;
+  go_no_go?: GoNoGo | null;
+}
+
+export interface GoNoGo {
+  score: number;
+  doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+  duvody: string[];
+}
+
+export interface HlidacTenderCandidate {
+  id: string;
+  nazev: string;
+  zadavatel: string;
+  budget: number | null;
+  lhuta: string | null;
+  stavVZ: string | null;
+  url: string;
+  dokumenty: Array<{ nazev: string; url: string }>;
+  cpv: unknown[];
 }
 
 export interface TenderSummary {
@@ -85,15 +104,28 @@ export interface PipelineSteps {
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';
 export type StepName = keyof PipelineSteps;
+export type JobStatusValue = 'queued' | 'running' | 'done' | 'error' | 'interrupted';
+
+export interface RunAllStatus {
+  jobId: string;
+  status: JobStatusValue;
+  currentStep?: StepName;
+  failedStep?: StepName;
+  error?: string;
+}
 
 export interface JobStatus {
   id: string;
   tenderId: string;
   step: string;
-  status: 'queued' | 'running' | 'done' | 'error';
+  status: JobStatusValue;
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  kind?: 'step' | 'pipeline';
+  parentJobId?: string;
+  currentStep?: StepName;
+  failedStep?: StepName;
   logs: string[];
   totalLogLines: number;
 }
@@ -116,6 +148,10 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 export async function getTenders(): Promise<TenderSummary[]> {
   return fetchJson('/tenders');
+}
+
+export async function getHlidacTenders(query: string): Promise<HlidacTenderCandidate[]> {
+  return fetchJson(`/monitoring/hlidac?q=${encodeURIComponent(query)}`);
 }
 
 /**
@@ -148,6 +184,7 @@ export async function uploadFiles(files: File[], tenderId?: string): Promise<Ten
 export interface TenderStatusResponse {
   tenderId: string;
   steps: PipelineSteps;
+  runAll?: RunAllStatus;
   pdfAvailable?: boolean;
   // CRM (M2): persistovaný stav + řešitel + efektivní fáze + povolené přechody.
   status?: StageKey | null;
@@ -170,6 +207,31 @@ export async function getAnalysis(id: string) {
 
 export async function getProductMatch(id: string) {
   return fetchJson<ProductMatch>(`/tenders/${id}/product-match`);
+}
+
+export interface WinPriceSample {
+  predmet: string;
+  cena_bez_dph: number;
+  dodavatel_nazev: string | null;
+  datum: string | null;
+  url: string | null;
+}
+
+export interface WinPriceBand {
+  n: number;
+  median_bez_dph?: number;
+  p25?: number;
+  p75?: number;
+  min?: number;
+  max?: number;
+  samples?: WinPriceSample[];
+}
+
+/** Historické ceny jsou pouze informační podklad; tato funkce nic nezapisuje. */
+export async function getWinPriceBand(subject: string, category?: string): Promise<WinPriceBand> {
+  const params = new URLSearchParams({ q: subject });
+  if (category) params.set('kategorie', category);
+  return fetchJson(`/winprice/band?${params.toString()}`);
 }
 
 export async function getDocuments(id: string): Promise<string[]> {
@@ -198,9 +260,27 @@ export async function runStep(id: string, step: StepName): Promise<{ jobId: stri
   return res.json();
 }
 
+/** Spustí všech pět kroků jako serverem řízený sekvenční řetězec. */
+export async function runAllSteps(id: string): Promise<RunAllStatus> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/run/all`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Spuštění pipeline selhalo');
+  }
+  return res.json();
+}
+
 /** Poll job status (with optional log offset for incremental logs) */
 /**
- * Job zmizel ze serverové in-memory fronty (typicky restart/deploy během běhu úlohy).
+ * Job není v serverovém registru (např. po úklidu starých jobů nebo neúspěšné obnově souboru).
  * Odlišuje se od síťové chyby: 404 = úloha je definitivně ztracená, nemá smysl dál pollovat.
  */
 export class JobNotFoundError extends Error {
@@ -220,7 +300,7 @@ export async function getJobStatus(jobId: string, since?: number): Promise<JobSt
     window.location.reload();
     throw new Error('Session expired');
   }
-  // 404 = úloha už v paměti serveru není (restart/deploy) → vlastní typ, ať to FE nezamění
+  // 404 = úloha už v registru serveru není → vlastní typ, ať to FE nezamění
   // se síťovým výpadkem a nepoluje donekonečna (nekonečný spinner).
   if (res.status === 404) {
     throw new JobNotFoundError();

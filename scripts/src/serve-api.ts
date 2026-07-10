@@ -58,6 +58,16 @@ import { getImportPreview, runImport, type ColumnMapping } from './lib/csv-impor
 import { generateMissingEmbeddings } from './lib/embedding-service.js';
 import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
+import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
+import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
+import {
+  RUN_ALL_STEPS,
+  advanceRunAllChain,
+  loadPipelineJobs,
+  savePipelineJobs,
+  type PipelineJob as Job,
+  type PipelineStep,
+} from './lib/pipeline-job-state.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -65,6 +75,7 @@ const ROOT = new URL('../../', import.meta.url).pathname;
 const INPUT_DIR = join(ROOT, 'input');
 const OUTPUT_DIR = join(ROOT, 'output');
 const SCRIPTS_DIR = join(ROOT, 'scripts', 'src');
+const JOBS_FILE = join(OUTPUT_DIR, '.jobs.json');
 const PORT = process.env.API_PORT || 3001;
 
 // Startup validation
@@ -188,20 +199,35 @@ app.use(async (req, res, next) => {
 
 // --- Async Job Queue ---
 
-interface Job {
-  id: string;
-  tenderId: string;
-  step: string;
-  status: 'queued' | 'running' | 'done' | 'error';
-  logs: string[];
-  startedAt: string;
-  finishedAt?: string;
-  error?: string;
-}
-
 const jobs = new Map<string, Job>();
 let currentJob: string | null = null;
 const jobQueue: string[] = [];
+let persistTimer: NodeJS.Timeout | null = null;
+let persistDirty = false;
+let persistPromise = Promise.resolve();
+
+// Logy mohou přicházet po malých kusech, proto zápisy krátce slučujeme. Stavové přechody
+// přesto vždy skončí v atomickém snapshotu output/.jobs.json.
+function scheduleJobsPersist() {
+  persistDirty = true;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => { void flushJobsPersist(); }, 50);
+}
+
+async function flushJobsPersist(): Promise<void> {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (!persistDirty) return persistPromise;
+  persistDirty = false;
+  const snapshot = [...jobs.values()].map((job) => ({ ...job, logs: [...job.logs] }));
+  persistPromise = persistPromise
+    .then(() => savePipelineJobs(JOBS_FILE, snapshot))
+    .catch((err) => console.error('Job persistence error:', err));
+  await persistPromise;
+  if (persistDirty) scheduleJobsPersist();
+}
 
 // Jediný zdroj pravdy: mapa krok → skript. Sdílená frontou (processQueue) i run endpointem,
 // aby se obě mapy nerozešly — dřív run endpoint 'verify-prices' NEznal, takže tlačítko
@@ -215,16 +241,83 @@ const STEP_FILES: Record<string, string> = {
   'verify-prices': 'verify-prices.ts',
 };
 
+async function getStepGateError(tenderId: string, step: string): Promise<string | null> {
+  if (step !== 'generate') return null;
+  try {
+    const matchRaw = await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8');
+    const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
+
+    if (matchData.polozky_match) {
+      const unconfirmed = matchData.polozky_match.filter((item) => !item.cenova_uprava?.potvrzeno);
+      if (unconfirmed.length > 0) {
+        const names = unconfirmed.map((item) => item.polozka_nazev).join(', ');
+        return `Nejprve potvrďte ceny u všech položek. Nepotvrzené: ${names}`;
+      }
+    } else if (!matchData.cenova_uprava?.potvrzeno) {
+      return 'Nejprve potvrďte ceny v záložce Produkty. Bez potvrzené cenové kalkulace nelze generovat dokumenty.';
+    }
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return 'Nejprve spusťte krok "Produkty" a potvrďte ceny.';
+    }
+    return `Chyba při čtení product-match.json: ${String(err)}`;
+  }
+  return null;
+}
+
+function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, startQueue = true): Job {
+  let jobId = randomUUID().slice(0, 8);
+  while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
+  const job: Job = {
+    id: jobId,
+    tenderId,
+    step,
+    status: 'queued',
+    logs: [],
+    startedAt: new Date().toISOString(),
+    kind: 'step',
+    parentJobId,
+  };
+  jobs.set(jobId, job);
+  jobQueue.push(jobId);
+  cleanupJobs();
+  scheduleJobsPersist();
+  if (startQueue) processQueue();
+  console.log(`Job ${jobId} queued: ${step} for ${tenderId}`);
+  return job;
+}
+
+function appendJobLogs(job: Job, lines: string[]) {
+  if (lines.length === 0) return;
+  job.logs.push(...lines);
+  if (job.parentJobId) {
+    const parent = jobs.get(job.parentJobId);
+    parent?.logs.push(...lines.map((line) => `[${job.step}] ${line}`));
+  }
+  scheduleJobsPersist();
+}
+
 function processQueue() {
   if (currentJob) return;
   const nextId = jobQueue.shift();
   if (!nextId) return;
 
   const job = jobs.get(nextId);
-  if (!job) return;
+  if (!job) {
+    processQueue();
+    return;
+  }
 
   currentJob = nextId;
   job.status = 'running';
+  if (job.parentJobId) {
+    const parent = jobs.get(job.parentJobId);
+    if (parent) {
+      parent.status = 'running';
+      parent.currentStep = job.step as PipelineStep;
+    }
+  }
+  scheduleJobsPersist();
 
   const scriptFile = STEP_FILES[job.step];
   if (!scriptFile) {
@@ -232,6 +325,7 @@ function processQueue() {
     job.error = `Unknown step: ${job.step}`;
     job.finishedAt = new Date().toISOString();
     currentJob = null;
+    scheduleJobsPersist();
     processQueue();
     return;
   }
@@ -274,11 +368,11 @@ function processQueue() {
   // Ukonči dítě: SIGTERM + eskalace na SIGKILL po 10s, pokud stále běží.
   const terminate = (reason: string) => {
     if (finished) return;
-    job.logs.push(`[TIMEOUT] ${reason}`);
+    appendJobLogs(job, [`[TIMEOUT] ${reason}`]);
     try { child.kill('SIGTERM'); } catch { /* už mrtvý */ }
     setTimeout(() => {
       if (!finished) {
-        job.logs.push('[TIMEOUT] process still alive 10s after SIGTERM — sending SIGKILL');
+        appendJobLogs(job, ['[TIMEOUT] process still alive 10s after SIGTERM — sending SIGKILL']);
         try { child.kill('SIGKILL'); } catch { /* už mrtvý */ }
       }
     }, 10000);
@@ -299,13 +393,13 @@ function processQueue() {
   child.stdout.on('data', (data: Buffer) => {
     resetIdleTimer();
     const lines = data.toString().split('\n').filter(Boolean);
-    job.logs.push(...lines);
+    appendJobLogs(job, lines);
   });
 
   child.stderr.on('data', (data: Buffer) => {
     resetIdleTimer();
     const lines = data.toString().split('\n').filter(Boolean);
-    job.logs.push(...lines);
+    appendJobLogs(job, lines);
   });
 
   const finishJob = (status: 'done' | 'error', error?: string) => {
@@ -317,8 +411,21 @@ function processQueue() {
     if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
     currentJob = null;
+    scheduleJobsPersist();
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
-    processQueue();
+    const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
+    if (!parent) {
+      processQueue();
+      return;
+    }
+    void advanceRunAllChain(parent, job, async (nextStep) => {
+      const gateError = await getStepGateError(job.tenderId, nextStep);
+      if (gateError) throw new Error(gateError);
+      enqueueStepJob(job.tenderId, nextStep, parent.id, false);
+    }).finally(() => {
+      scheduleJobsPersist();
+      processQueue();
+    });
   };
 
   child.on('close', (code, signal) => {
@@ -346,7 +453,7 @@ function processQueue() {
 function cleanupJobs() {
   if (jobs.size <= 100) return;
   const sorted = [...jobs.values()]
-    .filter(j => j.status === 'done' || j.status === 'error')
+    .filter(j => j.status === 'done' || j.status === 'error' || j.status === 'interrupted')
     .sort((a, b) => (a.startedAt > b.startedAt ? 1 : -1));
   const toRemove = sorted.slice(0, jobs.size - 100);
   for (const j of toRemove) {
@@ -422,12 +529,24 @@ async function getPipelineStatus(tenderId: string) {
 
   // Check if any step is currently running via job queue
   for (const job of jobs.values()) {
-    if (job.tenderId === tenderId && (job.status === 'running' || job.status === 'queued')) {
+    if (job.tenderId === tenderId && job.kind !== 'pipeline'
+      && (job.status === 'running' || job.status === 'queued') && job.step in steps) {
       steps[job.step as keyof typeof steps] = 'running';
     }
   }
 
-  return { tenderId, steps };
+  const latestRunAll = [...jobs.values()]
+    .filter((job) => job.tenderId === tenderId && job.kind === 'pipeline')
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+  const runAll = latestRunAll ? {
+    jobId: latestRunAll.id,
+    status: latestRunAll.status,
+    currentStep: latestRunAll.currentStep,
+    failedStep: latestRunAll.failedStep,
+    error: latestRunAll.error,
+  } : undefined;
+
+  return { tenderId, steps, runAll };
 }
 
 // CRM (M2): převod pipeline steps → boolean flags + výpočet efektivní fáze (persistovaná ?? odvozená).
@@ -609,6 +728,9 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 
 // --- User management endpoints ---
 
+// GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
+app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
+
 // GET /api/users - list all users
 app.get('/api/users', requireJwt, async (_req, res) => {
   try {
@@ -720,6 +842,7 @@ app.get('/api/tenders', async (req, res) => {
               zadavatel_nazev: string | null; zadavatel_ico: string | null;
               predpokladana_hodnota: number | null; lhuta_nabidek: string | null;
               rozhodnuti: string | null;
+              go_no_go: { score: number; doporuceni: 'GO' | 'ZVAZIT' | 'NOGO'; duvody: string[] } | null;
             } | null = null;
             if ((pipeline as any)?.steps?.analyze === 'done') {
               try {
@@ -732,6 +855,7 @@ app.get('/api/tenders', async (req, res) => {
                   predpokladana_hodnota: a?.zakazka?.predpokladana_hodnota ?? null,
                   lhuta_nabidek: a?.terminy?.lhuta_nabidek ?? null,
                   rozhodnuti: a?.doporuceni?.rozhodnuti ?? null,
+                  go_no_go: a?.go_no_go ?? null,
                 };
               } catch {}
             }
@@ -1823,6 +1947,10 @@ app.get('/api/jobs', (req, res) => {
     startedAt: j.startedAt,
     finishedAt: j.finishedAt,
     error: j.error,
+    kind: j.kind,
+    parentJobId: j.parentJobId,
+    currentStep: j.currentStep,
+    failedStep: j.failedStep,
     logLines: j.logs.length,
   })));
 });
@@ -1843,9 +1971,49 @@ app.get('/api/jobs/:jobId', (req, res) => {
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     error: job.error,
+    kind: job.kind,
+    parentJobId: job.parentJobId,
+    currentStep: job.currentStep,
+    failedStep: job.failedStep,
     logs: job.logs.slice(since),
     totalLogLines: job.logs.length,
   });
+});
+
+// POST /api/tenders/:id/run/all - zařadí celý pipeline jako jeden řetězený job
+app.post('/api/tenders/:id/run/all', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await stat(join(INPUT_DIR, id));
+  } catch {
+    return res.status(404).json({ error: `Tender "${id}" not found in input/` });
+  }
+
+  const existing = [...jobs.values()].find((job) =>
+    job.tenderId === id && job.kind === 'pipeline'
+    && (job.status === 'running' || job.status === 'queued'));
+  if (existing) {
+    return res.json({ jobId: existing.id, status: existing.status, message: 'Pipeline already in progress' });
+  }
+
+  let jobId = randomUUID().slice(0, 8);
+  while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
+  const parent: Job = {
+    id: jobId,
+    tenderId: id,
+    step: 'all',
+    status: 'queued',
+    logs: [],
+    startedAt: new Date().toISOString(),
+    kind: 'pipeline',
+    currentStep: RUN_ALL_STEPS[0],
+  };
+  jobs.set(parent.id, parent);
+  enqueueStepJob(id, RUN_ALL_STEPS[0], parent.id);
+  scheduleJobsPersist();
+
+  console.log(`Pipeline job ${parent.id} queued for ${id}`);
+  res.json({ jobId: parent.id, status: parent.status, currentStep: parent.currentStep });
 });
 
 // POST /api/tenders/:id/run/:step - enqueue a pipeline step
@@ -1872,50 +2040,11 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   }
 
   // Gate: require confirmed prices before document generation
-  if (step === 'generate') {
-    try {
-      const matchRaw = await readFile(join(OUTPUT_DIR, id, 'product-match.json'), 'utf-8');
-      const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
+  const gateError = await getStepGateError(id, step);
+  if (gateError) return res.status(400).json({ error: gateError });
 
-      if (matchData.polozky_match) {
-        // Multi-product: all items must have confirmed prices
-        const unconfirmed = matchData.polozky_match.filter(pm => !pm.cenova_uprava?.potvrzeno);
-        if (unconfirmed.length > 0) {
-          const names = unconfirmed.map(pm => pm.polozka_nazev).join(', ');
-          return res.status(400).json({
-            error: `Nejprve potvrďte ceny u všech položek. Nepotvrzené: ${names}`,
-          });
-        }
-      } else if (!matchData.cenova_uprava?.potvrzeno) {
-        return res.status(400).json({
-          error: 'Nejprve potvrďte ceny v záložce Produkty. Bez potvrzené cenové kalkulace nelze generovat dokumenty.',
-        });
-      }
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        return res.status(400).json({ error: 'Nejprve spusťte krok "Produkty" a potvrďte ceny.' });
-      }
-      return res.status(400).json({ error: `Chyba při čtení product-match.json: ${String(err)}` });
-    }
-  }
-
-  // Create job and enqueue
-  const jobId = randomUUID().slice(0, 8);
-  const job: Job = {
-    id: jobId,
-    tenderId: id,
-    step,
-    status: 'queued',
-    logs: [],
-    startedAt: new Date().toISOString(),
-  };
-  jobs.set(jobId, job);
-  jobQueue.push(jobId);
-  cleanupJobs();
-  processQueue();
-
-  console.log(`Job ${jobId} queued: ${step} for ${id}`);
-  res.json({ jobId, status: job.status });
+  const job = enqueueStepJob(id, step);
+  res.json({ jobId: job.id, status: job.status });
 });
 
 // POST /api/tenders/:id/output — upload a file to output directory (for syncing between environments)
@@ -2565,6 +2694,11 @@ app.post('/api/notifications/read', async (req, res) => {
   }
 });
 
+// --- Win-price API (historické vítězné ceny, pouze informační vrstva) ---
+
+app.get('/api/winprice/band', winPriceBandHandler);
+app.get('/api/winprice/stats', winPriceStatsHandler);
+
 // --- Warehouse API (cenový sklad) ---
 
 // Middleware: warehouse DB availability check
@@ -2893,6 +3027,22 @@ if (existsSync(staticDir)) {
 
 // Startup: migrate legacy company.json + DB migrace
 async function startup() {
+  try {
+    const restored = await loadPipelineJobs(JOBS_FILE);
+    for (const [jobId, job] of restored.jobs) jobs.set(jobId, job);
+    jobQueue.push(...restored.queuedJobIds);
+    if (restored.interruptedCount > 0) {
+      await savePipelineJobs(JOBS_FILE, jobs.values());
+      console.log(`Marked ${restored.interruptedCount} pipeline job(s) as interrupted after restart`);
+    }
+    if (jobs.size > 0) {
+      console.log(`Restored ${jobs.size} pipeline job(s), ${jobQueue.length} queued`);
+    }
+  } catch (err) {
+    // Poškozený pomocný soubor nesmí shodit celé API; nová fronta začne prázdná.
+    console.error('Job queue restore error:', err);
+  }
+
   await migrateCompanies().catch(err => console.error('Company migration error:', err));
 
   // PostgreSQL: migrace (pokud DATABASE_URL nastavena)
@@ -2927,6 +3077,7 @@ startup().then(() => {
     console.log(`\nVZ AI Tool API server running on http://localhost:${PORT}`);
     console.log(`Input dir: ${INPUT_DIR}`);
     console.log(`Output dir: ${OUTPUT_DIR}`);
+    processQueue();
   });
 
   // Reminder sweep (M7): periodicky notifikuje řešitele o blížících se termínech (getDueReminders
@@ -2960,6 +3111,7 @@ startup().then(() => {
     console.log('\nShutting down...');
     if (reminderTimer) clearInterval(reminderTimer);
     server.close();
+    await flushJobsPersist();
     await closePool();
     process.exit(0);
   };
