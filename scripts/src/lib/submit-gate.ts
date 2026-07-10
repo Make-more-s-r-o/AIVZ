@@ -37,6 +37,20 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
       if (finding.level === 'hard') problems.push(detail);
       else warnings.push(detail);
     }
+
+    // Potvrzení člověkem je samostatná tvrdá podmínka NAD sanity kontrolami: sanity
+    // pracuje i s cenou kandidáta (fallback), ale podat lze jen položky s cenou,
+    // kterou operátor explicitně potvrdil. Kryje i scénář „přepnutí kandidáta smazalo
+    // potvrzenou cenu, dokumenty zůstaly stale" — dřívější kontrola (cenova_uprava > 0)
+    // tohle chytala a nesmí se ztratit.
+    const unconfirmed = items.filter((i) => !i.cenova_uprava?.potvrzeno);
+    if (unconfirmed.length > 0) {
+      const preview = unconfirmed.slice(0, 5).map((i) => i.polozka_nazev).join(', ');
+      problems.push(
+        `${unconfirmed.length} z ${items.length} položek nemá potvrzenou cenu` +
+        `${unconfirmed.length > 5 ? ` (mj. ${preview}, …)` : ` (${preview})`}.`,
+      );
+    }
   } catch {
     // Bez product-match (single-product zakázka) — cenové kontroly se přeskočí.
   }
