@@ -4,41 +4,38 @@
  * `POST /tenders/:id/finalize` (zamezí finalizaci nekompletní nabídky).
  *
  * Kontroluje (nad output adresářem zakázky):
- *  - cenový strop za kus (cena_max_s_dph) — žádná položka ho nesmí překročit,
- *  - úplnost nacenění — každá položka soupisu musí mít nabídkovou cenu > 0,
+ *  - tvrdé price-sanity nálezy (strop, nulová cena, prodej pod nákupní cenou),
+ *  - price-sanity varování, která neblokují podání,
  *  - field-validaci vygenerovaných dokumentů (musí projít),
  *  - zbytkové placeholdery ve vygenerovaných .docx ("doplní účastník", "______").
  */
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import type { ProductMatch } from './types.js';
+import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
 
 export interface SubmitGateResult {
   ready: boolean;
   problems: string[];
+  warnings: string[];
 }
 
 export async function computeSubmitGate(outputDir: string): Promise<SubmitGateResult> {
   const problems: string[] = [];
+  const warnings: string[] = [];
 
-  // Cenový strop + úplnost nacenění (jen u multi-item zakázek s product-match).
+  // Cenové kontroly pro multi-item zakázky vždy přepočítáme z aktuálních dat.
   try {
     const pm: ProductMatch = JSON.parse(await readFile(join(outputDir, 'product-match.json'), 'utf-8'));
     const items = pm.polozky_match || [];
-    const overCap = items.filter(
-      (i) => i.cena_max_s_dph != null && (i.cenova_uprava?.nabidkova_cena_s_dph ?? 0) > (i.cena_max_s_dph as number),
-    );
-    const unpriced = items.filter((i) => (i.cenova_uprava?.nabidkova_cena_s_dph ?? 0) <= 0);
-    if (overCap.length) {
-      // Skutečný per-item strop z dat (ne hardcoded 39 999) — u každé položky vypiš její limit.
-      const detail = overCap
-        .map((i) => `#${i.polozka_index + 1} (max ${Number(i.cena_max_s_dph).toLocaleString('cs-CZ')} Kč s DPH)`)
-        .join(', ');
-      problems.push(`${overCap.length} položek překračuje cenový strop: ${detail}`);
-    }
-    if (unpriced.length) {
-      problems.push(`${unpriced.length} z ${items.length} položek nemá nabídkovou cenu.`);
+    const sanityFindings = checkPriceSanity(items, {});
+    const names = new Map(items.map((item) => [item.polozka_index, item.polozka_nazev]));
+    for (const finding of sanityFindings) {
+      const itemName = names.get(finding.polozka_index) ?? `Položka #${finding.polozka_index + 1}`;
+      const detail = `Položka „${itemName}“: ${finding.message}`;
+      if (finding.level === 'hard') problems.push(detail);
+      else warnings.push(detail);
     }
   } catch {
     // Bez product-match (single-product zakázka) — cenové kontroly se přeskočí.
@@ -68,5 +65,5 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
     // Nelze číst output — ostatní kontroly platí.
   }
 
-  return { ready: problems.length === 0, problems };
+  return { ready: problems.length === 0, problems, warnings };
 }
