@@ -199,6 +199,7 @@ export const ValidationCheckSchema = z.object({
   kontrola: z.string(),
   status: z.enum(['pass', 'fail', 'warning']),
   detail: z.string(),
+  zdroj: z.enum(['deterministic', 'ai']).default('ai'),
 });
 
 export const ValidationReportSchema = z.object({

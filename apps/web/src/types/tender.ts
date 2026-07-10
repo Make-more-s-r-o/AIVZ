@@ -107,6 +107,7 @@ export interface ValidationCheck {
   kontrola: string;
   status: 'pass' | 'fail' | 'warning';
   detail: string;
+  zdroj?: 'deterministic' | 'ai';
 }
 
 export interface ValidationReport {
