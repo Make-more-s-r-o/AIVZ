@@ -4,7 +4,7 @@
  * Kombinuje dvě strategie: fulltext (tsvector, přesné termy) + trigram similarity
  * (pg_trgm, fuzzy překlepy/varianty). Vrací záznamy s cenou seřazené dle relevance.
  *
- * Samostatný modul — do serve-api.ts se NEZASAHUJE (API endpoint se přidá později).
+ * Samostatný query modul používaný CLI i read-only win-price API vrstvou.
  */
 import { query } from './db.js';
 import type { KomoditaKategorie } from './winprice-store.js';
@@ -93,18 +93,30 @@ export async function findSimilarWins(
   }));
 }
 
-/** Agregovaná cenová statistika nad množinou podobných výher (pro pozdější nacenění). */
+/** Agregovaná cenová statistika nad množinou podobných výher. */
 export interface PriceBand {
   pocet: number;
   min: number | null;
+  p25: number | null;
   median: number | null;
+  p75: number | null;
   max: number | null;
   prumer: number | null;
 }
 
+/** Lineárně interpolovaný percentil nad vzestupně seřazenými cenami. */
+function percentile(sorted: number[], ratio: number): number {
+  const position = (sorted.length - 1) * ratio;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  const lower = sorted[lowerIndex]!;
+  const upper = sorted[upperIndex]!;
+  return Math.round((lower + (upper - lower) * (position - lowerIndex)) * 100) / 100;
+}
+
 /**
- * Vrátí cenové pásmo (min/median/max/průměr cen bez DPH) pro předmět.
- * Podklad pro budoucí win-price signál v nacenění (go/no-go, doporučená cena).
+ * Vrátí cenové pásmo (min/P25/median/P75/max/průměr cen bez DPH) pro předmět.
+ * Slouží jako čistě informační win-price signál v nacenění.
  */
 export async function priceBandForSubject(
   predmet: string,
@@ -117,7 +129,7 @@ export async function priceBandForSubject(
     .sort((a, b) => a - b);
 
   if (ceny.length === 0) {
-    return { pocet: 0, min: null, median: null, max: null, prumer: null };
+    return { pocet: 0, min: null, p25: null, median: null, p75: null, max: null, prumer: null };
   }
   const mid = Math.floor(ceny.length / 2);
   const median = ceny.length % 2 ? ceny[mid] : (ceny[mid - 1] + ceny[mid]) / 2;
@@ -125,8 +137,28 @@ export async function priceBandForSubject(
   return {
     pocet: ceny.length,
     min: ceny[0],
+    p25: percentile(ceny, 0.25),
     median,
+    p75: percentile(ceny, 0.75),
     max: ceny[ceny.length - 1],
     prumer: Math.round(prumer * 100) / 100,
+  };
+}
+
+export interface WinPriceStats {
+  count: number;
+  last_date: string | null;
+}
+
+/** Vrátí základní stav importovaných win-price dat. */
+export async function getWinPriceStats(): Promise<WinPriceStats> {
+  const { rows } = await query<{ count: string | number; last_date: string | null }>(`
+    SELECT COUNT(*) AS count, MAX(datum)::text AS last_date
+    FROM win_prices
+  `);
+  const row = rows[0];
+  return {
+    count: Number(row?.count ?? 0),
+    last_date: row?.last_date ?? null,
   };
 }
