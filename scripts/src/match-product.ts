@@ -12,6 +12,27 @@ config({ path: new URL('../../.env', import.meta.url).pathname });
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 
+/**
+ * Vytáhne JSON blok z odpovědi modelu. Model občas přidá vysvětlující prózu PŘED
+ * nebo ZA JSON (typicky u jednopoložkové dávky, kde odfiltrované požadavky nesedí
+ * s položkou → model to cítí potřebu okomentovat) a JSON zabalí do ```json fence.
+ * Původní kód strhával fence jen když odpověď JÍM začínala (`startsWith('```')`),
+ * takže preamble text prošel do JSON.parse → syntaktická chyba a celá dávka padla
+ * (prod tender-1779109774773, položka "Uzavřená sluchátka pro audioguide").
+ * Postup: nejdřív preferuj obsah ```json fence, jinak ořízni na první `{`/`[` … poslední `}`/`]`.
+ */
+export function extractJsonBlock(raw: string): string {
+  let s = raw.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const firstObj = s.indexOf('{');
+  const firstArr = s.indexOf('[');
+  const start = firstObj === -1 ? firstArr : firstArr === -1 ? firstObj : Math.min(firstObj, firstArr);
+  const end = Math.max(s.lastIndexOf('}'), s.lastIndexOf(']'));
+  if (start !== -1 && end !== -1 && end > start) s = s.slice(start, end + 1);
+  return s.trim();
+}
+
 // Cenový sklad při matchingu: DEFAULTNĚ VYPNUTO (rozhodnutí Dan 2026-07-09 — sklad je stale,
 // obsahuje jen 3D-tisk a text-tier vracel filamenty jako kandidáty pro nábytek, které se
 // auto-vybíraly → nesmyslné ceny). Zapnutí: env WAREHOUSE_MATCH_ENABLED=1. I po zapnutí
@@ -98,9 +119,7 @@ async function haikuClassifyItems(
 
   const sectorMap = new Map<number, string>();
   try {
-    let json = result.content.trim();
-    if (json.startsWith('```')) json = json.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    const parsed: Array<{ index: number; sektor: string }> = JSON.parse(json);
+    const parsed: Array<{ index: number; sektor: string }> = JSON.parse(extractJsonBlock(result.content));
     for (const entry of parsed) sectorMap.set(entry.index, entry.sektor);
   } catch (err) {
     console.log(`  Haiku classification parse failed: ${err} — using all items`);
@@ -530,10 +549,8 @@ async function main() {
         throw new Error(`AI matching: odpověď useknuta limitem tokenů i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
       }
 
-      let jsonStr = result.content.trim();
-      if (jsonStr.startsWith('```')) {
-        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-      }
+      // Robustní extrakce JSON bloku — snese prózu před/za JSON i ```json fence uprostřed.
+      const jsonStr = extractJsonBlock(result.content);
 
       let parsed: any = null;
       try {
@@ -570,6 +587,12 @@ async function main() {
           await processSlice(sliceItems.slice(mid), globalOffset + mid, false, `${label}b`);
           return;
         }
+        // Surovou odpověď ulož pro diagnózu — příště se obejdeme bez reprodukce.
+        try {
+          const debugPath = join(outputDir, `debug-batch-${label}.json`);
+          await writeFile(debugPath, result.content, 'utf-8');
+          console.warn(`  Surová odpověď uložena: ${debugPath}`);
+        } catch { /* debug dump je best-effort */ }
         throw new Error(`AI matching vrátilo nevalidní JSON i po zmenšení dávky (dávka ${label}, ${sliceItems.length} položek). Zkuste krok spustit znovu.`);
       }
 
@@ -684,12 +707,7 @@ async function main() {
       { maxTokens: 4096, temperature: 0.3 }
     );
 
-    let jsonStr = serviceResult.content.trim();
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    }
-
-    const serviceParsed = JSON.parse(jsonStr);
+    const serviceParsed = JSON.parse(extractJsonBlock(serviceResult.content));
     const serviceItems = serviceParsed.sluzby || [];
 
     for (let si = 0; si < serviceItems.length; si++) {
