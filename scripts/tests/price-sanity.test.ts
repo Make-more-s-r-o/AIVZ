@@ -5,6 +5,9 @@ import {
   BID_SHARE_THRESHOLD,
   LOW_CONFIDENCE_BIG_THRESHOLD,
   OUTLIER_VS_BATCH_MULTIPLIER,
+  EXTREME_OUTLIER_BID_SHARE,
+  EXTREME_OUTLIER_MEDIAN_MULTIPLIER,
+  EXTREME_OUTLIER_MIN_ITEMS,
   checkPriceSanity,
 } from '../src/lib/price-sanity.js';
 import type { PolozkaMatch, ProductCandidate } from '../src/lib/types.js';
@@ -109,6 +112,51 @@ test('outlier_vs_batch: u osmi položek odhalí cenu nad 50× mediánem ostatní
   items.push(item(7, 5_001));
   assert.equal(codes(items).includes('outlier_vs_batch'), true);
   assert.equal(codes(items.slice(1)).includes('outlier_vs_batch'), false);
+});
+
+test('exportuje pevné hranice extrémního outlieru', () => {
+  assert.equal(EXTREME_OUTLIER_BID_SHARE, 0.60);
+  assert.equal(EXTREME_OUTLIER_MEDIAN_MULTIPLIER, 30);
+  assert.equal(EXTREME_OUTLIER_MIN_ITEMS, 5);
+});
+
+test('extreme_outlier: položka bez stropu za 280k mezi 57 běžnými je HARD (regrese N-485400)', () => {
+  // 56 běžných položek ~1000 Kč s DPH + 1 halucinovaný „adaptér" za 280 000 Kč, žádné stropy.
+  const items: PolozkaMatch[] = [];
+  for (let i = 0; i < 56; i++) items.push(item(i, 1_000));
+  const bigIndex = 56;
+  items.push(item(bigIndex, 280_000)); // cap undefined → bez stropu
+  const findings = checkPriceSanity(items, {});
+  const hardExtreme = findings.find(
+    (f) => f.level === 'hard' && f.code === 'extreme_outlier' && f.polozka_index === bigIndex,
+  );
+  assert.ok(hardExtreme, 'očekávám HARD extreme_outlier na 280k položce');
+});
+
+test('extreme_outlier: legitimně drahá JEDINÁ položka (single-item) není HARD', () => {
+  const findings = checkPriceSanity([item(0, 280_000)], {});
+  assert.equal(findings.some((f) => f.code === 'extreme_outlier'), false);
+});
+
+test('extreme_outlier: legit drahý server (vysoký násobek mediánu, ale malý podíl bidu) NENÍ HARD', () => {
+  // AND, ne OR: 10 běžných položek à 20 000 Kč (Σ 200k) + 1 server 150k = 43 % bidu (< 60 %),
+  // ale 7,5× medián → NESMÍ být HARD (jinak by legit drahá položka blokovala podání).
+  const items: PolozkaMatch[] = [];
+  for (let i = 0; i < 10; i++) items.push(item(i, 20_000));
+  items.push(item(10, 150_000));
+  const findings = checkPriceSanity(items, {});
+  assert.equal(findings.some((f) => f.code === 'extreme_outlier'), false, 'legit drahá položka nesmí být HARD extreme_outlier');
+});
+
+test('extreme_outlier: položka SE stropem řeší overcap, ne extreme_outlier', () => {
+  // 5 položek, drahá má strop → nesmí padnout jako extreme_outlier (má overcap).
+  const items = [
+    item(0, 280_000, { cap: 39_999 }),
+    item(1, 1_000), item(2, 1_000), item(3, 1_000), item(4, 1_000),
+  ];
+  const found = checkPriceSanity(items, {});
+  assert.equal(found.some((f) => f.code === 'extreme_outlier'), false);
+  assert.equal(found.some((f) => f.level === 'hard' && f.code === 'overcap' && f.polozka_index === 0), true);
 });
 
 test('kombinuje nálezy a bez cenova_uprava použije vybraného kandidáta', () => {

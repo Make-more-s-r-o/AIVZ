@@ -9,6 +9,26 @@ export const LOW_CONFIDENCE_BIG_THRESHOLD = 0.10;
 // Jednotková cena nad padesátinásobkem mediánu ostatních položek je podezřelá odchylka.
 export const OUTLIER_VS_BATCH_MULTIPLIER = 50;
 
+// --- Tvrdý (HARD) extrémní outlier — nezávislý na cenovém stropu zakázky ---
+// Motivace: položka BEZ per-item stropu (`cena_max_s_dph == null`) může projít deterministickým
+// gatem, i když má nesmyslnou cenu (prod N-485400: halucinovaný „adaptér" za 280 000 Kč = 78 %
+// celé nabídky). Overcap kontrola ji nechytí (žádný strop), bid_share/outlier jsou jen WARN.
+// Proto tyto extrémy povyšujeme na HARD (blokuje potvrzení i podání).
+//
+// Ochrana proti false-HARD: pravidlo se aplikuje jen u nabídek s dostatkem položek
+// (EXTREME_OUTLIER_MIN_ITEMS), aby legitimně drahá JEDNOTLIVÁ položka (single-item zakázka)
+// neshodila gate.
+
+// Položka bez stropu tvořící přes 60 % celé nabídky je extrémní dominance jedné ceny.
+export const EXTREME_OUTLIER_BID_SHARE = 0.60;
+
+// Položka bez stropu s jednotkovou cenou nad třicetinásobkem mediánu ostatních je extrémní odchylka.
+export const EXTREME_OUTLIER_MEDIAN_MULTIPLIER = 30;
+
+// Extrémní outlier povyšujeme na HARD jen od tohoto počtu položek v nabídce (jinak by
+// legitimně drahá jediná položka spadla do bloku).
+export const EXTREME_OUTLIER_MIN_ITEMS = 5;
+
 export interface PriceSanityOptions {
   /** Omezí vrácené nálezy podle polozka_index; poměry se stále počítají z celého bidu. */
   polozkaIndexes?: readonly number[];
@@ -139,19 +159,46 @@ export function checkPriceSanity(
       });
     }
 
-    if (polozkyMatch.length >= 8 && price.unitWithVat > 0) {
+    // Odchylka jednotkové ceny vůči zbytku dávky. Medián ostatních položek spočítáme jednou
+    // a využijeme pro WARN (outlier_vs_batch) i HARD (extreme_outlier bez stropu).
+    if (polozkyMatch.length >= EXTREME_OUTLIER_MIN_ITEMS && price.unitWithVat > 0) {
       const otherUnitPrices = normalized
         .filter((_, otherIndex) => otherIndex !== index)
         .map((other) => other.unitWithVat)
         .filter((unitPrice) => unitPrice > 0);
       const otherMedian = median(otherUnitPrices);
-      if (otherMedian != null && otherMedian > 0 && price.unitWithVat > OUTLIER_VS_BATCH_MULTIPLIER * otherMedian) {
+
+      if (
+        polozkyMatch.length >= 8 &&
+        otherMedian != null && otherMedian > 0 &&
+        price.unitWithVat > OUTLIER_VS_BATCH_MULTIPLIER * otherMedian
+      ) {
         addFinding({
           polozka_index: item.polozka_index,
           level: 'warn',
           code: 'outlier_vs_batch',
           message: `Jednotková cena ${formatPrice(price.unitWithVat)} Kč s DPH je více než ${OUTLIER_VS_BATCH_MULTIPLIER}× vyšší než medián ostatních položek (${formatPrice(otherMedian)} Kč).`,
         });
+      }
+
+      // HARD extrémní outlier — jen u položky BEZ per-item stropu (se stropem řeší overcap výše).
+      // Blokuje potvrzení i podání POUZE když cena SOUČASNĚ dominuje nabídce A extrémně vybočuje
+      // z mediánu (AND, ne OR). Tím se chytí „otrávená" cena (280k adaptér mezi 57 položkami =
+      // 78 % bidu A 280× medián), ale NEblokuje se legitimní jedna drahá položka (např. server
+      // 150k mezi levným spotřebičem — vysoký násobek mediánu, ale malý podíl na bidu).
+      if (item.cena_max_s_dph == null) {
+        const dominatesBid = share > EXTREME_OUTLIER_BID_SHARE;
+        const farOverMedian =
+          otherMedian != null && otherMedian > 0 &&
+          price.unitWithVat > EXTREME_OUTLIER_MEDIAN_MULTIPLIER * otherMedian;
+        if (dominatesBid && farOverMedian) {
+          addFinding({
+            polozka_index: item.polozka_index,
+            level: 'hard',
+            code: 'extreme_outlier',
+            message: `Položka bez cenového stropu má extrémní cenu ${formatPrice(price.unitWithVat)} Kč s DPH za jednotku — tvoří ${formatShare(share)} % celé nabídky a zároveň je více než ${EXTREME_OUTLIER_MEDIAN_MULTIPLIER}× vyšší než medián ostatních položek (${formatPrice(otherMedian!)} Kč). Ověřte cenu a produkt před podáním.`,
+          });
+        }
       }
     }
   }

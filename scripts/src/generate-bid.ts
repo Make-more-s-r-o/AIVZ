@@ -329,7 +329,16 @@ async function main() {
     const outputName = `${baseName}${suffix}${ext}`;
 
     // Resolve generation mode: override > default > fill
-    const mode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
+    let mode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
+    // Vada #3: druhé+ čestné prohlášení téhož typu NESMÍ jít na clean-builder (natvrdo obecný
+    // text) — jinak se specifické prohlášení (např. Příloha 5 protiruské sankční dle nař. 833/2014)
+    // degraduje na bajt-identickou kopii obecného a požadovaná příloha fakticky chybí. První
+    // (obecné) může na clean-builderu zůstat; 2.+ zpracujeme z REÁLNÉ šablony přes reconstruct
+    // (s fallbackem na fill), aby se zachoval jeho specifický obsah.
+    if (template.type === 'cestne_prohlaseni' && count > 0 && mode === 'clean') {
+      mode = 'reconstruct';
+      console.log(`    2.+ čestné prohlášení → clean-builder vynechán, reconstruct z reálné šablony (${template.filename})`);
+    }
     const modeLabel = mode.toUpperCase();
 
     console.log(`  - ${outputName} [${modeLabel}] (from: ${template.filename})`);

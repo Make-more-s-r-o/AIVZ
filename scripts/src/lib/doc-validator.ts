@@ -104,6 +104,25 @@ export async function validateDocument(
     if (data.rejstrik) {
       commonFields.push({ field: 'Rejstřík', expected: data.rejstrik, label: 'rejstřík' });
     }
+    // Povinná pole krycího listu nesmí být prázdná ani obsahovat zástupný text (AI hedge).
+    // Bez známého zadavatele nelze nabídku podat → tvrdý fail, ne pass. (data-resolver už
+    // placeholder vyprázdnil a nastavil příznak.)
+    if (data.zadavatel_placeholder || !data.zadavatel_nazev?.trim()) {
+      checks.push({
+        field: 'Zadavatel (povinné pole krycího listu)',
+        expected: 'konkrétní zadavatel',
+        actual: data.zadavatel_placeholder ? 'zástupný text / neuvedeno' : '(prázdné)',
+        status: 'fail',
+      });
+    }
+    if (data.evidencni_cislo_placeholder) {
+      checks.push({
+        field: 'Evidenční číslo (povinné pole krycího listu)',
+        expected: 'konkrétní evidenční číslo',
+        actual: 'zástupný text / neuvedeno',
+        status: 'fail',
+      });
+    }
   }
 
   if (documentType === 'cestne_prohlaseni') {

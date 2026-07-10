@@ -94,6 +94,26 @@ export interface DocumentData {
   // Meta
   datum: string;
   misto: string;
+
+  // Validační příznaky: povinné pole zakázky přišlo z analýzy jako zástupný text (AI hedge,
+  // např. „neuvedeno (pravděpodobně…)") nebo prázdné. Builder pole vypíše prázdné (—),
+  // field-validace to označí jako blocker (krycí list NEsmí projít jako pass).
+  zadavatel_placeholder?: boolean;
+  evidencni_cislo_placeholder?: boolean;
+}
+
+// Zástupné / hedge hodnoty v povinných polích krycího listu ("neuvedeno", "pravděpodobně…",
+// prázdno, "xxx", "doplní…", otevřená hranatá závorka). Nesmí se vypsat do formálního dokumentu.
+const PLACEHOLDER_VALUE_RE = /neuveden|pravděpodobn|^\s*$|xxx|doplní|\[/i;
+// Varianta bez prázdna: zástupný TEXT (u evidenčního čísla je prázdno legitimní — VZMR ho nemá).
+const PLACEHOLDER_TEXT_RE = /neuveden|pravděpodobn|xxx|doplní|\[/i;
+
+function isPlaceholderValue(value: unknown): boolean {
+  return PLACEHOLDER_VALUE_RE.test(String(value ?? ''));
+}
+
+function hasPlaceholderText(value: unknown): boolean {
+  return PLACEHOLDER_TEXT_RE.test(String(value ?? ''));
 }
 
 /**
@@ -280,12 +300,24 @@ export async function resolveDocumentData(tenderId: string): Promise<DocumentDat
       });
   }
 
+  // Povinná pole zakázky: zástupný text z analýzy (AI hedge) do formálního dokumentu nepatří.
+  // Zadavatele bereme jako placeholder i při prázdnu (bez zadavatele nelze podat); u evidenčního
+  // čísla jen zástupný TEXT (prázdno je u VZMR legitimní). Placeholder pole vyprázdníme (builder → —)
+  // a nastavíme příznak pro field-validaci.
+  const zadavatelRaw = analysis.zakazka.zadavatel.nazev || '';
+  const zadavatelIsPlaceholder = isPlaceholderValue(zadavatelRaw);
+  const evidencniRaw = analysis.zakazka.evidencni_cislo || '';
+  const evidencniIsPlaceholder = hasPlaceholderText(evidencniRaw);
+  const zadavatelIcoRaw = analysis.zakazka.zadavatel.ico || '';
+
   return {
     // Tender
     nazev_zakazky: analysis.zakazka.nazev,
-    evidencni_cislo: analysis.zakazka.evidencni_cislo || '',
-    zadavatel_nazev: analysis.zakazka.zadavatel.nazev,
-    zadavatel_ico: analysis.zakazka.zadavatel.ico || '',
+    evidencni_cislo: evidencniIsPlaceholder ? '' : evidencniRaw,
+    zadavatel_nazev: zadavatelIsPlaceholder ? '' : zadavatelRaw,
+    zadavatel_ico: hasPlaceholderText(zadavatelIcoRaw) ? '' : zadavatelIcoRaw,
+    zadavatel_placeholder: zadavatelIsPlaceholder,
+    evidencni_cislo_placeholder: evidencniIsPlaceholder,
     predmet: analysis.zakazka.predmet,
 
     // Company
