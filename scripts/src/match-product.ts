@@ -758,6 +758,18 @@ async function main() {
   // (company.default_marze_procent, default 0 %). potvrzeno=false ON PURPOSE — a binding price
   // must be reviewed/confirmed by the user before submission (H3). Items breaching the hard
   // cap are flagged in poznamka and warned (C3).
+  // Normalizuj vybrany_index do platného rozsahu. AI ho občas vrátí mimo pole kandidátů
+  // (prod tender-1779109774773 pol. „Projektor (P5)": vybrany_index mířil za konec) →
+  // později `kandidati[vybrany_index]` = undefined a summary logging / generate spadl.
+  for (const pm of polozkyMatch) {
+    const n = pm.kandidati?.length ?? 0;
+    if (n === 0) continue;
+    if (!Number.isInteger(pm.vybrany_index) || pm.vybrany_index < 0 || pm.vybrany_index >= n) {
+      console.warn(`  ⚠ Neplatný vybrany_index (${pm.vybrany_index}/${n}) u „${pm.polozka_nazev}" — nastavuji na 0`);
+      pm.vybrany_index = 0;
+    }
+  }
+
   const defaultMarze = Number(company.default_marze_procent) || 0;
   for (const pm of polozkyMatch) {
     const selected = pm.kandidati?.[pm.vybrany_index];
@@ -800,15 +812,21 @@ async function main() {
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
-  // Summary logging
+  // Summary logging — defenzivně: product-match.json je už úspěšně uložen VÝŠE, takže
+  // pouhý výpis NESMÍ shodit celý krok (dřív undefined `selected` → TypeError → exit 1 →
+  // job „error" i když byla práce hotová a uložená).
   console.log(`\nMatching complete — ${polozkyMatch.length} items:`);
   for (const pm of productMatch.polozky_match || []) {
-    const selected = pm.kandidati[pm.vybrany_index];
+    const selected = pm.kandidati?.[pm.vybrany_index];
     const typeLabel = (pm as any).typ === 'sluzba' ? ' [služba]' : (pm as any).typ === 'prislusenstvi' ? ' [přísl.]' : '';
     console.log(`  ${pm.polozka_nazev}${typeLabel}:`);
-    console.log(`    Candidates: ${pm.kandidati.length}`);
-    console.log(`    Selected: ${selected.vyrobce} ${selected.model}`);
-    console.log(`    Price (bez DPH): ${selected.cena_bez_dph.toLocaleString('cs-CZ')} Kč`);
+    console.log(`    Candidates: ${pm.kandidati?.length ?? 0}`);
+    if (selected) {
+      console.log(`    Selected: ${selected.vyrobce} ${selected.model}`);
+      console.log(`    Price (bez DPH): ${(selected.cena_bez_dph ?? 0).toLocaleString('cs-CZ')} Kč`);
+    } else {
+      console.log('    Selected: (žádný platný kandidát)');
+    }
   }
 
   console.log(`\nOutput: ${outputPath}`);
