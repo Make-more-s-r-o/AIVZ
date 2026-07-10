@@ -2,7 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, Loader2, AlertCircle, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../lib/cn';
-import { runStep, getJobStatus, getCost, JobNotFoundError, type PipelineSteps, type StepName, type StepStatus, type CostSummary } from '../lib/api';
+import {
+  runStep, runAllSteps, getJobStatus, getCost, JobNotFoundError,
+  type PipelineSteps, type StepName, type StepStatus, type CostSummary, type RunAllStatus,
+} from '../lib/api';
 
 // Kolik po sobě jdoucích síťových chyb pollu tolerujeme, než úlohu vzdáme (interval 2s → ~60s).
 const MAX_FAILED_POLLS = 30;
@@ -18,6 +21,7 @@ const STEPS: { key: StepName; label: string }[] = [
 interface PipelineStatusProps {
   tenderId: string;
   steps: PipelineSteps;
+  runAll?: RunAllStatus;
   onStepComplete: () => void;
 }
 
@@ -43,9 +47,10 @@ function getStepCost(stepKey: string, byStep: CostSummary['byStep']): number {
     .reduce((s, [, v]) => s + v.costCZK, 0);
 }
 
-export default function PipelineStatus({ tenderId, steps, onStepComplete }: PipelineStatusProps) {
+export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete }: PipelineStatusProps) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<StepName | null>(null);
+  const [runningAll, setRunningAll] = useState(false);
   const [failedStep, setFailedStep] = useState<StepName | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [jobError, setJobError] = useState<string | null>(null);
@@ -59,6 +64,7 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
   // Počítadlo po sobě jdoucích neúspěšných pollů — po překročení limitu úlohu vzdáme,
   // ať spinner netočí donekonečna při delším výpadku spojení.
   const failedPollsRef = useRef(0);
+  const observedRunAllRef = useRef<string | null>(null);
   const onStepCompleteRef = useRef(onStepComplete);
   onStepCompleteRef.current = onStepComplete;
 
@@ -67,6 +73,27 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     queryFn: () => getCost(tenderId),
     refetchInterval: activeJobId ? 10000 : false,
   });
+
+  // Po reloadu stránky se znovu připoj k perzistentnímu run-all jobu; terminální stav
+  // zobraz rovnou z tender statusu, i když jej spustila jiná karta prohlížeče.
+  useEffect(() => {
+    if (!runAll || observedRunAllRef.current === runAll.jobId) return;
+    observedRunAllRef.current = runAll.jobId;
+    if (runAll.status === 'queued' || runAll.status === 'running') {
+      setActiveJobId(runAll.jobId);
+      setActiveStep(runAll.currentStep ?? null);
+      activeStepRef.current = runAll.currentStep ?? null;
+      setRunningAll(true);
+      setShowLogs(true);
+      return;
+    }
+    if (runAll.status === 'error' || runAll.status === 'interrupted') {
+      setFailedStep(runAll.failedStep ?? runAll.currentStep ?? null);
+      setJobError(runAll.error || (runAll.status === 'interrupted'
+        ? 'Pipeline byla přerušena restartem serveru.'
+        : 'Neznámá chyba'));
+    }
+  }, [runAll]);
 
   // Poll job status when we have an active job
   useEffect(() => {
@@ -81,23 +108,31 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           setLogs(prev => [...prev, ...job.logs]);
           logSeenRef.current = job.totalLogLines;
         }
+        if (job.currentStep) {
+          setActiveStep(job.currentStep);
+          activeStepRef.current = job.currentStep;
+        }
 
         if (job.status === 'done') {
           clearInterval(interval);
           setActiveJobId(null);
           setActiveStep(null);
           activeStepRef.current = null;
+          setRunningAll(false);
           setJobError(null);
           setFailedStep(null);
           onStepCompleteRef.current();
-        } else if (job.status === 'error') {
+        } else if (job.status === 'error' || job.status === 'interrupted') {
           // Zastav spinner (vyprázdni activeJobId/activeStep) a ukaž chybu + krok k restartu.
           clearInterval(interval);
           setActiveJobId(null);
           setActiveStep(null);
-          setFailedStep(activeStepRef.current);
+          setFailedStep(job.failedStep ?? activeStepRef.current);
           activeStepRef.current = null;
-          setJobError(job.error || 'Neznámá chyba');
+          setRunningAll(false);
+          setJobError(job.error || (job.status === 'interrupted'
+            ? 'Pipeline byla přerušena restartem serveru.'
+            : 'Neznámá chyba'));
           onStepCompleteRef.current();
         }
       } catch (err) {
@@ -108,14 +143,14 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
           setActiveStep(null);
           setFailedStep(activeStepRef.current);
           activeStepRef.current = null;
+          setRunningAll(false);
           setJobError(message);
           onStepCompleteRef.current();
         };
 
         if (err instanceof JobNotFoundError) {
-          // 404 — úloha zmizela ze serveru (nejčastěji restart/deploy během běhu). Dřív to
-          // catch spolkl a spinner točil navždy. Teď zastav a nabídni „Zkusit znovu".
-          giveUp('Úloha byla ztracena — server se pravděpodobně restartoval během běhu (deploy). Zkuste krok spustit znovu.');
+          // 404 — úloha už není v registru serveru. Zastav polling a nabídni nový pokus.
+          giveUp('Úloha už není v registru serveru. Zkuste krok spustit znovu.');
           return;
         }
 
@@ -143,6 +178,7 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     logSeenRef.current = 0;
     failedPollsRef.current = 0;
     setActiveStep(step);
+    setRunningAll(false);
     activeStepRef.current = step;
     setShowLogs(true);
 
@@ -157,6 +193,35 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
     }
   };
 
+  const handleRunAll = async () => {
+    setError(null);
+    setJobError(null);
+    setFailedStep(null);
+    setLogs([]);
+    logSeenRef.current = 0;
+    failedPollsRef.current = 0;
+    const firstStep: StepName = 'extract';
+    setActiveStep(firstStep);
+    activeStepRef.current = firstStep;
+    setRunningAll(true);
+    setShowLogs(true);
+
+    try {
+      const result = await runAllSteps(tenderId);
+      observedRunAllRef.current = result.jobId;
+      setActiveJobId(result.jobId);
+      if (result.currentStep) {
+        setActiveStep(result.currentStep);
+        activeStepRef.current = result.currentStep;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Neznámá chyba');
+      setActiveStep(null);
+      activeStepRef.current = null;
+      setRunningAll(false);
+    }
+  };
+
   const canRun = (index: number): boolean => {
     if (activeJobId || activeStep) return false;
     if (index === 0) return true;
@@ -166,54 +231,65 @@ export default function PipelineStatus({ tenderId, steps, onStepComplete }: Pipe
 
   const getStepStatus = (step: StepName): StepStatus => {
     if (activeStep === step) return 'running';
+    if (failedStep === step && steps[step] !== 'done') return 'error';
     return steps[step];
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        {STEPS.map((step, i) => (
-          <div key={step.key} className="flex flex-1 items-center">
-            <div className="flex flex-col items-center gap-1">
-              <div className="relative">
-                <StepIcon status={getStepStatus(step.key)} />
-                {getStepStatus(step.key) !== 'done' && getStepStatus(step.key) !== 'running' && canRun(i) && (
-                  <button
-                    onClick={() => handleRun(step.key)}
-                    className="absolute -bottom-1 -right-1 rounded-full bg-blue-600 p-0.5 text-white hover:bg-blue-700"
-                    title={`Spustit ${step.label}`}
-                  >
-                    <Play className="h-3 w-3" />
-                  </button>
-                )}
+      <div className="flex items-center gap-4">
+        <div className="flex min-w-0 flex-1 items-center justify-between">
+          {STEPS.map((step, i) => (
+            <div key={step.key} className="flex flex-1 items-center">
+              <div className="flex flex-col items-center gap-1">
+                <div className="relative">
+                  <StepIcon status={getStepStatus(step.key)} />
+                  {getStepStatus(step.key) !== 'done' && getStepStatus(step.key) !== 'running' && canRun(i) && (
+                    <button
+                      onClick={() => handleRun(step.key)}
+                      className="absolute -bottom-1 -right-1 rounded-full bg-blue-600 p-0.5 text-white hover:bg-blue-700"
+                      title={`Spustit ${step.label}`}
+                    >
+                      <Play className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+                <span
+                  className={cn(
+                    'text-xs font-medium',
+                    getStepStatus(step.key) === 'done' ? 'text-green-700' :
+                    getStepStatus(step.key) === 'running' ? 'text-blue-600' :
+                    'text-gray-500'
+                  )}
+                >
+                  {step.label}
+                </span>
+                {costData && (() => {
+                  const cost = getStepCost(step.key, costData.byStep);
+                  return cost > 0 ? (
+                    <span className="text-[9px] text-gray-400">{cost.toFixed(1)} Kč</span>
+                  ) : null;
+                })()}
               </div>
-              <span
-                className={cn(
-                  'text-xs font-medium',
-                  getStepStatus(step.key) === 'done' ? 'text-green-700' :
-                  getStepStatus(step.key) === 'running' ? 'text-blue-600' :
-                  'text-gray-500'
-                )}
-              >
-                {step.label}
-              </span>
-              {costData && (() => {
-                const cost = getStepCost(step.key, costData.byStep);
-                return cost > 0 ? (
-                  <span className="text-[9px] text-gray-400">{cost.toFixed(1)} Kč</span>
-                ) : null;
-              })()}
+              {i < STEPS.length - 1 && (
+                <div
+                  className={cn(
+                    'mx-2 h-0.5 flex-1',
+                    steps[step.key] === 'done' ? 'bg-green-300' : 'bg-gray-200'
+                  )}
+                />
+              )}
             </div>
-            {i < STEPS.length - 1 && (
-              <div
-                className={cn(
-                  'mx-2 h-0.5 flex-1',
-                  steps[step.key] === 'done' ? 'bg-green-300' : 'bg-gray-200'
-                )}
-              />
-            )}
-          </div>
-        ))}
+          ))}
+        </div>
+        <button
+          onClick={handleRunAll}
+          disabled={!!activeJobId || !!activeStep}
+          className="inline-flex shrink-0 items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {runningAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          {runningAll ? 'Spouštím vše…' : 'Spustit vše'}
+        </button>
       </div>
 
       {/* Total cost */}

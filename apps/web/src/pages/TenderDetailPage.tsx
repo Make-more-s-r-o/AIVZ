@@ -260,7 +260,12 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
         }
       >
         {pipelineOpen && (
-          <PipelineStatus tenderId={tenderId} steps={steps} onStepComplete={handleStepComplete} />
+          <PipelineStatus
+            tenderId={tenderId}
+            steps={steps}
+            runAll={statusData?.runAll}
+            onStepComplete={handleStepComplete}
+          />
         )}
       </Card>
 
