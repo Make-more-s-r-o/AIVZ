@@ -1102,6 +1102,7 @@ export interface CompanyData {
   jednajici_osoba: string;
   telefon?: string;
   email?: string;
+  default_marze_procent?: number;
   obory?: string[];
   created_at: string;
   updated_at: string;

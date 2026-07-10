@@ -11,6 +11,8 @@
   "jednajici_osoba": "Daniel Jirotka",
   "telefon": "737061492",
   "email": "dan.jirotka@makemore.cz",
+  "default_marze_procent": 10,
+  "_marze_pozn": "Výchozí marže se použije jen pro nově vytvořené návrhy cen; již potvrzené ceny se nemění.",
   "_comment": "obory: sektory, ve kterých firma podniká (IT, AV). keyword_filters: klíčová slova pro Haiku pre-kategorizaci.",
   "obory": ["IT", "AV"],
   "keyword_filters": {
