@@ -60,17 +60,18 @@ async function makeCase(files: {
 }
 
 // Tvar položky odpovídá reálnému PolozkaMatch (viz types.ts): pole, která gate
-// čte, jsou polozka_index, cena_max_s_dph a cenova_uprava.nabidkova_cena_s_dph.
+// čte, jsou polozka_index, cena_max_s_dph a cenova_uprava (cena + potvrzeno).
 function item(
   polozka_index: number,
   cena_max_s_dph: number | null,
   nabidkova_cena_s_dph: number,
+  potvrzeno = true,
 ) {
   return {
     polozka_nazev: `Položka ${polozka_index + 1}`,
     polozka_index,
     cena_max_s_dph,
-    cenova_uprava: { nabidkova_cena_s_dph },
+    cenova_uprava: { nabidkova_cena_s_dph, potvrzeno },
   };
 }
 
@@ -93,6 +94,20 @@ async function run(): Promise<void> {
     const res = await computeSubmitGate(dir);
     assert.equal(res.ready, true);
     assert.deepEqual(res.problems, []);
+  });
+
+  // 1b) Nepotvrzená cena → ready=false (kryje i scénář „přepnutí kandidáta smazalo
+  // potvrzení, dokumenty zůstaly stale" — sanity fallback na cenu kandidáta nesmí stačit).
+  await test('unconfirmed → ready=false, problém zmiňuje "potvrzenou cenu"', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        polozky_match: [item(0, null, 1000), item(1, 50000, 45000, false)],
+      },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.some((p) => p.includes('potvrzenou cenu')));
   });
 
   // 2) Překročený cenový strop → ready=false + problém zmiňuje "strop".

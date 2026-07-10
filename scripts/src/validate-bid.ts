@@ -256,16 +256,27 @@ Odpověz ve formátu:
     const gateProblems = [...gate.problems];
     if (aiRecovered) gateProblems.push('Odpověď validace byla uříznuta a obnovena — nutná manuální kontrola.');
     console.log(`\n--- Submit gate ---`);
+    if (gate.warnings.length) {
+      report.checks.push({
+        kategorie: 'cena',
+        kontrola: 'Price sanity varování',
+        status: 'warning',
+        detail: gate.warnings.join(' | '),
+      });
+      for (const warning of gate.warnings) report.doporuceni.push(warning);
+      console.log(`  Varování:`);
+      gate.warnings.forEach((warning) => console.log(`    - ${warning}`));
+    }
     if (gateProblems.length) {
       report.ready_to_submit = false;
       for (const gp of gateProblems) report.kriticke_problemy.push(gp);
       report.checks.push({ kategorie: 'kompletnost', kontrola: 'Deterministický submit-gate', status: 'fail', detail: gateProblems.join(' | ') });
-      await writeFile(join(outputDir, 'validation-report.json'), JSON.stringify(report, null, 2), 'utf-8');
       console.log(`  ready_to_submit -> NO`);
       gateProblems.forEach((gp) => console.log(`    - ${gp}`));
     } else {
       console.log(`  Gate OK (strop dodržen, vše oceněno, žádné placeholdery).`);
     }
+    await writeFile(join(outputDir, 'validation-report.json'), JSON.stringify(report, null, 2), 'utf-8');
   } catch (err) {
     console.log(`  Submit gate skipped: ${err}`);
   }

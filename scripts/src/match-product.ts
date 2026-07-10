@@ -5,6 +5,7 @@ import { config } from 'dotenv';
 import { callClaude, AICallTimeoutError, getMatchCallDeadlineMs } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
+import { checkPriceSanity } from './lib/price-sanity.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
 import { getCompany, getTenderCompanyId, resolveDefaultMarzeProcent } from './lib/company-store.js';
@@ -793,6 +794,15 @@ async function main() {
       if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
     }
   }
+
+  // Sanity nálezy pouze čteme a zapisujeme jako flagy; ceny ani potvrzení tím neměníme.
+  const sanityFindings = checkPriceSanity(polozkyMatch, {});
+  for (const pm of polozkyMatch) {
+    pm.sanity_flags = sanityFindings.filter((finding) => finding.polozka_index === pm.polozka_index);
+  }
+  const hardSanityCount = sanityFindings.filter((finding) => finding.level === 'hard').length;
+  const warnSanityCount = sanityFindings.filter((finding) => finding.level === 'warn').length;
+  console.log(`  Price sanity: ${hardSanityCount} hard, ${warnSanityCount} warn.`);
 
   // Build final ProductMatch object — always use polozky_match format now
   const finalParse = ProductMatchSchema.safeParse({

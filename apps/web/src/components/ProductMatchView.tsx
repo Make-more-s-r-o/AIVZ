@@ -476,25 +476,35 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
     .filter((i) => i >= 0);
 
   // Hromadné potvrzení: pro každou vybranou položku dopočítá cenu (buildConfirmData) a pošle
-  // JEDNÍM requestem (bulk endpoint, transakčně nad souborem). Položky bez ceny přeskočí.
+  // JEDNÍM requestem (bulk endpoint, transakčně nad souborem). Položky bez ceny nebo s HARD
+  // sanity nálezem přeskočí; backend stejnou podmínku znovu autoritativně ověří.
   const confirmBulk = useCallback(async (indices: number[]) => {
     if (bulkSaving) return;
     const payload: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }> = [];
-    let skipped = 0;
+    let skippedWithoutPrice = 0;
+    let skippedHard = 0;
     for (const idx of indices) {
       const pm = polozky[idx];
       if (!pm) continue;
+      if (pm.sanity_flags?.some((finding) => finding.level === 'hard')) {
+        skippedHard++;
+        continue;
+      }
       const data = buildConfirmData(pm, priceDrafts.get(idx));
-      if (!data) { skipped++; continue; }
+      if (!data) { skippedWithoutPrice++; continue; }
       payload.push({ itemIndex: idx, cenova_uprava: data });
     }
     if (payload.length === 0) {
-      toast(skipped > 0 ? 'Vybrané položky nelze automaticky ocenit (chybí cena)' : 'Není co potvrdit', 'danger');
+      const reasons = [
+        skippedHard > 0 ? `${skippedHard} přeskočeno kvůli blokujícímu cenovému nálezu` : null,
+        skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno kvůli chybějící ceně` : null,
+      ].filter(Boolean).join(', ');
+      toast(reasons || 'Není co potvrdit', 'danger');
       return;
     }
     setBulkSaving(true);
     try {
-      const { updated } = await bulkUpdateItemPriceOverride(tenderId, payload);
+      const { updated, warnings } = await bulkUpdateItemPriceOverride(tenderId, payload);
       // Web-drafty potvrzených položek zahoď (stejně jako po per-item potvrzení).
       setPriceDrafts((prev) => {
         const next = new Map(prev);
@@ -503,7 +513,12 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
       });
       setSelected(new Set());
       queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
-      toast(`Potvrzeno ${updated} položek${skipped ? ` (${skipped} přeskočeno — bez ceny)` : ''}`, 'success');
+      const skippedParts = [
+        skippedHard > 0 ? `${skippedHard} přeskočeno — blokující cenový nález` : null,
+        skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno — bez ceny` : null,
+      ].filter(Boolean);
+      const warningPart = warnings.length > 0 ? `, ${warnings.length} varování ke kontrole` : '';
+      toast(`Potvrzeno ${updated} položek${skippedParts.length ? ` (${skippedParts.join(', ')})` : ''}${warningPart}`, 'success');
     } catch (err: unknown) {
       toast(getErrorMessage(err), 'danger');
     } finally {
@@ -677,6 +692,23 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                     {pm.mnozstvi ? `${pm.mnozstvi} ${pm.jednotka || 'ks'}` : ''}
                     {selectedProduct && itemType !== 'sluzba' && ` — ${selectedProduct.vyrobce} ${selectedProduct.model}`}
                   </div>
+                  {pm.sanity_flags && pm.sanity_flags.length > 0 && (
+                    <div className="mt-1 flex max-w-2xl flex-wrap gap-1">
+                      {pm.sanity_flags.map((finding) => (
+                        <span
+                          key={finding.code}
+                          className={cn(
+                            'rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-normal',
+                            finding.level === 'hard'
+                              ? 'border-red-200 bg-red-100 text-red-800'
+                              : 'border-orange-200 bg-orange-100 text-orange-800'
+                          )}
+                        >
+                          {finding.level === 'hard' ? 'BLOKUJE' : 'ZKONTROLUJTE'}: {finding.message}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-3">

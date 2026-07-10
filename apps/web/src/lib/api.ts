@@ -1,5 +1,5 @@
 import { getJwt, clearAuth } from './auth';
-import type { TenderAnalysis, ProductMatch, ValidationReport } from '../types/tender';
+import type { TenderAnalysis, ProductMatch, PriceSanityFlag, ValidationReport } from '../types/tender';
 import type { StageKey } from './stages';
 
 const API_BASE = '/api';
@@ -257,7 +257,7 @@ export async function updatePriceOverride(id: string, data: PriceOverrideData): 
 
 export async function updateItemPriceOverride(
   id: string, itemIndex: number, data: PriceOverrideData
-): Promise<{ success: boolean }> {
+): Promise<{ success: boolean; warnings: PriceSanityFlag[] }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/${itemIndex}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -277,7 +277,7 @@ export async function updateItemPriceOverride(
 export async function bulkUpdateItemPriceOverride(
   id: string,
   items: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }>,
-): Promise<{ success: boolean; updated: number }> {
+): Promise<{ success: boolean; updated: number; warnings: PriceSanityFlag[] }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/bulk`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
