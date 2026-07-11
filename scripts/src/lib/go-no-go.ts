@@ -1,5 +1,6 @@
 import type { CompanyData } from './company-store.js';
 import type { PriceBand } from './winprice-query.js';
+import { candidateHasRealProduct } from './price-prefill.js';
 import type { ExtractedText, ProductMatch, TenderAnalysis } from './types.js';
 
 export const GO_SCORE_THRESHOLD = 75;
@@ -224,6 +225,250 @@ function totalMatchedPrice(productMatch?: ProductMatch): number | null {
 
 function isPositiveNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+// ===========================================================================
+// PROFIT-AWARE BID SCORE
+//
+// Zatímco `scoreGoNoGo` (výše) je VSTUPNÍ skóre počítané PŘED nacenením (jen
+// z analýzy ZD + volitelně win-price), `scoreBid` je DRUHÉ skóre počítané PO
+// nacenění z reálných dat product-match.json: hrubý zisk v Kč, vážená marže,
+// kvalita cenových shod, HARD sanity flagy a pozice naší celkové ceny vůči
+// historickému cenovému pásmu výher. Nemění ceny ani stav — je čistě
+// informativní stejně jako go/no-go.
+// ===========================================================================
+
+export const BID_MARGIN_WEIGHT = 30;
+export const BID_ABS_PROFIT_WEIGHT = 20;
+export const BID_MATCH_QUALITY_WEIGHT = 25;
+export const BID_WIN_PRICE_WEIGHT = 25;
+
+// Cílový absolutní hrubý zisk, při kterém je faktor plně nasycen (value = 1).
+export const BID_TARGET_PROFIT_CZK = 50_000;
+// Výchozí cílová marže, pokud firma žádnou nemá (např. web-cenová cesta má 0 %).
+export const DEFAULT_TARGET_MARGIN_PROCENT = 10;
+// Nepotvrzená cena je jen odhad — do váženého zisku vstupuje s poloviční vahou.
+export const UNCONFIRMED_PRICE_WEIGHT = 0.5;
+
+export interface BidEconomics {
+  zisk_kc: number;          // nominální hrubý zisk (potvrzené i nepotvrzené) v Kč, bez DPH
+  marze_procent: number;    // vážená marže % = zisk / nabídkový obrat bez DPH
+  obrat_bez_dph: number;    // Σ nabídkových cen bez DPH × množství
+  vazeny_zisk: number;      // hrubý zisk vážený spolehlivostí (nepotvrzené × 0,5)
+  polozek: number;
+  slabych_polozek: number;  // bez reálné shody / nízká spolehlivost / bez ceny
+  hard_flagu: number;
+}
+
+export interface BidScoreResult {
+  score: number;
+  doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+  duvody: string[];
+  zisk_kc: number;
+  marze_procent: number;
+}
+
+// Minimální strukturální tvar položky — sjednocuje multi-product i legacy single-product.
+interface BidLineItem {
+  mnozstvi?: number | null;
+  vybrany_index?: number;
+  kandidati?: Array<{
+    vyrobce?: string;
+    model?: string;
+    popis?: string;
+    cena_bez_dph?: number;
+    cena_spolehlivost?: string;
+    zadna_shoda?: boolean;
+  }>;
+  cenova_uprava?: {
+    nakupni_cena_bez_dph?: number;
+    nabidkova_cena_bez_dph?: number;
+    potvrzeno?: boolean;
+  };
+  sanity_flags?: Array<{ level?: string }>;
+}
+
+function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
+  if (!productMatch) return [];
+  if (productMatch.polozky_match?.length) return productMatch.polozky_match as BidLineItem[];
+  // Legacy single-product tvar: kandidati + cenova_uprava na kořeni objektu.
+  if (productMatch.kandidati?.length) {
+    return [{
+      mnozstvi: 1,
+      vybrany_index: productMatch.vybrany_index ?? 0,
+      kandidati: productMatch.kandidati,
+      cenova_uprava: productMatch.cenova_uprava,
+      sanity_flags: [],
+    }];
+  }
+  return [];
+}
+
+/**
+ * Spočítá reálnou ekonomiku nabídky z product-match.json. Náklad známe jen z
+ * `cenova_uprava` (kupní cena), takže do obratu i zisku vstupuje jen položka
+ * s vyplněnou nabídkovou cenou v úpravě. Nikdy nevyhazuje — vadná data → nuly.
+ */
+export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
+  const items = normalizeBidItems(productMatch);
+  let obrat = 0;
+  let naklady = 0;
+  let vazenyZisk = 0;
+  let slabych = 0;
+  let hardFlagu = 0;
+
+  for (const item of items) {
+    const mnozstvi = isPositiveNumber(item.mnozstvi) ? item.mnozstvi : 1;
+    const candidate = item.kandidati?.[item.vybrany_index ?? -1];
+    hardFlagu += item.sanity_flags?.filter((f) => f?.level === 'hard').length ?? 0;
+
+    const uprava = item.cenova_uprava;
+    const nabidkova = isPositiveNumber(uprava?.nabidkova_cena_bez_dph)
+      ? uprava!.nabidkova_cena_bez_dph!
+      : (isPositiveNumber(candidate?.cena_bez_dph) ? candidate!.cena_bez_dph! : null);
+
+    // Slabá položka = bez reálné shody, nízká spolehlivost, nebo bez použitelné ceny.
+    const weak = !candidate
+      || candidate.zadna_shoda === true
+      || !candidateHasRealProduct(candidate)
+      || candidate.cena_spolehlivost === 'nizka'
+      || nabidkova == null;
+    if (weak) slabych++;
+
+    // Ekonomiku počítáme jen z cenové úpravy (jediný zdroj kupní ceny).
+    if (uprava && isPositiveNumber(uprava.nabidkova_cena_bez_dph)) {
+      const nakupni = isPositiveNumber(uprava.nakupni_cena_bez_dph) ? uprava.nakupni_cena_bez_dph : 0;
+      const nab = uprava.nabidkova_cena_bez_dph;
+      const potvrzeno = uprava.potvrzeno === true;
+      obrat += nab * mnozstvi;
+      naklady += nakupni * mnozstvi;
+      vazenyZisk += (nab - nakupni) * mnozstvi * (potvrzeno ? 1 : UNCONFIRMED_PRICE_WEIGHT);
+    }
+  }
+
+  const zisk = obrat - naklady;
+  const marze = obrat > 0 ? (zisk / obrat) * 100 : 0;
+  return {
+    zisk_kc: Math.round(zisk),
+    marze_procent: Math.round(marze * 10) / 10,
+    obrat_bez_dph: Math.round(obrat),
+    vazeny_zisk: vazenyZisk,
+    polozek: items.length,
+    slabych_polozek: slabych,
+    hard_flagu: hardFlagu,
+  };
+}
+
+/**
+ * Profit-aware bid skóre počítané PO nacenění. Vstupem je product-match (reálné
+ * kupní/nabídkové ceny), firemní cílová marže a volitelné historické cenové pásmo.
+ */
+export function scoreBid(
+  analysis: TenderAnalysis,
+  productMatch?: ProductMatch,
+  company?: Pick<CompanyData, 'default_marze_procent'> | null,
+  winBand?: PriceBand,
+): BidScoreResult {
+  const econ = computeBidEconomics(productMatch);
+
+  // Bez naceněných položek nemá bid skóre z čeho počítat — neutrální výsledek.
+  if (econ.polozek === 0) {
+    return {
+      score: 50,
+      doporuceni: 'ZVAZIT',
+      duvody: ['Bid skóre zatím nelze spočítat — chybí nacenění položek.'],
+      zisk_kc: 0,
+      marze_procent: 0,
+    };
+  }
+
+  const factors: Factor[] = [];
+
+  // (b) Vážená marže vs firemní cíl.
+  const target = isPositiveNumber(company?.default_marze_procent)
+    ? company!.default_marze_procent!
+    : DEFAULT_TARGET_MARGIN_PROCENT;
+  const marginValue = econ.marze_procent <= 0 ? 0 : clamp(econ.marze_procent / target, 0, 1);
+  factors.push({
+    value: marginValue,
+    weight: BID_MARGIN_WEIGHT,
+    reason: econ.marze_procent <= 0
+      ? 'Nabídka nemá kladnou marži — hrozí ztrátová zakázka.'
+      : `Vážená marže ${econ.marze_procent.toFixed(1)} % (cíl ${target} %).`,
+  });
+
+  // (a) Absolutní hrubý zisk, vážený spolehlivostí cen (nepotvrzené s poloviční vahou).
+  const profitValue = econ.vazeny_zisk <= 0 ? 0 : clamp(econ.vazeny_zisk / BID_TARGET_PROFIT_CZK, 0, 1);
+  factors.push({
+    value: profitValue,
+    weight: BID_ABS_PROFIT_WEIGHT,
+    reason: `Očekávaný hrubý zisk ${formatCzk(econ.zisk_kc)} (spolehlivostí vážený ${formatCzk(Math.round(econ.vazeny_zisk))}).`,
+  });
+
+  // (c) Podíl položek s reálnou shodou a solidní spolehlivostí.
+  const goodItems = econ.polozek - econ.slabych_polozek;
+  factors.push({
+    value: goodItems / econ.polozek,
+    weight: BID_MATCH_QUALITY_WEIGHT,
+    reason: `${goodItems} z ${econ.polozek} položek má spolehlivou reálnou shodu.`,
+  });
+
+  // (e) Win-price: naše celková cena vs historické pásmo výher.
+  const winFactor = scoreBidWinPrice(econ.obrat_bez_dph, winBand);
+  if (winFactor) factors.push(winFactor);
+
+  const totalWeight = factors.reduce((sum, factor) => sum + factor.weight, 0);
+  const weightedScore = factors.reduce((sum, factor) => sum + factor.value * factor.weight, 0);
+  let score = clamp(Math.round((weightedScore / totalWeight) * 100), 0, 100);
+
+  const duvody = factors.map((factor) => factor.reason);
+
+  // (d) HARD sanity flag = automatická srážka a NOGO strop — cena není důvěryhodná.
+  if (econ.hard_flagu > 0) {
+    duvody.unshift(`${econ.hard_flagu}× HARD cenový flag — nabídka není důvěryhodná bez ruční opravy.`);
+    score = Math.min(score, CONSIDER_SCORE_THRESHOLD - 1);
+  }
+
+  // (f) Pokrytí kvalifikace zatím do bid skóre nezapočítáno (viz handoff/decisions).
+
+  const doporuceni = econ.hard_flagu > 0
+    ? 'NOGO'
+    : score >= GO_SCORE_THRESHOLD
+      ? 'GO'
+      : score >= CONSIDER_SCORE_THRESHOLD
+        ? 'ZVAZIT'
+        : 'NOGO';
+
+  return { score, doporuceni, duvody, zisk_kc: econ.zisk_kc, marze_procent: econ.marze_procent };
+}
+
+function scoreBidWinPrice(ourTotal: number, winBand?: PriceBand): Factor | null {
+  if (!winBand || winBand.pocet <= 0 || !isPositiveNumber(ourTotal) || !isPositiveNumber(winBand.median)) {
+    return null;
+  }
+  if (isPositiveNumber(winBand.p75) && ourTotal > winBand.p75) {
+    return {
+      value: 0.2,
+      weight: BID_WIN_PRICE_WEIGHT,
+      reason: `Naše cena ${formatCzk(ourTotal)} je nad P75 historických výher — nízká šance uspět.`,
+    };
+  }
+  if (ourTotal <= winBand.median) {
+    return {
+      value: 1,
+      weight: BID_WIN_PRICE_WEIGHT,
+      reason: `Naše cena ${formatCzk(ourTotal)} je pod mediánem výher — dobrá cenová pozice.`,
+    };
+  }
+  return {
+    value: 0.6,
+    weight: BID_WIN_PRICE_WEIGHT,
+    reason: `Naše cena ${formatCzk(ourTotal)} je mezi mediánem a P75 výher.`,
+  };
+}
+
+function formatCzk(value: number): string {
+  return `${Math.round(value).toLocaleString('cs-CZ')} Kč`;
 }
 
 function normalize(value: string): string {

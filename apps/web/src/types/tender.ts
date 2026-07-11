@@ -107,6 +107,13 @@ export interface ProductMatch {
   cenova_uprava?: PriceOverride;
   overeni_ceny?: OvereniCeny;
   polozky_match?: PolozkaMatch[];
+  bid_score?: {
+    score: number;
+    doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+    duvody: string[];
+    zisk_kc: number;
+    marze_procent: number;
+  };
 }
 
 export interface ValidationCheck {

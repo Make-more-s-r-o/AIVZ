@@ -44,6 +44,8 @@ import {
   saveOutcome,
   getProductMatch,
   getParts,
+  getBidScore,
+  type BidScore,
   type VysledekPodani,
   type PipelineSteps,
   type ActivityEntry,
@@ -200,6 +202,14 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
     ? { selected: partsData.selected_parts.length, total: partsData.casti.length }
     : null;
 
+  // Profit-aware bid skóre — počítá se on-the-fly z aktuálních cen (po potvrzení je čerstvé).
+  const { data: bidScore } = useQuery({
+    queryKey: ['bid-score', tenderId],
+    queryFn: () => getBidScore(tenderId),
+    retry: false,
+    enabled: steps.match === 'done',
+  });
+
   const decision = normalizeDecision(analysis?.go_no_go?.doporuceni ?? analysis?.doporuceni?.rozhodnuti);
   const nazev = analysis?.zakazka?.nazev || summary?.name || tenderId;
   const evidence = analysis?.zakazka?.evidencni_cislo || tenderId;
@@ -323,6 +333,8 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
           score={validation?.overall_score ?? null}
           tenderId={tenderId}
           assignee={statusData?.assignee ?? null}
+          bidScore={bidScore ?? null}
+          inputScore={analysis?.go_no_go?.score ?? null}
         />
       </div>
     </div>
@@ -835,7 +847,7 @@ function FormField({ label, children }: { label: string; children: ReactNode }) 
 }
 
 function MetadataRail({
-  analysis, sourceFormats, ready, score, tenderId, assignee,
+  analysis, sourceFormats, ready, score, tenderId, assignee, bidScore, inputScore,
 }: {
   analysis: TenderAnalysis | undefined;
   sourceFormats: string[];
@@ -843,9 +855,14 @@ function MetadataRail({
   score: number | null;
   tenderId: string;
   assignee: string | null;
+  bidScore: BidScore | null;
+  inputScore: number | null;
 }) {
   const z = analysis?.zakazka;
   const lhuta = analysis?.terminy?.lhuta_nabidek ?? null;
+  const bidTone: BadgeTone = bidScore == null
+    ? 'outline'
+    : bidScore.doporuceni === 'GO' ? 'success' : bidScore.doporuceni === 'NOGO' ? 'danger' : 'warning';
 
   return (
     <Card title="Metadata" style={{ position: 'sticky', top: 16 }}>
@@ -859,6 +876,49 @@ function MetadataRail({
             {z?.predpokladana_hodnota != null ? fmtCZK(z.predpokladana_hodnota) : '—'}
           </span>
         </RailField>
+
+        <RailField label="Skóre">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Vstupní skóre — orientační go/no-go před naceněním (z analýzy ZD).">
+              <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', minWidth: 78 }}>Vstupní</span>
+              <span className="tnum" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+                {inputScore != null ? `${inputScore}/100` : '—'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Bid skóre — profit-aware hodnocení po nacenění (marže, zisk, kvalita shod, win-price).">
+              <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', minWidth: 78 }}>Bid skóre</span>
+              {bidScore == null ? (
+                <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>—</span>
+              ) : (
+                <Badge tone={bidTone} size="sm">
+                  <span className="tnum">{bidScore.score}/100 · {bidScore.doporuceni}</span>
+                </Badge>
+              )}
+            </div>
+          </div>
+        </RailField>
+
+        {bidScore != null && (
+          <>
+            <RailField label="Očekávaný zisk">
+              <span
+                className="tnum"
+                style={{
+                  fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)',
+                  color: bidScore.zisk_kc > 0 ? 'var(--color-success, #16a34a)' : 'var(--color-danger, #dc2626)',
+                }}
+                title="Hrubý zisk bez DPH ze všech naceněných položek."
+              >
+                {fmtCZK(bidScore.zisk_kc)}
+              </span>
+            </RailField>
+            <RailField label="Marže">
+              <span className="tnum" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
+                {bidScore.marze_procent.toFixed(1)} %
+              </span>
+            </RailField>
+          </>
+        )}
 
         <RailField label="Zadavatel">
           <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)' }}>{z?.zadavatel?.nazev || '—'}</span>
