@@ -1,0 +1,48 @@
+# Inspekce kvality nabídkových dokumentů VZ — 2026-07-10
+
+READ-ONLY inspekce. Nic neupravováno v repu ani na VPS.
+
+**Rozsah:** reálné DOCX (rozbalené w:t) ze 4 čerstvých zakázek na prod (kontejner `vz-api`, `/app/output/<tender>/`):
+- `n-485400-naradi` — 57 položek nářadí, MO / 14. pluk log. podpory
+- `kancelarsky-material` — Nemocnice Kyjov, vč. kupní smlouvy + 2× čestné prohlášení
+- `tender-1783520423526` — Vybavení dílny, FSI VUT Brno, 38 pol.
+- `tender-1779109774773` — AV technika muzeum, ~188 pol., 40,9 mil. Kč
++ PDF audit všech 28 output složek.
+
+## Celkové hodnocení
+
+Kvalita **technických návrhů je nečekaně dobrá** — produktově konkrétní, reálné výrobce/modely, u AV muzea i explicitní requirement-matching („splňuje min. 5 000 lm…"), správné datum 09.07.2026, žádná halucinace produktu u 3 ze 4 zakázek. Krycí listy, čestná prohlášení a poddodavatelé u firem s vyplněnými daty jsou čisté, firemní údaje kompletní (IČO/DIČ/adresa/DS/účet/kontakt). Kupní smlouva (Kyjov) je správně vyplněná oběma stranami.
+
+**Ale:** našel jsem **3 samostatné vady, které BLOKUJÍ podání**, každá na jiné zakázce, plus PDF mezery a slabinu v gate. Žádná není kosmetika — každá by reálně vedla k vyřazení nabídky.
+
+## Tabulka vad (řazeno podle dopadu na podatelnost)
+
+| # | Dopad | Dokument + místo | Příčina (file:line) | Návrh fixu | Prac. |
+|---|-------|------------------|---------------------|-----------|-------|
+| 1 | **BLOKUJE** | `n-485400` `cenova_nabidka.docx` + `soupis_filled_*.xlsx`: položka „Rázová redukce 3/4 x ½" naceněna **1 400 000 Kč (5 ks × 280 000)** = **78 % z celkové ceny 1,8 mil.**. Produkt v CN uveden jako halucinace „Kompletní sada dílenského nářadí – ekonomická varianta (Yato/Vorel/Extol)". | Match: `product-match.json` položka má `vybrany kandidat nazev: None` (žádný reálný produkt), přesto `cenova_uprava.nabidkova_cena_bez_dph=280000`, `marze_procent:0`, `potvrzeno:true`, `cena_max_s_dph:null`. Cena je „AI odhad" bez horní meze — `match-product.ts:730-741` (větev AI odhadu / cap jen když `cap != null`). Deterministický **submit-gate cenu NECHYTÍ**: `submit-gate.ts:29-30` filtruje jen `cena_max_s_dph != null` → u 53 z 57 položek (vč. této) je cap `null`, `over-cap=0`. | (a) match-product: když `kandidat.nazev==null` → NIKDY auto-`potvrzeno:true`; označit `needs_review`. (b) Přidat do submit-gate absolutní/relativní sanity check nezávislý na tender-capu: flag když jednotková cena položky bez capu je outlier (např. > medián×20) NEBO jeden řádek > ~40 % Σ. (c) Regenerovat CN po opravě ceny — dnes dokument zůstane „otrávený" i po flagu validátoru. | M |
+| 2 | **BLOKUJE** | `tender-1779109774773` `kryci_list.docx` sekce A: **Zadavatel = „neuvedeno (pravděpodobně muzeum/kulturní instituce)"**, Evidenční číslo = „neuvedeno", IČO zadavatele = „neuvedeno". Nabídku nelze podat neznámému zadavateli; navíc AI hedge „(pravděpodobně…)" ve formálním dokumentu. | `analysis.json` má `zakazka.zadavatel.nazev="neuvedeno (pravděpodobně muzeum/kulturní instituce)"`, `ico/evidencni_cislo="neuvedeno"` (výstup analyze-tender). Data-resolver bere hodnoty **beze změny**: `data-resolver.ts:286-288`. Builder je vypíše doslova: `kryci-list-builder.ts:66-70`. Field-validace to **nechytí** → `kryci_list.docx -> pass`. | (a) Guard v data-resolveru/gate: hodnoty odpovídající `/neuveden|pravděpodobn|^$|xxx|doplní/i` v povinných polích (zadavatel, evidenční č.) = tvrdý blocker + prázdno místo AI hedge. (b) Rozšířit `docHasResidualPlaceholders` / field-validaci o „neuvedeno"/„pravděpodobně" v krycím listu. (c) Ideálně: analyze-tender nesmí vracet hedge větu jako název zadavatele. | S |
+| 3 | **BLOKUJE / kvalita** | `kancelarsky-material` `cestne_prohlaseni_2.docx` je **bajt-identická kopie** `cestne_prohlaseni.docx` (obě 8713 B, obsah `diff` = identický). Přitom pochází ze šablony `Priloha_5_Cestne_prohlaseni_Rusko.docx` (protiruské sankční prohlášení dle nař. EU 833/2014), ale obsahuje generický text „o splnění základní a profesní způsobilosti". Vnitřní titulek je taky generický → **požadované prohlášení č. 5 fakticky chybí**. | Dvě šablony typu `cestne_prohlaseni` (Příloha 4 obecné + Příloha 5 „Rusko") obě routují na `CLEAN_BUILDERS['cestne_prohlaseni']`. Dispatch předává **jen `docData`, zahazuje `template`**: `generate-bid.ts:335-336`. `buildCestneProhlaseni()` má text natvrdo: `cestne-prohlaseni-builder.ts:22-30,40`. Klasifikátor navíc oba soubory značí stejným typem (input-discovery). | (a) Krátkodobě: pokud jsou 2+ šablony typu `cestne_prohlaseni`, u 2.+ NEpoužít clean-builder, ale reconstruct/fill z reálné šablony (zachovat specifický text). (b) Rozlišit podtyp „Rusko"/sankční prohlášení v klasifikaci a mít pro něj vlastní builder/šablonu. | M |
+| 4 | Snižuje kvalitu | **PDF konverze chybí úplně**: `varyte-vybaveni` (10 docx / **0 pdf**) a `tender-1771416481046` (6 docx / **0 pdf**). Zbytek 26 složek PDF má. Obě prázdné jsou staré (únor) generace. | `pdf-converter.ts:10-11`: `convertToPdf` vrací `null` (tichý skip) když `GOTENBERG_URL` není nastaven — u únorových běhů Gotenberg ještě nebyl nakonfigurovaný. Není žádný **backfill** ani re-check. | (a) Skript/endpoint na dogenerování PDF tam, kde chybí (docx bez páru). (b) Když je Gotenberg dostupný, ale konverze selže, logovat warning do generation-meta (ne jen tichý null). Priorita nízká — čerstvé běhy PDF dělají. | S |
+| 5 | Kvalita / důvěra v gate | **AI validátor (`validation-report.json`) hlásí false-positive blokery.** U `n-485400` `kriticke_problemy` tvrdí „V nabídce chybí IČO a DIČ dodavatele" a „Název dodavatele neuveden" — ačkoli `kryci_list.docx` i `cenova_nabidka.docx` obsahují IČO 07023987, DIČ CZ07023987, Make more s.r.o. Podobně „nesedí DPH 21 %" u položek, kde ručně ověřeno, že sedí (1900→2299 = ×1,21). | `validate-bid.ts` (AI validátor) zjevně nečte finální vygenerované `kryci_list.docx`/`cenova_nabidka.docx`, ale hodnotí nad soupisem/analýzou → falešně hlásí chybějící firemní data a DPH. | Do validačního promptu/kontextu přidat reálný text vygenerovaného krycího listu a CN (už je rozbalený w:t k dispozici). Sníží false-blokery, zvýší důvěru v `ready_to_submit`. | M |
+| 6 | Kosmetika | `seznam_poddodavatelu.docx` (n-485400 i další): deklaruje „Veřejnou zakázku budeme plnit vlastními silami bez zapojení poddodavatelů", hned pod tím prázdná vyplňovací tabulka s prázdnými buňkami. Mírně protichůdné. | `seznam-poddodavatelu-builder.ts` vždy vykreslí i prázdnou tabulku. | Když „bez poddodavatelů", tabulku vynechat (nebo napsat „—"). | S |
+| 7 | Kosmetika | `kancelarsky` `kupni_smlouva.docx` závěr: `„V Kyjově dne …………….V Praze dne 09.07.2026"` — datum kupujícího (placeholder tečky) a prodávajícího slepené na jednom řádku; pravý (prodávající) podpisový blok bez popisku. | AI-fill zachoval layout šablony, dvě datová pole splynula. | Nízká priorita; při fill promptu oddělit datum/pole zalomením. | S |
+
+## TOP 5 vad k okamžité opravě
+
+1. **280k „Rázová redukce" (n-485400)** — jeden řádek = 78 % ceny, halucinovaný produkt, `potvrzeno:true` bez lidské kontroly, a **deterministický cenový gate ho kvůli `cena_max_s_dph:null` NECHYTÍ** (chytil ho jen AI validátor). Přidat sanity-check nezávislý na tender-capu + zákaz auto-potvrzení u `kandidat.nazev==null` + regenerace dokumentu po opravě. *(match-product.ts:730-741, submit-gate.ts:29-30)*
+
+2. **Krycí list bez zadavatele (tender-1779)** — „neuvedeno (pravděpodobně muzeum…)" jako jméno zadavatele projde field-validací jako `pass`. Guard na placeholder-like hodnoty v povinných polích krycího listu = tvrdý blocker. *(data-resolver.ts:286-288, kryci-list-builder.ts:66-70)*
+
+3. **Duplicitní čestné prohlášení (Příloha 5 „Rusko")** — protiruské sankční prohlášení se degraduje na kopii obecného; požadovaná příloha fakticky chybí → vyřazení. Pro 2.+ šablonu typu `cestne_prohlaseni` použít reálnou šablonu, ne clean-builder. *(generate-bid.ts:335-336, cestne-prohlaseni-builder.ts:22-30)*
+
+4. **False-positive blokery ve validátoru** — validátor tvrdí, že chybí IČO/DIČ/název, přestože v dokumentech jsou; hlásí špatně DPH. Erodují důvěru v `ready_to_submit`. Do validace přidat text finálních DOCX. *(validate-bid.ts)*
+
+5. **Backfill chybějících PDF** — `varyte-vybaveni` a `tender-1771416481046` mají 0 PDF. Dogenerovat PDF u docx bez páru + hlásit selhání konverze místo tichého `null`. *(pdf-converter.ts:10-11)*
+
+## Poznámky k zadaným kontrolním bodům
+
+- **Zbytkové placeholdery** („doplní účastník" / „[účastník vyplní]" / „{{" / „______"): v inspektovaných čerstvých DOCX **nenalezeny**. Jediný „placeholder efekt" je (a) `neuvedeno` v krycím listu tender-1779 (vada #2) a (b) prázdné buňky tabulky poddodavatelů (#6). Šablonový problém z CLAUDE.md (free-text „doplní účastník") je u clean-builder cestou vyřešen.
+- **Číslované kopie** (`cestne_prohlaseni_2.docx`): **filename je čistý** (baseName + `_2`, ne syrový název šablony) — pojmenování OK. Problém je **obsah**, ne titulek (vada #3).
+- **Technický návrh**: věcný, produktově konkrétní, bez halucinací u 3 ze 4; datum správně. Nejlepší část pipeline.
+- **Cenová nabídka + soupis**: per-řádkové DPH ×1,21 sedí (ověřeno na vzorku), Σ konzistentní; jediná nesmyslná cena je 280k adaptér (#1) — a je i v odesílaném **soupis xlsx** (`soupis_mapping` row 64, `priceBezDph:280000`), ne jen v DOCX.
+- **Kvalifikační přílohy**: pipeline je negeneruje (výpis z OR, rejstřík trestů, potvrzení FÚ/OSSZ atd.) — musí doložit člověk. AI validátor to u n-485400 správně hlásí jako kritické „chybí kvalifikační doklady". Slot systém (`doc-slots.ts`) existuje, ale chybí jasný **checklist ve výstupu**, co pipeline dodá vs. co musí uživatel nahrát.
