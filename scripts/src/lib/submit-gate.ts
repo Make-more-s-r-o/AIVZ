@@ -20,8 +20,9 @@ import {
   hasPartsSelectionSnapshot,
   readPartsSelectionSnapshot,
 } from './parts-selection-guard.js';
-import { getDocManifest, mapQualifikaceToSlots } from './company-store.js';
-import { DOC_SLOTS, docExpiryStatus, type DocManifest } from './doc-slots.js';
+import { getDocManifest } from './company-store.js';
+import type { DocManifest } from './doc-slots.js';
+import { buildPrilohaChecklist, isValidKvalifikaceVyjimka, type KvalifikaceVyjimky } from './priloha-checklist.js';
 
 export interface SubmitGateResult {
   ready: boolean;
@@ -74,20 +75,25 @@ export async function computeSubmitGate(
   try {
     const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
     const kvalifikace = analysis?.kvalifikace ?? analysis?.kvalifikacni_pozadavky;
-    const requiredSlots = Array.isArray(kvalifikace) ? mapQualifikaceToSlots(kvalifikace) : [];
-    if (requiredSlots.length > 0) {
+    if (Array.isArray(kvalifikace) && kvalifikace.length > 0) {
       const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
       const companyId = typeof meta?.company_id === 'string' ? meta.company_id : null;
-      if (companyId) {
-        const manifest = await (options.getCompanyManifest ?? getDocManifest)(companyId);
-        for (const slot of requiredSlots) {
-          // Checklist používá první doklad daného (nemulti) slotu; gate musí číst
-          // stejný záznam, aby se oba pohledy nerozcházely ani u legacy manifestu.
-          const companyEntry = manifest.entries.find((entry) => entry.slot === slot);
-          if (companyEntry && docExpiryStatus(companyEntry.platnost_do, options.now) === 'expirovany') {
-            const label = DOC_SLOTS.find((item) => item.type === slot)?.label ?? slot;
-            problems.push(`Doklad ${label} („${companyEntry.filename}") je po platnosti.`);
-          }
+      const manifest = companyId
+        ? await (options.getCompanyManifest ?? getDocManifest)(companyId)
+        : { version: 1, entries: [] };
+      let attachments: string[] = [];
+      try { attachments = await readdir(join(outputDir, 'prilohy')); } catch {}
+      let vyjimky: KvalifikaceVyjimky = {};
+      try { vyjimky = JSON.parse(await readFile(join(outputDir, 'kvalifikace-vyjimky.json'), 'utf-8')); } catch {}
+      for (const item of buildPrilohaChecklist({ kvalifikace, manifest, attachments, now: options.now })) {
+        if (!item.povinny || (item.status !== 'chybi' && item.status !== 'po_platnosti')) continue;
+        const vyjimka = vyjimky[item.slot];
+        if (isValidKvalifikaceVyjimka(vyjimka)) {
+          warnings.push(`Výjimka pro povinný kvalifikační doklad ${item.label}: ${vyjimka.duvod} (schválil ${vyjimka.schvalil}).`);
+        } else if (item.status === 'chybi') {
+          problems.push(`Chybí povinný kvalifikační doklad: ${item.label}.`);
+        } else {
+          problems.push(`Doklad ${item.label} je po platnosti.`);
         }
       }
     }

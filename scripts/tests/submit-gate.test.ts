@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { computeSubmitGate } from '../src/lib/submit-gate.js';
+import { validateVyjimkaInput } from '../src/lib/priloha-checklist.js';
 import { hasPlaceholders } from '../src/lib/template-engine.js';
 
 // --- Mini test harness ---------------------------------------------------
@@ -50,6 +51,7 @@ async function makeCase(files: {
   partsSelection?: unknown;
   analysis?: unknown;
   tenderMeta?: unknown;
+  exceptions?: unknown;
 }): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'vz-submit-gate-'));
   tempDirs.push(dir);
@@ -67,6 +69,9 @@ async function makeCase(files: {
   }
   if (files.tenderMeta !== undefined) {
     await writeFile(join(dir, 'tender-meta.json'), JSON.stringify(files.tenderMeta), 'utf-8');
+  }
+  if (files.exceptions !== undefined) {
+    await writeFile(join(dir, 'kvalifikace-vyjimky.json'), JSON.stringify(files.exceptions), 'utf-8');
   }
   return dir;
 }
@@ -193,7 +198,58 @@ async function run(): Promise<void> {
       }),
     });
     assert.equal(res.ready, false);
-    assert.ok(res.problems.includes('Doklad Výpis z obchodního rejstříku („vypis.pdf") je po platnosti.'));
+    assert.ok(res.problems.includes('Doklad Výpis z obchodního rejstříku je po platnosti.'));
+  });
+
+  await test('chybějící povinný kvalifikační doklad blokuje gate', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] }, fieldValidation: PASS_TWICE,
+      analysis: { kvalifikace: [{ typ: 'profesní', popis: 'obchodní rejstřík', povinny: true }] },
+      tenderMeta: { company_id: 'firma-1' },
+    });
+    const res = await computeSubmitGate(dir, { getCompanyManifest: async () => ({ version: 1, entries: [] }) });
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.includes('Chybí povinný kvalifikační doklad: Výpis z obchodního rejstříku.'));
+  });
+
+  await test('platná výjimka propustí kvalifikaci, ale zůstane jako varování', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] }, fieldValidation: PASS_TWICE,
+      analysis: { kvalifikace: [{ typ: 'profesní', popis: 'obchodní rejstřík' }] }, tenderMeta: { company_id: 'firma-1' },
+      exceptions: {
+        vypis_or: { duvod: 'Originál dodáme zadavateli později', schvalil: 'Analytik', at: '2026-07-11T12:00:00Z' },
+        profesni_opravneni: { duvod: 'Originál dodáme zadavateli později', schvalil: 'Analytik', at: '2026-07-11T12:00:00Z' },
+      },
+    });
+    const res = await computeSubmitGate(dir, { getCompanyManifest: async () => ({ version: 1, entries: [] }) });
+    assert.equal(res.ready, true, res.problems.join(' | '));
+    assert.ok(res.warnings.some((warning) => warning.includes('Výjimka pro povinný kvalifikační doklad')));
+  });
+
+  await test('výjimka nepovolí obejít cenový gate', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000, false)] }, fieldValidation: PASS_TWICE,
+      analysis: { kvalifikace: [{ typ: 'profesní', popis: 'obchodní rejstřík' }] }, tenderMeta: { company_id: 'firma-1' },
+      exceptions: { vypis_or: { duvod: 'Schválené obchodní rozhodnutí', schvalil: 'Admin', at: '2026-07-11T12:00:00Z' } },
+    });
+    const res = await computeSubmitGate(dir, { getCompanyManifest: async () => ({ version: 1, entries: [] }) });
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.some((problem) => problem.includes('nemá potvrzenou cenu')));
+  });
+
+  await test('endpoint validace odmítne výjimku s krátkým důvodem', () => {
+    assert.equal(validateVyjimkaInput({ slot: 'vypis_or', duvod: 'krátké' }), null);
+  });
+
+  await test('po nahrání povinného dokladu gate kvalifikační slot propustí', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] }, fieldValidation: PASS_TWICE,
+      analysis: { kvalifikace: [{ typ: 'jiná', popis: 'požaduje se výpis z obchodního rejstříku' }] },
+    });
+    await (await import('node:fs/promises')).mkdir(join(dir, 'prilohy'));
+    await writeFile(join(dir, 'prilohy', 'vypis_or.pdf'), 'doklad', 'utf-8');
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, true, res.problems.join(' | '));
   });
 
   await test('platný firemní doklad v požadovaném slotu submit-gate neblokuje', async () => {

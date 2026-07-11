@@ -14,6 +14,7 @@ import {
   setDocumentMode,
   finalizeTender,
   getPrilohaChecklist,
+  createKvalifikaceVyjimka,
   downloadWithAuth,
   type FieldValidationResult,
   type PrilohaChecklistItem,
@@ -104,11 +105,15 @@ function ValidationChecklist({ result }: { result: FieldValidationResult }) {
  * Nahráno: badge se zdrojem (firma × zakázka) + název souboru. Chybí: badge + odkaz
  * na sekci nahrávání níže.
  */
-function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
-  const nahrano = item.status === 'nahrano';
-  // Doklad po platnosti přijde jako status 'chybi' + poznámka → zvýrazníme jako expiraci.
-  const expirovany = item.status === 'chybi' && item.platnost_status === 'expirovany';
-  const expiruje = nahrano && item.platnost_status === 'expiruje';
+function PrilohaChecklistRow({ item, onUpload, onException }: {
+  item: PrilohaChecklistItem;
+  onUpload: () => void;
+  onException: () => void;
+}) {
+  const nahrano = item.status === 'nahrano' || item.status === 'expiruje';
+  const expirovany = item.status === 'po_platnosti';
+  const expiruje = item.status === 'expiruje';
+  const hardRisk = item.povinny && (item.status === 'chybi' || expirovany);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -137,12 +142,21 @@ function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
             <Badge tone={expirovany ? 'danger' : 'warning'} size="sm">
               {expirovany ? 'Po platnosti' : 'Chybí'}
             </Badge>
-            <a href="#kvalifikacni-doklady" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--info-fg)', whiteSpace: 'nowrap' }}>
-              nahrát níže
-            </a>
+            <button type="button" onClick={onUpload} className="text-xs font-medium text-blue-700">Nahrát</button>
+            {hardRisk && !item.vyjimka && (
+              <button type="button" onClick={onException} className="text-xs text-gray-600 underline">
+                Podat i bez dokladu (výjimka)
+              </button>
+            )}
           </>
         )}
       </div>
+      {hardRisk && (
+        <span style={{ fontSize: 'var(--font-size-xs)', fontWeight: 600, color: 'var(--danger-fg)' }}>
+          Bez tohoto dokladu bude nabídka vyřazena.
+        </span>
+      )}
+      {item.vyjimka && <Badge tone="warning" size="sm">Výjimka: {item.vyjimka.duvod}</Badge>}
       {item.poznamka && (
         <span style={{ fontSize: 'var(--font-size-xs)', color: expirovany ? 'var(--danger-fg)' : 'var(--warning-fg)' }}>
           {item.poznamka}
@@ -159,6 +173,9 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const [uploading, setUploading] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [exceptionItem, setExceptionItem] = useState<PrilohaChecklistItem | null>(null);
+  const [exceptionReason, setExceptionReason] = useState('');
+  const [savingException, setSavingException] = useState(false);
 
   const { data: documents, isLoading, error } = useQuery({
     queryKey: ['documents', tenderId],
@@ -262,6 +279,22 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       setFinalizing(false);
     }
   }, [tenderId, queryClient, toast]);
+
+  const handleException = useCallback(async () => {
+    if (!exceptionItem || exceptionReason.trim().length < 10) return;
+    setSavingException(true);
+    try {
+      await createKvalifikaceVyjimka(tenderId, exceptionItem.slot, exceptionReason.trim());
+      await queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
+      toast('Výjimka byla auditovaně zaznamenána.', 'info');
+      setExceptionItem(null);
+      setExceptionReason('');
+    } catch (err) {
+      toast((err as Error).message, 'danger');
+    } finally {
+      setSavingException(false);
+    }
+  }, [exceptionItem, exceptionReason, queryClient, tenderId, toast]);
 
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok "Dokumenty".</div>;
@@ -450,7 +483,12 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {prilohaChecklist.items.map((item) => (
-              <PrilohaChecklistRow key={item.slot} item={item} />
+              <PrilohaChecklistRow
+                key={item.slot}
+                item={item}
+                onUpload={() => { document.getElementById('kvalifikacni-doklady')?.scrollIntoView(); fileInputRef.current?.click(); }}
+                onException={() => { setExceptionItem(item); setExceptionReason(''); }}
+              />
             ))}
           </div>
         )}
@@ -461,6 +499,24 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
           </p>
         )}
       </Card>
+
+      {exceptionItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl">
+            <h3 className="font-semibold text-gray-900">Výjimka pro povinný doklad</h3>
+            <p className="mt-2 text-sm text-red-700">Bez dokladu „{exceptionItem.label}“ může být nabídka vyřazena.</p>
+            <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="exception-reason">Důvod (min. 10 znaků)</label>
+            <textarea id="exception-reason" value={exceptionReason} onChange={(event) => setExceptionReason(event.target.value)}
+              className="mt-1 min-h-24 w-full rounded-md border border-gray-300 p-2 text-sm" autoFocus />
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setExceptionItem(null)}>Zrušit</Button>
+              <Button variant="primary" disabled={exceptionReason.trim().length < 10 || savingException} onClick={handleException}>
+                {savingException ? 'Ukládám…' : 'Schválit výjimku'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Qualification documents (attachments) */}
       <div id="kvalifikacni-doklady">
