@@ -294,6 +294,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             steps={steps}
             runAll={statusData?.runAll}
             onStepComplete={handleStepComplete}
+            onGoToPricing={() => selectTab('oceneni')}
           />
         )}
       </Card>
