@@ -239,6 +239,19 @@ export async function upsertWinPrices(records: WinPriceRecord[]): Promise<Upsert
   return { received: records.length, affected };
 }
 
+/**
+ * Smaže záznam dle (zdroj, zdroj_id). Používá win-rate feedback loop (outcomes):
+ * když výsledek zakázky přestane nést vítěznou cenu (změna na 'zruseno' / smazání
+ * ceny), odstraní se dřívější feedback řádek se zdrojem 'vlastni_vysledek',
+ * aby v učicích datech nezůstala zastaralá cena. Vrací počet smazaných řádků.
+ */
+export async function deleteWinPrice(zdroj: string, zdrojId: string): Promise<number> {
+  const pool = getPool();
+  if (!pool) throw new Error('Database not available');
+  const res = await pool.query('DELETE FROM win_prices WHERE zdroj = $1 AND zdroj_id = $2', [zdroj, zdrojId]);
+  return res.rowCount ?? 0;
+}
+
 // ============================================================
 // Statistiky
 // ============================================================

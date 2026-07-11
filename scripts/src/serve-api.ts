@@ -60,6 +60,9 @@ import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-clien
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
 import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
+import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
+import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
+import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import {
   RUN_ALL_STEPS,
@@ -2700,6 +2703,130 @@ app.post('/api/notifications/read', async (req, res) => {
     const ids = Array.isArray(body.ids) ? body.ids.map(String) : undefined;
     const updated = await markRead(userId, ids);
     res.json({ updated });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Výsledky podání (win-rate feedback loop) ---
+// Vzor terminy/tasks: GET resilientní (bez DB → null/prázdné statistiky), PUT guarduje
+// isDbAvailable → 503. Vítězná cena se navíc best-effort propisuje do win_prices
+// (zdroj 'vlastni_vysledek') — vlastní výsledky jsou nejrelevantnější učicí data.
+
+const OutcomeInputSchema = z.object({
+  vysledek: z.enum(['vyhra', 'prohra', 'zruseno']),
+  vitezna_cena_bez_dph: z.number().nonnegative().nullish(),
+  nase_cena_bez_dph: z.number().nonnegative().nullish(),
+  pocet_uchazecu: z.number().int().nonnegative().nullish(),
+  vitez_nazev: z.string().trim().max(500).nullish(),
+  poznamka: z.string().trim().max(5000).nullish(),
+});
+
+/**
+ * Propíše vítěznou cenu z výsledku do win_prices (zdroj 'vlastni_vysledek',
+ * zdroj_id = tender_id → UNIQUE(zdroj, zdroj_id) drží idempotenci, opakovaný
+ * upsert záznam jen aktualizuje). Výhra → naše cena, prohra → vítězná cena;
+ * jinak (zrušeno / bez ceny) se případný dřívější feedback řádek smaže, aby
+ * v učicích datech nezůstala zastaralá cena. Vrací true, když řádek existuje.
+ */
+async function syncOutcomeToWinPrices(
+  tenderId: string,
+  data: { vysledek: VysledekPodani; nase_cena_bez_dph?: number | null; vitezna_cena_bez_dph?: number | null; pocet_uchazecu?: number | null; vitez_nazev?: string | null },
+): Promise<boolean> {
+  const cena = data.vysledek === 'vyhra'
+    ? data.nase_cena_bez_dph
+    : data.vysledek === 'prohra' ? data.vitezna_cena_bez_dph : null;
+
+  if (!(typeof cena === 'number' && cena > 0)) {
+    await deleteWinPrice('vlastni_vysledek', tenderId);
+    return false;
+  }
+
+  // Předmět = název zakázky z analysis.json, fallback tender_id (analýza nemusí existovat).
+  let predmet = tenderId;
+  let zadavatelNazev: string | null = null;
+  let zadavatelIco: string | null = null;
+  try {
+    const analysis = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'analysis.json'), 'utf-8'));
+    if (typeof analysis?.zakazka?.nazev === 'string' && analysis.zakazka.nazev.trim()) {
+      predmet = analysis.zakazka.nazev.trim();
+    }
+    zadavatelNazev = typeof analysis?.zakazka?.zadavatel?.nazev === 'string' ? analysis.zakazka.zadavatel.nazev : null;
+    zadavatelIco = typeof analysis?.zakazka?.zadavatel?.ico === 'string' ? analysis.zakazka.zadavatel.ico : null;
+  } catch {
+    // analysis.json nečitelný → fallback tender_id
+  }
+
+  await upsertWinPrices([{
+    zdroj: 'vlastni_vysledek',
+    zdroj_id: tenderId,
+    datum: new Date().toISOString().slice(0, 10),
+    zadavatel_ico: zadavatelIco,
+    zadavatel_nazev: zadavatelNazev,
+    dodavatel_ico: null,
+    dodavatel_nazev: data.vysledek === 'prohra' ? (data.vitez_nazev ?? null) : null,
+    predmet,
+    komodita_kategorie: categorizeCommodity(predmet),
+    cena_bez_dph: cena,
+    cena_s_dph: null,
+    mena: 'CZK',
+    pocet_uchazecu: data.pocet_uchazecu ?? null,
+    url: null,
+    raw: {
+      tender_id: tenderId,
+      vysledek: data.vysledek,
+      nase_cena_bez_dph: data.nase_cena_bez_dph ?? null,
+      vitezna_cena_bez_dph: data.vitezna_cena_bez_dph ?? null,
+    },
+  }]);
+  return true;
+}
+
+// GET výsledek zakázky (public GET → { outcome: null } bez DB/záznamu, neshazuje 401-loop)
+app.get('/api/tenders/:id/outcome', async (req, res) => {
+  try {
+    res.json({ outcome: await getOutcome(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT uložení/aktualizace výsledku zakázky (idempotentní upsert dle tender_id)
+app.put('/api/tenders/:id/outcome', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const parsed = OutcomeInputSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_outcome', detail: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+  }
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const outcome = await upsertOutcome(id, parsed.data);
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await logActivity(id, 'vysledek_ulozen', actor, {
+      vysledek: outcome.vysledek,
+      vitezna_cena_bez_dph: outcome.vitezna_cena_bez_dph,
+      nase_cena_bez_dph: outcome.nase_cena_bez_dph,
+      actor_name: actorName,
+    });
+    // Feedback do win_prices je best-effort — selhání nesmí shodit uložení výsledku.
+    let winpriceFeedback = false;
+    try {
+      winpriceFeedback = await syncOutcomeToWinPrices(id, parsed.data);
+    } catch (err) {
+      console.error(`Outcome: win_prices feedback pro ${id} selhal:`, err);
+    }
+    res.json({ outcome, winprice_feedback: winpriceFeedback });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET souhrnné win-rate statistiky (resilientní — bez DB prázdné nuly)
+app.get('/api/outcomes/stats', async (_req, res) => {
+  try {
+    res.json(await getOutcomeStats());
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
