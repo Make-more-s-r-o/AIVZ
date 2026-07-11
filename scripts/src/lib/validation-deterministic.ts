@@ -2,7 +2,7 @@ import { readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { basename, join } from 'path';
 import { parseDocx } from './document-parser.js';
-import type { ProductMatch, ValidationCheck } from './types.js';
+import type { ProductMatch, ProductCandidate, TenderAnalysis, ValidationCheck } from './types.js';
 import type { CompanyProfile } from './data-resolver.js';
 
 export const DOCUMENT_TEXT_LIMIT = 15_000;
@@ -295,4 +295,138 @@ export function runDeterministicValidation(input: DeterministicValidationInput):
     checkPriceTotals(input.productMatch, input.documents, input.selectedPartIds),
     checkHardPlaceholders(input.documents),
   ];
+}
+
+// --- Shoda se specifikací (spec-compliance) -----------------------------------
+//
+// Audit finding (night2 §4.4): dosud se validovala jen úplnost polí a cena, ne to,
+// jestli VYBRANÝ kandidát vůbec splňuje povinné technické požadavky zadání.
+//
+// POZOR: `shoda_s_pozadavky[].splneno` je AI SEBE-HODNOCENÍ (noisy) — proto tyto
+// kontroly slouží jen k VIDITELNOSTI pro operátora (fail/warning ve validation-reportu).
+// NIKDY nesmí blokovat price-confirm 409 gate ani deterministický submit-gate
+// (proto se do `runDeterministicValidation` NEpřidávají — jinak by protekly do
+// `blockingProblems` ve `validate-bid.ts` a přepsaly `ready_to_submit` podle šumu).
+
+type TechnickyPozadavek = TenderAnalysis['technicke_pozadavky'][number];
+
+export interface SpecComplianceInput {
+  technicalRequirements: TenderAnalysis['technicke_pozadavky'] | undefined;
+  productMatch: ProductMatch;
+  selectedPartIds?: Set<string> | null;
+}
+
+interface SelectedSpecItem {
+  nazev: string;
+  typ: string;
+  candidate: ProductCandidate | undefined;
+}
+
+function describeCandidate(candidate: ProductCandidate): string {
+  return [candidate.vyrobce, candidate.model].filter(Boolean).join(' ').trim() || 'neznámý produkt';
+}
+
+// Vybere u každé položky VYBRANÉHO kandidáta; respektuje filtr vybraných částí
+// (stejná logika jako `selectedProductPrice`). Pokrývá multi-item i legacy single-product.
+function collectSelectedSpecItems(
+  productMatch: ProductMatch,
+  selectedPartIds?: Set<string> | null,
+): SelectedSpecItem[] {
+  if (productMatch.polozky_match) {
+    let items = productMatch.polozky_match;
+    if (selectedPartIds) {
+      items = items.filter((item) => !item.cast_id || selectedPartIds.has(item.cast_id));
+    }
+    return items.map((item) => ({
+      nazev: item.polozka_nazev,
+      typ: item.typ ?? 'produkt',
+      candidate: item.kandidati?.[item.vybrany_index],
+    }));
+  }
+
+  const candidate = productMatch.kandidati?.[productMatch.vybrany_index ?? 0];
+  return [{
+    nazev: candidate ? describeCandidate(candidate) : 'Nabízené plnění',
+    typ: 'produkt',
+    candidate,
+  }];
+}
+
+// Napáruje požadavek z `shoda_s_pozadavky[].pozadavek` na `technicke_pozadavky[].parametr`
+// přes normalizované jméno (lowercase, bez diakritiky, sjednotné mezery, trim).
+// `parametr` bývá kratší klíč („Rozlišení") než plný požadavek („Rozlišení Full HD"),
+// proto po přesné shodě zkoušíme i containment oběma směry (min. 3 znaky, ať netriviálně
+// nematchujeme krátké tokeny). Nenapárováno → vrací null → volající bere konzervativně povinný.
+function findMatchingRequirement(
+  pozadavek: string,
+  requirements: TechnickyPozadavek[],
+): TechnickyPozadavek | null {
+  const target = normalizeForSearch(pozadavek);
+  if (!target) return null;
+
+  const exact = requirements.find((r) => normalizeForSearch(r.parametr) === target);
+  if (exact) return exact;
+
+  return requirements.find((r) => {
+    const param = normalizeForSearch(r.parametr);
+    return param.length >= 3 && (target.includes(param) || param.includes(target));
+  }) ?? null;
+}
+
+/**
+ * Deterministická kontrola „shoda se specifikací": pro každou položku vezme vybraného
+ * kandidáta a projde jeho AI-hodnocení shody s požadavky.
+ *  - nesplněný POVINNÝ požadavek → fail (párování na technicke_pozadavky, nenapárovaný = povinný),
+ *  - nesplněný NEPOVINNÝ požadavek → nic (volitelný parametr není překážka; splneno je navíc noisy),
+ *  - produkt s prázdným shoda_s_pozadavky → warning („nebyla vyhodnocena"),
+ *  - kandidát bez shody (zadna_shoda) nebo s nulovou cenou → skip (řeší zero_price gate),
+ *  - položka typu 'sluzba' → skip.
+ *
+ * Výstup je čistě advisory (zdroj 'deterministic' kvůli zobrazení v deterministické sekci
+ * UI), NIKDY neblokuje podání — viz poznámka výše.
+ */
+export function runSpecComplianceChecks(input: SpecComplianceInput): ValidationCheck[] {
+  const checks: ValidationCheck[] = [];
+  const requirements = input.technicalRequirements ?? [];
+  const items = collectSelectedSpecItems(input.productMatch, input.selectedPartIds);
+
+  for (const item of items) {
+    if (item.typ === 'sluzba') continue;              // (e) služby nemají produktovou specifikaci
+    const candidate = item.candidate;
+    if (!candidate) continue;                          // není vybraný kandidát → není co kontrolovat
+    if (candidate.zadna_shoda === true) continue;      // (d) zástupný záznam bez reálného produktu
+    if (!candidate.cena_bez_dph) continue;             // (d) nulová/chybějící cena → řeší zero_price gate
+
+    const shoda = candidate.shoda_s_pozadavky ?? [];
+    if (shoda.length === 0) {                          // (c) neproběhlo vyhodnocení shody
+      if (item.typ === 'produkt') {
+        checks.push({
+          kategorie: 'shoda_specifikace',
+          kontrola: `Shoda se specifikací — ${item.nazev}`,
+          status: 'warning',
+          detail: `Shoda s požadavky nebyla u vybraného kandidáta (${describeCandidate(candidate)}) vyhodnocena — zkontrolujte technické parametry ručně.`,
+          zdroj: 'deterministic',
+        });
+      }
+      continue;
+    }
+
+    for (const req of shoda) {                          // (b) projdi jednotlivé požadavky
+      if (req.splneno) continue;                        // splněno → OK
+      const matched = findMatchingRequirement(req.pozadavek, requirements);
+      const povinny = matched ? matched.povinny !== false : true; // nenapárovaný → konzervativně povinný
+      if (!povinny) continue;                           // nepovinný nesplněný → advisory šum, nehlásíme
+
+      const hodnota = req.hodnota?.trim();
+      checks.push({
+        kategorie: 'shoda_specifikace',
+        kontrola: `Shoda se specifikací — ${item.nazev}: ${req.pozadavek}`,
+        status: 'fail',
+        detail: `Vybraný kandidát (${describeCandidate(candidate)}) nesplňuje povinný požadavek „${req.pozadavek}". Hodnota kandidáta: ${hodnota || 'neuvedeno'}.${req.komentar ? ` Komentář: ${req.komentar}` : ''}`,
+        zdroj: 'deterministic',
+      });
+    }
+  }
+
+  return checks;
 }
