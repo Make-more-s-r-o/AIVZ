@@ -17,6 +17,7 @@ export interface OutcomeRow {
   pocet_uchazecu: number | null;
   vitez_nazev: string | null;
   poznamka: string | null;
+  snapshot_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -38,7 +39,7 @@ function dbReady(): boolean {
 const OUTCOME_COLS = `id::text, tender_id, vysledek,
   vitezna_cena_bez_dph::float8 AS vitezna_cena_bez_dph,
   nase_cena_bez_dph::float8 AS nase_cena_bez_dph,
-  pocet_uchazecu, vitez_nazev, poznamka, created_at, updated_at`;
+  pocet_uchazecu, vitez_nazev, poznamka, snapshot_id::text, created_at, updated_at`;
 
 export async function getOutcome(tenderId: string): Promise<OutcomeRow | null> {
   if (!dbReady()) return null;
@@ -57,8 +58,9 @@ export async function upsertOutcome(tenderId: string, data: OutcomeInput): Promi
   if (!dbReady()) throw new Error('db_unavailable');
   const row = await queryOne<OutcomeRow>(
     `INSERT INTO crm_vysledky
-       (tender_id, vysledek, vitezna_cena_bez_dph, nase_cena_bez_dph, pocet_uchazecu, vitez_nazev, poznamka)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (tender_id, vysledek, vitezna_cena_bez_dph, nase_cena_bez_dph, pocet_uchazecu, vitez_nazev, poznamka, snapshot_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7,
+       (SELECT id FROM bid_snapshots WHERE tender_id = $1 ORDER BY snapshot_at DESC, id DESC LIMIT 1))
      ON CONFLICT (tender_id) DO UPDATE SET
        vysledek = EXCLUDED.vysledek,
        vitezna_cena_bez_dph = EXCLUDED.vitezna_cena_bez_dph,
@@ -66,6 +68,7 @@ export async function upsertOutcome(tenderId: string, data: OutcomeInput): Promi
        pocet_uchazecu = EXCLUDED.pocet_uchazecu,
        vitez_nazev = EXCLUDED.vitez_nazev,
        poznamka = EXCLUDED.poznamka,
+       snapshot_id = EXCLUDED.snapshot_id,
        updated_at = NOW()
      RETURNING ${OUTCOME_COLS}`,
     [
@@ -74,6 +77,34 @@ export async function upsertOutcome(tenderId: string, data: OutcomeInput): Promi
     ],
   );
   return row!;
+}
+
+export interface CalibrationRow {
+  tender_id: string; vysledek: VysledekPodani; nase_cena: number | null; vitezna_cena: number | null;
+  odchylka_procent: number | null; go_no_go_score: number | null; bid_score: number | null;
+  winprice_median: number | null; podil_overenych_cen: number | null; snapshot_id: string;
+  snapshot_at: string; [key: string]: unknown;
+}
+
+/** Přesné dvojice outcome + snapshot navázaný při uložení výsledku. */
+export async function getCalibrationPairs(): Promise<CalibrationRow[]> {
+  if (!dbReady()) return [];
+  try {
+    return (await query<CalibrationRow>(
+      `SELECT o.tender_id, o.vysledek,
+              COALESCE(o.nase_cena_bez_dph, s.nase_cena_bez_dph)::float8 AS nase_cena,
+              o.vitezna_cena_bez_dph::float8 AS vitezna_cena,
+              CASE WHEN o.vitezna_cena_bez_dph > 0
+                THEN ROUND(((COALESCE(o.nase_cena_bez_dph, s.nase_cena_bez_dph) - o.vitezna_cena_bez_dph)
+                  / o.vitezna_cena_bez_dph * 100)::numeric, 2)::float8 ELSE NULL END AS odchylka_procent,
+              s.go_no_go_score, s.bid_score, s.winprice_median::float8, s.podil_overenych_cen::float8,
+              s.marze_procent::float8, s.zisk_kc::float8, s.pocet_hard_flagu, s.pocet_warn_flagu,
+              s.pocet_kandidat_neexistuje, s.validation_fails, s.ai_naklad_czk::float8,
+              s.id::text AS snapshot_id, s.snapshot_at
+       FROM crm_vysledky o JOIN bid_snapshots s ON s.id = o.snapshot_id
+       ORDER BY s.snapshot_at DESC`,
+    )).rows;
+  } catch { return []; }
 }
 
 // ============================================================
