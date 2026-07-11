@@ -243,6 +243,6 @@ test('chybějící volitelné vstupy nespadnou a vrátí neutrální výsledek',
   assert.deepEqual(result, {
     score: 50,
     doporuceni: 'ZVAZIT',
-    duvody: ['Pro spolehlivější skóre zatím chybí hodnotitelné podklady.'],
+    duvody: ['Zadavatel neuvedl předpokládanou hodnotu — rozpočtový faktor nezapočítán'],
   });
 });
