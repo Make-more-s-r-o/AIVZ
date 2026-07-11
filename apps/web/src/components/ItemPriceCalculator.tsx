@@ -58,6 +58,8 @@ export default function ItemPriceCalculator({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [confirmHover, setConfirmHover] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [overrideLoss, setOverrideLoss] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
 
   const normalizedHistorySubject = historySubject?.trim() ?? '';
   const normalizedHistoryCacheKey = historyCacheKey ?? normalizedHistorySubject;
@@ -82,6 +84,8 @@ export default function ItemPriceCalculator({
       setPoznamka(existingOverride.poznamka || '');
       setZdrojNakupu(existingOverride.zdroj_nakupu);
       setIsConfirmed(existingOverride.potvrzeno);
+      setOverrideLoss(existingOverride.override_pod_nakupem?.potvrzeno === true);
+      setOverrideReason(existingOverride.override_pod_nakupem?.duvod ?? '');
     } else if (selectedProduct) {
       setNakupniCena(selectedProduct.cena_bez_dph);
       setMarzeProcent(defaultMarzeProcent);
@@ -100,6 +104,9 @@ export default function ItemPriceCalculator({
   const nabidkovaCenaSdph = calculatedPrice.nabidkova_cena_s_dph;
   const nakupniCenaSdph = calculatedPrice.nakupni_cena_s_dph;
   const hasZeroMargin = nakupniCena > 0 && nabidkovaCenaBezDph === roundCurrency(nakupniCena);
+  const realUnitCost = overeniCeny?.realita?.nejlevnejsi_bez_dph ?? null;
+  const needsLossOverride = realUnitCost != null && realUnitCost > 0 && nabidkovaCenaBezDph < realUnitCost;
+  const lossOverrideValid = !needsLossOverride || (overrideLoss && overrideReason.trim().length >= 10);
 
   const handleConfirm = useCallback(async () => {
     setIsSaving(true);
@@ -114,6 +121,12 @@ export default function ItemPriceCalculator({
         potvrzeno: true,
         poznamka: poznamka || undefined,
         zdroj_nakupu: zdrojNakupu,
+        ...(needsLossOverride && overrideLoss ? {
+          override_pod_nakupem: {
+            potvrzeno: true as const,
+            duvod: overrideReason.trim(),
+          },
+        } : {}),
       });
       setIsConfirmed(true);
     } catch (err: unknown) {
@@ -121,7 +134,7 @@ export default function ItemPriceCalculator({
     } finally {
       setIsSaving(false);
     }
-  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, zdrojNakupu, onConfirm]);
+  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, zdrojNakupu, needsLossOverride, overrideLoss, overrideReason, onConfirm]);
 
   const handleHistoryToggle = useCallback(() => {
     const nextOpen = !historyOpen;
@@ -133,12 +146,12 @@ export default function ItemPriceCalculator({
 
   const handleUseWebSource = useCallback((source: WebPriceSource) => {
     // Sdílený převod s legacy chipem, ale s právě nastavenou marží operátora.
-    const draft = applyWebSource(source, marzeProcent, onSourceApplied);
+    const draft = applyWebSource(source, marzeProcent, onSourceApplied, mnozstvi ?? 1);
     setNakupniCena(draft.nakupni_cena_bez_dph);
     setPoznamka(draft.poznamka ?? '');
     setZdrojNakupu(draft.zdroj_nakupu);
     setIsConfirmed(false);
-  }, [marzeProcent, onSourceApplied]);
+  }, [marzeProcent, mnozstvi, onSourceApplied]);
 
   return (
     <div
@@ -282,7 +295,8 @@ export default function ItemPriceCalculator({
                     </span>
                   )}
                   <span>· {source.dodavatel || 'Neznámý dodavatel'}</span>
-                  <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH` : 'cena neuvedena'}</span>
+                  <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH za balení` : 'cena neuvedena'}</span>
+                  <span>· {source.baleni_ks != null ? `${source.baleni_ks} ks v balení` : 'počet v balení neověřen'}</span>
                   {source.dostupnost && <span>· {source.dostupnost}</span>}
                   {safeUrl && (
                     <a
@@ -433,22 +447,53 @@ export default function ItemPriceCalculator({
         </div>
       )}
 
-      {overeniCeny?.realita?.pod_trhem
-        && overeniCeny.realita.nejlevnejsi_bez_dph != null
-        && overeniCeny.realita.rozdil_procent != null && (
+      {needsLossOverride && realUnitCost != null && (
         <div className="mb-3 flex items-start gap-2 rounded-md border border-red-300 bg-orange-50 px-3 py-2 text-xs font-semibold text-red-900">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
           <span>
-            Reálná nákupní cena je {overeniCeny.realita.nejlevnejsi_bez_dph.toLocaleString('cs-CZ')} Kč bez DPH
-            {' '}(o {overeniCeny.realita.rozdil_procent.toLocaleString('cs-CZ')} % víc než odhad) — potvrzením odhadu
-            byste prodávali pod nákupem. Použijte cenu ze zdroje.
+            Nabídková cena {nabidkovaCenaBezDph.toLocaleString('cs-CZ')} Kč bez DPH je pod reálným jednotkovým
+            nákupním nákladem {realUnitCost.toLocaleString('cs-CZ')} Kč. Bez auditovaného důvodu je potvrzení i podání blokováno.
           </span>
+        </div>
+      )}
+
+      {needsLossOverride && (
+        <div className="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-950">
+          <label className="flex cursor-pointer items-center gap-2 font-semibold">
+            <input
+              type="checkbox"
+              checked={overrideLoss}
+              onChange={(event) => {
+                setOverrideLoss(event.target.checked);
+                setIsConfirmed(false);
+              }}
+              className="h-4 w-4 accent-red-700"
+            />
+            Potvrdit i přes ztrátu — důvod
+          </label>
+          {overrideLoss && (
+            <div className="mt-2">
+              <Input
+                type="text"
+                size="sm"
+                value={overrideReason}
+                onChange={(event) => {
+                  setOverrideReason(event.target.value);
+                  setIsConfirmed(false);
+                }}
+                placeholder="např. mám lepší nákup u svého dodavatele"
+              />
+              {overrideReason.trim().length < 10 && (
+                <div className="mt-1 font-medium text-red-700">Uveďte auditní důvod alespoň 10 znaků.</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       <button
         onClick={handleConfirm}
-        disabled={isSaving || nakupniCena <= 0}
+        disabled={isSaving || nakupniCena <= 0 || !lossOverrideValid}
         onMouseEnter={() => setConfirmHover(true)}
         onMouseLeave={() => setConfirmHover(false)}
         className="rounded-md px-4 py-1.5 text-sm font-medium transition-colors"
@@ -457,8 +502,8 @@ export default function ItemPriceCalculator({
             ? (confirmHover ? 'var(--green-700)' : 'var(--success-solid)')
             : (confirmHover ? 'var(--accent-hover)' : 'var(--accent)'),
           color: 'var(--text-on-accent)',
-          opacity: (isSaving || nakupniCena <= 0) ? 0.5 : 1,
-          cursor: (isSaving || nakupniCena <= 0) ? 'not-allowed' : 'pointer',
+          opacity: (isSaving || nakupniCena <= 0 || !lossOverrideValid) ? 0.5 : 1,
+          cursor: (isSaving || nakupniCena <= 0 || !lossOverrideValid) ? 'not-allowed' : 'pointer',
         }}
       >
         {isSaving ? 'Ukládám...' : isConfirmed ? 'Aktualizovat' : 'Potvrdit ceny'}

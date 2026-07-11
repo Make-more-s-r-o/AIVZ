@@ -1,4 +1,5 @@
 import type { PolozkaMatch, PriceSanityFlag } from './types.js';
+import { compareAiVsMarket } from './price-reality.js';
 
 // Položka nad 40 % celkové nabídky vyžaduje kontrolu u nabídek s více než třemi položkami.
 export const BID_SHARE_THRESHOLD = 0.40;
@@ -74,6 +75,12 @@ function normalizePrice(item: PolozkaMatch): NormalizedPrice {
   };
 }
 
+/** Platná auditovaná výjimka dovolí vědomě potvrdit prodej pod nákupem. */
+export function hasAuditedLossOverride(item: PolozkaMatch): boolean {
+  const override = item.cenova_uprava?.override_pod_nakupem;
+  return override?.potvrzeno === true && override.duvod.trim().length >= 10;
+}
+
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -130,7 +137,8 @@ export function checkPriceSanity(
       });
     }
 
-    if (price.unitWithoutVat < price.purchaseWithoutVat) {
+    const auditedLossOverride = hasAuditedLossOverride(item);
+    if (price.unitWithoutVat < price.purchaseWithoutVat && !auditedLossOverride) {
       addFinding({
         polozka_index: item.polozka_index,
         level: 'hard',
@@ -139,19 +147,24 @@ export function checkPriceSanity(
       });
     }
 
-    const realMarketPrice = item.overeni_ceny?.realita?.nejlevnejsi_bez_dph;
+    const currentReality = compareAiVsMarket(
+      null,
+      item.overeni_ceny?.zdroje ?? [],
+      price.quantity,
+    );
+    const realMarketPrice = currentReality.nejlevnejsi_bez_dph;
     if (
-      item.overeni_ceny?.realita?.pod_trhem === true
-      && typeof realMarketPrice === 'number'
+      typeof realMarketPrice === 'number'
       && Number.isFinite(realMarketPrice)
       && realMarketPrice > 0
       && price.unitWithoutVat < realMarketPrice
+      && !auditedLossOverride
     ) {
       addFinding({
         polozka_index: item.polozka_index,
-        level: 'warn',
-        code: 'ai_cena_pod_trhem',
-        message: `Nabídková cena ${formatPrice(price.unitWithoutVat)} Kč je pod reálnou nákupní cenou ${formatPrice(realMarketPrice)} Kč (zdroj: ${item.overeni_ceny.dodavatel ?? 'neznámý dodavatel'}) — nabídka by byla ztrátová.`,
+        level: 'hard',
+        code: 'cena_pod_nakupem',
+        message: `Nabídková cena ${formatPrice(price.unitWithoutVat)} Kč bez DPH je nižší než reálný jednotkový nákupní náklad ${formatPrice(realMarketPrice)} Kč pro množství ${formatPrice(price.quantity)} (zdroj: ${currentReality.nejlevnejsi_dodavatel ?? currentReality.nejlevnejsi_zdroj_url ?? 'neznámý dodavatel'}). Bez auditované výjimky nelze cenu potvrdit ani nabídku podat.`,
       });
     }
 

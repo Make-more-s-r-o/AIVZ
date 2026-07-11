@@ -250,6 +250,7 @@ function buildConfirmData(
     potvrzeno: true,
     poznamka: draft?.poznamka ?? existing?.poznamka ?? undefined,
     zdroj_nakupu: draft?.zdroj_nakupu ?? existing?.zdroj_nakupu,
+    override_pod_nakupem: draft?.override_pod_nakupem ?? existing?.override_pod_nakupem,
   };
 }
 
@@ -535,7 +536,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
   const belowMarketCount = polozky.filter((pm, index) => {
     const market = pm.overeni_ceny?.realita?.nejlevnejsi_bez_dph;
-    if (pm.overeni_ceny?.realita?.pod_trhem !== true || market == null) return false;
+    if (market == null) return false;
     const confirmation = buildConfirmData(pm, priceDrafts.get(index), defaultMarze);
     return confirmation != null && confirmation.nabidkova_cena_bez_dph < market;
   }).length;
@@ -693,7 +694,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
       {belowMarketCount > 0 && (
         <div className="flex items-start gap-2 rounded-md border border-red-300 bg-orange-50 px-3 py-2 text-sm font-semibold text-red-900">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
-          <span>{belowMarketCount} {belowMarketCount === 1 ? 'položka má' : 'položek má'} odhad pod reálným trhem — před hromadným potvrzením zkontrolujte.</span>
+          <span>{belowMarketCount} {belowMarketCount === 1 ? 'položka má' : 'položek má'} nabídkovou cenu pod reálným nákupem — bez auditovaného důvodu hromadné potvrzení neprojde.</span>
         </div>
       )}
 

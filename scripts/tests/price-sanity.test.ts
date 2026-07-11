@@ -24,6 +24,7 @@ function item(
     withOverride?: boolean;
     marketWithoutVat?: number;
     aiBelowMarket?: boolean;
+    lossOverride?: boolean;
   } = {},
 ): PolozkaMatch {
   const priceWithoutVat = options.offerWithoutVat ?? priceWithVat / 1.21;
@@ -57,6 +58,12 @@ function item(
       nabidkova_cena_bez_dph: priceWithoutVat,
       nabidkova_cena_s_dph: priceWithVat,
       potvrzeno: false,
+      ...(options.lossOverride ? {
+        override_pod_nakupem: {
+          potvrzeno: true as const,
+          duvod: 'Mám lepší cenu u vlastního dodavatele',
+        },
+      } : {}),
     },
   };
   if (options.marketWithoutVat !== undefined) {
@@ -65,6 +72,18 @@ function item(
       shoda_typ: 'presny',
       dodavatel: 'Reálný dodavatel',
       overeno_at: '2026-07-11T10:00:00.000Z',
+      zdroje: [{
+        url: 'https://realny-dodavatel.cz/produkt',
+        dodavatel: 'Reálný dodavatel',
+        cena_bez_dph: options.marketWithoutVat,
+        cena_s_dph: options.marketWithoutVat * 1.21,
+        cena_baleni_s_dph: options.marketWithoutVat * 1.21,
+        baleni_ks: 1,
+        mena: 'CZK',
+        sazba_dph: 21,
+        dostupnost: 'skladem',
+        poznamka: null,
+      }],
       realita: {
         nejlevnejsi_bez_dph: options.marketWithoutVat,
         rozdil_procent: 25,
@@ -109,18 +128,17 @@ test('below_cost: prodej pod nákupní cenou je HARD', () => {
   assert.equal(findings.some((finding) => finding.level === 'hard' && finding.code === 'below_cost'), true);
 });
 
-test('ai_cena_pod_trhem: nabídka pod reálnou nákupní cenou vytvoří pouze WARN s čísly a zdrojem', () => {
+test('H1: cena_pod_nakupem je HARD a obsahuje přímá čísla i zdroj', () => {
   const findings = checkPriceSanity([
     item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120 }),
   ]);
-  const finding = findings.find((candidate) => candidate.code === 'ai_cena_pod_trhem');
+  const finding = findings.find((candidate) => candidate.code === 'cena_pod_nakupem');
   assert.ok(finding);
-  assert.equal(finding.level, 'warn');
-  assert.match(finding.message, /Nabídková cena 100 Kč.*nákupní cenou 120 Kč.*Reálný dodavatel.*ztrátová/);
-  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem' && candidate.level === 'hard'), false);
+  assert.equal(finding.level, 'hard');
+  assert.match(finding.message, /Nabídková cena 100 Kč.*nákupní náklad 120 Kč.*Reálný dodavatel.*nelze cenu potvrdit ani nabídku podat/);
 });
 
-test('ai_cena_pod_trhem: nevznikne bez reality flagu ani při nabídce pod trhem', () => {
+test('H2: guard nestaví na uloženém reality flagu ani na AI odhadu', () => {
   const findings = checkPriceSanity([
     item(4, 121, {
       offerWithoutVat: 100,
@@ -129,14 +147,21 @@ test('ai_cena_pod_trhem: nevznikne bez reality flagu ani při nabídce pod trhem
       aiBelowMarket: false,
     }),
   ]);
-  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem'), false);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem' && candidate.level === 'hard'), true);
 });
 
-test('ai_cena_pod_trhem: nevznikne, když je potvrzovaná nabídka alespoň na reálném trhu', () => {
+test('cena_pod_nakupem: nevznikne, když je potvrzovaná nabídka alespoň na reálném nákupu', () => {
   const findings = checkPriceSanity([
     item(4, 145.2, { offerWithoutVat: 120, purchaseWithoutVat: 100, marketWithoutVat: 120 }),
   ]);
-  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem'), false);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem'), false);
+});
+
+test('H1: auditovaný override s dostatečným důvodem ztrátový gate propustí', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120, lossOverride: true }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem'), false);
 });
 
 test('bid_share: přes 40 % se varuje jen u více než tří položek', () => {

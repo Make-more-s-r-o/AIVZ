@@ -1,6 +1,7 @@
 import type { CompanyData } from './company-store.js';
 import type { PriceBand } from './winprice-query.js';
 import { candidateHasRealProduct } from './price-prefill.js';
+import { checkPriceSanity } from './price-sanity.js';
 import type { ExtractedText, ProductMatch, TenderAnalysis } from './types.js';
 
 export const GO_SCORE_THRESHOLD = 75;
@@ -306,6 +307,7 @@ function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
   // Legacy single-product tvar: kandidati + cenova_uprava na kořeni objektu.
   if (productMatch.kandidati?.length) {
     return [{
+      polozka_index: -1,
       mnozstvi: 1,
       vybrany_index: productMatch.vybrany_index ?? 0,
       kandidati: productMatch.kandidati,
@@ -323,6 +325,22 @@ function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
  */
 export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
   const items = normalizeBidItems(productMatch);
+  const currentSanityItems = productMatch?.polozky_match?.length
+    ? productMatch.polozky_match
+    : productMatch?.kandidati?.length
+      ? [{
+          polozka_nazev: 'Položka',
+          polozka_index: -1,
+          mnozstvi: 1,
+          typ: 'produkt' as const,
+          kandidati: productMatch.kandidati,
+          vybrany_index: productMatch.vybrany_index ?? 0,
+          oduvodneni_vyberu: productMatch.oduvodneni_vyberu ?? '',
+          cenova_uprava: productMatch.cenova_uprava,
+          overeni_ceny: productMatch.overeni_ceny,
+        }]
+      : [];
+  const currentFindings = checkPriceSanity(currentSanityItems, {});
   let obrat = 0;
   let naklady = 0;
   let vazenyZisk = 0;
@@ -333,8 +351,9 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
   for (const item of items) {
     const mnozstvi = isPositiveNumber(item.mnozstvi) ? item.mnozstvi : 1;
     const candidate = item.kandidati?.[item.vybrany_index ?? -1];
-    hardFlagu += item.sanity_flags?.filter((f) => f?.level === 'hard').length ?? 0;
-    if (item.sanity_flags?.some((f) => f?.code === 'ai_cena_pod_trhem')) ztratovychPolozek++;
+    const itemFindings = currentFindings.filter((finding) => finding.polozka_index === item.polozka_index);
+    hardFlagu += itemFindings.filter((finding) => finding.level === 'hard').length;
+    if (itemFindings.some((finding) => finding.code === 'cena_pod_nakupem')) ztratovychPolozek++;
 
     const uprava = item.cenova_uprava;
     const nabidkova = isPositiveNumber(uprava?.nabidkova_cena_bez_dph)

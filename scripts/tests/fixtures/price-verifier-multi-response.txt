@@ -10,6 +10,7 @@ Nalezl jsem několik přesných nabídek.
       "dodavatel": "Shop A",
       "cena_bez_dph": "1 000,00 Kč",
       "cena_s_dph": null,
+      "prodava_po_kusech": true,
       "dostupnost": "skladem",
       "poznamka": null
     },
@@ -18,6 +19,7 @@ Nalezl jsem několik přesných nabídek.
       "dodavatel": "Shop B",
       "cena_bez_dph": null,
       "cena_s_dph": 968,
+      "prodava_po_kusech": true,
       "dostupnost": "skladem",
       "poznamka": "akční cena"
     },
@@ -26,6 +28,7 @@ Nalezl jsem několik přesných nabídek.
       "dodavatel": "Shop C",
       "cena_bez_dph": 909.09,
       "cena_s_dph": 1100,
+      "prodava_po_kusech": true,
       "dostupnost": "na dotaz",
       "poznamka": null
     },
@@ -34,6 +37,7 @@ Nalezl jsem několik přesných nabídek.
       "dodavatel": "Shop D",
       "cena_bez_dph": 1200,
       "cena_s_dph": 1452,
+      "prodava_po_kusech": true,
       "dostupnost": "skladem",
       "poznamka": null
     },
@@ -42,6 +46,7 @@ Nalezl jsem několik přesných nabídek.
       "dodavatel": "Nebezpečný zdroj",
       "cena_bez_dph": 1,
       "cena_s_dph": 1.21,
+      "prodava_po_kusech": true,
       "dostupnost": "skladem",
       "poznamka": null
     }
@@ -49,4 +54,3 @@ Nalezl jsem několik přesných nabídek.
   "poznamka": "souhrn"
 }
 ```
-

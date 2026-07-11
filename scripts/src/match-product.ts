@@ -298,19 +298,21 @@ async function main() {
   }
 
   // Filter polozky by selected parts
-  let filteredPolozky = analysis.polozky;
+  let filteredPolozky = analysis.polozky.map((item, analysisIndex) => ({ item, analysisIndex }));
   if (selectedParts) {
     const selectedSet = new Set(selectedParts);
-    filteredPolozky = analysis.polozky.filter(p => !p.cast_id || selectedSet.has(p.cast_id));
+    filteredPolozky = filteredPolozky.filter(({ item }) => !item.cast_id || selectedSet.has(item.cast_id));
     if (filteredPolozky.length < analysis.polozky.length) {
       console.log(`  Filtered to ${filteredPolozky.length}/${analysis.polozky.length} items from selected parts`);
     }
   }
 
   // Categorize ALL items from filtered polozky
-  const categorized = filteredPolozky.map((item, idx) => ({
+  const categorized = filteredPolozky.map(({ item, analysisIndex }) => ({
     ...item,
-    originalIndex: idx,
+    // Index zůstává pozicí v analysis.json i po odfiltrování nepodávaných částí.
+    // Verify přes tento klíč bezpečně napáruje autoritativní specifikaci zadavatele.
+    originalIndex: analysisIndex,
     category: categorizeItem(item),
     cast_id: item.cast_id,
   }));

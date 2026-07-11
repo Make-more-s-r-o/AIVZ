@@ -113,6 +113,64 @@ async function run(): Promise<void> {
     assert.deepEqual(res.problems, []);
   });
 
+  await test('H1: ztrátová cena z reálného zdroje blokuje podání bez auditované výjimky', async () => {
+    const lossItem = {
+      polozka_nazev: 'Ztrátová položka',
+      polozka_index: 0,
+      mnozstvi: 1,
+      typ: 'produkt',
+      kandidati: [],
+      vybrany_index: 0,
+      oduvodneni_vyberu: '',
+      cenova_uprava: {
+        nakupni_cena_bez_dph: 80,
+        nakupni_cena_s_dph: 96.8,
+        marze_procent: 25,
+        nabidkova_cena_bez_dph: 100,
+        nabidkova_cena_s_dph: 121,
+        potvrzeno: true,
+      },
+      overeni_ceny: {
+        stav: 'nalezeno',
+        overeno_at: '2026-07-11T10:00:00.000Z',
+        zdroje: [{
+          url: 'https://shop.cz/produkt',
+          dodavatel: 'Shop',
+          cena_bez_dph: 120,
+          cena_s_dph: 145.2,
+          cena_baleni_s_dph: 145.2,
+          baleni_ks: 1,
+          mena: 'CZK',
+          sazba_dph: 21,
+          dostupnost: 'skladem',
+          poznamka: null,
+        }],
+      },
+    };
+    const blockedDir = await makeCase({ productMatch: { polozky_match: [lossItem] }, fieldValidation: PASS_TWICE });
+    const blocked = await computeSubmitGate(blockedDir);
+    assert.equal(blocked.ready, false);
+    assert.ok(blocked.problems.some((problem) => /nižší než reálný jednotkový nákupní náklad/.test(problem)));
+
+    const allowedDir = await makeCase({
+      productMatch: {
+        polozky_match: [{
+          ...lossItem,
+          cenova_uprava: {
+            ...lossItem.cenova_uprava,
+            override_pod_nakupem: {
+              potvrzeno: true,
+              duvod: 'Mám lepší nákup u vlastního dodavatele',
+            },
+          },
+        }],
+      },
+      fieldValidation: PASS_TWICE,
+    });
+    const allowed = await computeSubmitGate(allowedDir);
+    assert.equal(allowed.ready, true, allowed.problems.join(' | '));
+  });
+
   await test('expirovaný firemní doklad v požadovaném checklist slotu blokuje submit-gate', async () => {
     const dir = await makeCase({
       productMatch: { polozky_match: [item(0, null, 1000)] },
