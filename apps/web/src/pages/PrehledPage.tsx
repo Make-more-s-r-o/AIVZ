@@ -1,14 +1,14 @@
 import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History } from 'lucide-react';
+import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History, Award } from 'lucide-react';
 import {
-  getTendersSummary, getRecentActivity, getUsers, getMyTasks,
+  getTendersSummary, getRecentActivity, getUsers, getMyTasks, getOutcomeStats,
   type TenderSummary, type TenderAnalysisSummary, type Task,
 } from '../lib/api';
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, deadlineDays } from '../lib/crm-adapters';
 import { STAGES, STAGE_PROBABILITY, STAGE_LABELS, isTerminalStage, type StageKey } from '../lib/stages';
-import { fmtCZK } from '../lib/format';
+import { fmtCZK, fmtPercent } from '../lib/format';
 import { KpiCard, DeadlineCountdown } from '../components/crm';
 import { Card, Badge } from '../components/ui';
 
@@ -62,6 +62,9 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
     enabled: !!me,
     retry: false,
     staleTime: 30_000,
+  });
+  const { data: outcomeStats } = useQuery({
+    queryKey: ['outcome-stats'], queryFn: getOutcomeStats, retry: false, staleTime: 60_000,
   });
 
   const rows: Row[] = tenders.map((t) => ({
@@ -230,6 +233,44 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
         </Card>
       </div>
 
+      {/* Výsledky podání — win-rate */}
+      <Card title="Výsledky podání">
+        {!outcomeStats || outcomeStats.celkem === 0 ? (
+          <EmptyState icon={<Award size={20} strokeWidth={2} />}>
+            Zatím žádné zaznamenané výsledky — vyplňte tab Výsledek u podané zakázky.
+          </EmptyState>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 32, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{
+                fontSize: 'var(--font-size-3xl)', fontWeight: 'var(--weight-bold)', lineHeight: 1,
+                color: 'var(--text-primary)', letterSpacing: 'var(--tracking-tight)', fontVariantNumeric: 'tabular-nums',
+              }}>{fmtPercent(outcomeStats.win_rate_procent)}</span>
+              <span style={{
+                fontSize: 'var(--font-size-xs)', fontWeight: 'var(--weight-semibold)', letterSpacing: 'var(--tracking-caps)',
+                textTransform: 'uppercase', color: 'var(--text-secondary)',
+              }}>Win-rate</span>
+            </div>
+
+            <div style={{ display: 'flex', gap: 24 }}>
+              <StatBlock label="Výhry" value={outcomeStats.vyhry} tone="success" />
+              <StatBlock label="Prohry" value={outcomeStats.prohry} tone="danger" />
+              <StatBlock label="Zrušené" value={outcomeStats.zrusene} tone="neutral" />
+            </div>
+
+            {outcomeStats.prumerna_odchylka_od_viteze_procent != null && (
+              <div style={{ marginLeft: 'auto', fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)' }}>
+                Průměrně o{' '}
+                <b style={{ color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
+                  {fmtPercent(Math.abs(outcomeStats.prumerna_odchylka_od_viteze_procent), 1)}
+                </b>{' '}
+                {outcomeStats.prumerna_odchylka_od_viteze_procent >= 0 ? 'dražší' : 'levnější'} než vítěz
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* Úkoly + Aktivita */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
         <Card title="Moje úkoly" padding={myTasks.length ? 0 : 16}>
@@ -324,6 +365,22 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
 function EmptyText({ children }: { children: ReactNode }) {
   return (
     <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', margin: 0 }}>{children}</p>
+  );
+}
+
+// Malý číselný blok pro kartu "Výsledky podání" (výhry/prohry/zrušeno).
+const statTone: Record<'success' | 'danger' | 'neutral', string> = {
+  success: 'var(--success-fg)', danger: 'var(--danger-fg)', neutral: 'var(--text-primary)',
+};
+function StatBlock({ label, value, tone }: { label: string; value: number; tone: 'success' | 'danger' | 'neutral' }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{
+        fontSize: 'var(--font-size-lg)', fontWeight: 'var(--weight-bold)', lineHeight: 1,
+        color: statTone[tone], fontVariantNumeric: 'tabular-nums',
+      }}>{value}</span>
+      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{label}</span>
+    </div>
   );
 }
 
