@@ -15,6 +15,7 @@ export interface DocSlotEntry {
   slot: DocSlotType;
   filename: string;
   uploadedAt: string;  // ISO datetime
+  platnost_do?: string | null;  // ISO datum (YYYY-MM-DD) platnosti dokladu; nepovinné (staré manifesty)
 }
 
 export interface DocManifest {
