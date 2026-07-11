@@ -154,6 +154,69 @@ export async function getHlidacTenders(query: string): Promise<HlidacTenderCandi
   return fetchJson(`/monitoring/hlidac?q=${encodeURIComponent(query)}`);
 }
 
+// --- Monitoring feed (perzistovaný, s go/no-go skóre) ---
+
+export type MonitoringStav = 'nova' | 'prevzata' | 'ignorovana';
+
+export interface MonitoringFeedItem {
+  id: string;
+  zdroj: string;
+  zdroj_id: string;
+  nazev: string;
+  zadavatel: string | null;
+  predpokladana_hodnota: number | null;
+  lhuta_nabidek: string | null;
+  url: string | null;
+  stav: MonitoringStav;
+  tender_id: string | null;
+  created_at: string;
+  go_no_go: GoNoGo;
+}
+
+/** Natáhne nové zakázky ze zdroje do feedu. Vrací počty nalezeno/nových. */
+export async function syncMonitoring(
+  opts: { zdroj?: 'nen' | 'hlidac' | 'both'; q?: string } = {},
+): Promise<{ zdroj: string; nalezeno: number; novych: number }> {
+  const res = await fetch(`${API_BASE}/monitoring/sync`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Synchronizace selhala');
+  }
+  return res.json();
+}
+
+export async function getMonitoringFeed(stav: MonitoringStav = 'nova'): Promise<MonitoringFeedItem[]> {
+  return fetchJson(`/monitoring/feed?stav=${encodeURIComponent(stav)}`);
+}
+
+export async function prevzitMonitoring(id: string): Promise<{ tender_id: string; alreadyTaken?: boolean }> {
+  const res = await fetch(`${API_BASE}/monitoring/${id}/prevzit`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Převzetí selhalo');
+  }
+  return res.json();
+}
+
+export async function ignorovatMonitoring(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/monitoring/${id}/ignorovat`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Akce selhala');
+  }
+}
+
 /**
  * Seznam zakázek s embednutým souhrnem analýzy + AI náklady (jeden request místo N+1).
  * Používají Přehled/Zakázky/Pipeline. Vlastní query key (['tenders','summary']), ať se

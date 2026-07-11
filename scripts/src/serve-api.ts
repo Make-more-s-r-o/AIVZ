@@ -64,6 +64,13 @@ import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from 
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
+import { fetchNenTenders } from './lib/monitoring/nen-client.js';
+import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
+import {
+  upsertFeed, listFeed, getFeedItem, setFeedStav,
+  toNenFeedInput, toHlidacFeedInput, type MonitoringStav,
+} from './lib/monitoring/monitoring-store.js';
+import { scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
 import {
   RUN_ALL_STEPS,
   advanceRunAllChain,
@@ -734,6 +741,124 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 
 // GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
 app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
+
+// POST /api/monitoring/sync - natáhne nové zakázky ze zdroje do tabulky monitoring_zakazky.
+// Idempotentní: opakovaný běh nové jen doplní, stav dřív převzatých/ignorovaných nechá.
+// zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
+app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
+  try {
+    const zdroj = typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen';
+    const q = typeof req.body?.q === 'string' ? req.body.q : '';
+
+    const inputs = [];
+    if (zdroj === 'nen' || zdroj === 'both') {
+      const nen = await fetchNenTenders(q);
+      inputs.push(...nen.map(toNenFeedInput));
+    }
+    if (zdroj === 'hlidac' || zdroj === 'both') {
+      const hlidac = await fetchNewTenders(q);
+      inputs.push(...hlidac.map(toHlidacFeedInput));
+    }
+
+    // Bez DB nelze feed perzistovat → 503 (ne pád). S DB uloží a vrátí počty.
+    const inserted = await upsertFeed(inputs);
+    res.json({ zdroj, nalezeno: inputs.length, novych: inserted });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná — feed nelze uložit.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/monitoring/feed?stav=nova - feed s dopočítaným quick go/no-go skóre.
+app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
+  try {
+    const stavParam = typeof req.query.stav === 'string' ? req.query.stav : 'nova';
+    const stav = (['nova', 'prevzata', 'ignorovana'].includes(stavParam)
+      ? stavParam
+      : undefined) as MonitoringStav | undefined;
+
+    const items = await listFeed(stav);
+    // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
+    const company = await getCompany('default');
+    const now = new Date();
+    const withScore = items.map((item) => ({
+      ...item,
+      go_no_go: scoreFeedItem(item, company ?? undefined, now),
+    }));
+    res.json(withScore);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/monitoring/:id/prevzit - založí z feed položky zakázku (složka input/ + CRM stav).
+// Dokumenty ZD nahraje operátor ručně (stažení příloh zde neřešíme).
+app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
+  const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
+  const actor = (req as any).user?.sub ?? null;
+  try {
+    const item = await getFeedItem(id);
+    if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
+    if (item.stav === 'prevzata' && item.tender_id) {
+      return res.json({ tender_id: item.tender_id, alreadyTaken: true });
+    }
+
+    // Bezpečný unikátní název složky (isSafePath kompatibilní).
+    let tenderId = slugifyTender(item.nazev, `zakazka-${id}`);
+    if (!isSafePath(tenderId)) tenderId = `zakazka-${id}`;
+    try {
+      await stat(join(INPUT_DIR, tenderId));
+      tenderId = `${tenderId}-${id}`; // kolize názvu → přípona z feed id
+    } catch {}
+
+    await mkdir(join(INPUT_DIR, tenderId), { recursive: true });
+    await mkdir(join(OUTPUT_DIR, tenderId), { recursive: true });
+    await writeFile(
+      join(OUTPUT_DIR, tenderId, 'tender-meta.json'),
+      JSON.stringify({
+        name: item.nazev,
+        created_at: new Date().toISOString(),
+        source: {
+          zdroj: item.zdroj,
+          zdroj_id: item.zdroj_id,
+          url: item.url,
+          zadavatel: item.zadavatel,
+          predpokladana_hodnota: item.predpokladana_hodnota,
+          lhuta_nabidek: item.lhuta_nabidek,
+        },
+      }, null, 2),
+      'utf-8',
+    );
+
+    // CRM stav 'nova' + zápis do feedu (stav 'prevzata', vazba tender_id). Bez DB → 503.
+    await setStatus(tenderId, 'nova');
+    await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
+    await setFeedStav(id, 'prevzata', tenderId);
+
+    res.json({ tender_id: tenderId });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná — zakázku nelze převzít.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/monitoring/:id/ignorovat - skryje položku z feedu (stav 'ignorovana').
+app.post('/api/monitoring/:id/ignorovat', requireJwt, async (req, res) => {
+  try {
+    const updated = await setFeedStav(String(req.params.id), 'ignorovana');
+    if (!updated) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // GET /api/users - list all users
 app.get('/api/users', requireJwt, async (_req, res) => {
