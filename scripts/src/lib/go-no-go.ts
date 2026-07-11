@@ -24,6 +24,8 @@ export const WIN_PRICE_ACCEPTABLE_RATIO = 0.35;
 export const WIN_PRICE_FAR_RATIO = 0.60;
 export const WIN_PRICE_FULL_SAMPLE = 10;
 
+export const MISSING_BUDGET_REASON = 'Zadavatel neuvedl předpokládanou hodnotu — rozpočtový faktor nezapočítán';
+
 type AnalysisWithScoringContext = TenderAnalysis
   & Partial<Pick<ExtractedText, 'extractedAt'>>
   & Partial<Pick<CompanyData, 'obory' | 'keyword_filters'>>;
@@ -67,12 +69,17 @@ export function scoreGoNoGo(
   const deadlineFactor = scoreDeadline(analysis.terminy.lhuta_nabidek, analysis.extractedAt);
   if (deadlineFactor) factors.push(deadlineFactor);
 
+  const duvody = factors.map((factor) => factor.reason);
+  if (!isPositiveNumber(analysis.zakazka.predpokladana_hodnota)) {
+    duvody.unshift(MISSING_BUDGET_REASON);
+  }
+
   // Bez jediného dostupného signálu vracíme neutrální výsledek, ne falešnou jistotu.
   if (factors.length === 0) {
     return {
       score: 50,
       doporuceni: 'ZVAZIT',
-      duvody: ['Pro spolehlivější skóre zatím chybí hodnotitelné podklady.'],
+      duvody,
     };
   }
 
@@ -85,7 +92,7 @@ export function scoreGoNoGo(
       ? 'ZVAZIT'
       : 'NOGO';
 
-  return { score, doporuceni, duvody: factors.map((factor) => factor.reason) };
+  return { score, doporuceni, duvody };
 }
 
 function scoreSectorMatch(analysis: AnalysisWithScoringContext): Factor | null {

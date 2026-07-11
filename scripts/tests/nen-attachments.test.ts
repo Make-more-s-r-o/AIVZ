@@ -116,6 +116,16 @@ function fetchWithBodies(bodies: Record<string, Buffer | { status: number }>): t
   }) as unknown as typeof fetch;
 }
 
+function fetchWithResponses(
+  responses: Record<string, { body: string; headers?: HeadersInit; status?: number }>,
+): typeof fetch {
+  return (async (input: string | URL | Request) => {
+    const entry = responses[String(input)];
+    if (!entry) return new Response('missing', { status: 404 });
+    return new Response(entry.body, { status: entry.status ?? 200, headers: entry.headers });
+  }) as typeof fetch;
+}
+
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'zd-test-'));
   try {
@@ -143,6 +153,93 @@ test('downloadNenAttachments stáhne povolené soubory a přeskočí nepovolené
     assert.deepEqual(files, ['kryci-list.docx', 'vyzva.pdf']);
     assert.equal(await readFile(join(dir, 'vyzva.pdf'), 'utf-8'), 'PDF-DATA');
     assert.ok(result.varovani.some((w) => w.includes('malware.exe')));
+  });
+});
+
+test('downloadNenAttachments použije RFC 5987 název z Content-Disposition', async () => {
+  await withTmpDir(async (dir) => {
+    const url = 'https://nen.nipez.cz/file?id=disposition';
+    const fetchFn = fetchWithResponses({
+      [url]: {
+        body: 'DOCX-DATA',
+        headers: {
+          'content-disposition': "attachment; filename*=UTF-8''P%C5%99%C3%ADloha%20%C4%8D.%201%20Smluvn%C3%AD%20vzor.docx",
+          'content-type': 'application/octet-stream',
+        },
+      },
+    });
+    const result = await downloadNenAttachments(
+      [{ nazev: 'Příloha č. 1 Smluvní vzor', url }],
+      dir,
+      { fetchFn },
+    );
+    assert.equal(result.pocet_stazenych, 1);
+    assert.deepEqual(await readdir(dir), ['Příloha č. 1 Smluvní vzor.docx']);
+    assert.deepEqual(result.varovani, []);
+  });
+});
+
+test('downloadNenAttachments odvodí .pdf z Content-Type, když název nemá příponu', async () => {
+  await withTmpDir(async (dir) => {
+    const url = 'https://nen.nipez.cz/file?id=pdf';
+    const result = await downloadNenAttachments(
+      [{ nazev: 'Výzva k podání nabídky', url }],
+      dir,
+      { fetchFn: fetchWithResponses({ [url]: { body: 'PDF-DATA', headers: { 'content-type': 'application/pdf; charset=binary' } } }) },
+    );
+    assert.equal(result.pocet_stazenych, 1);
+    assert.deepEqual(await readdir(dir), ['Výzva k podání nabídky.pdf']);
+  });
+});
+
+test('downloadNenAttachments přeskočí nepodporovaný Content-Type s konkrétním důvodem', async () => {
+  await withTmpDir(async (dir) => {
+    const url = 'https://nen.nipez.cz/file?id=image';
+    const result = await downloadNenAttachments(
+      [{ nazev: 'Náhled přílohy', url }],
+      dir,
+      { fetchFn: fetchWithResponses({ [url]: { body: 'PNG-DATA', headers: { 'content-type': 'image/png' } } }) },
+    );
+    assert.equal(result.pocet_stazenych, 0);
+    assert.deepEqual(await readdir(dir), []);
+    assert.ok(result.varovani.some((warning) => warning.includes('nepodporovaný typ image/png')));
+  });
+});
+
+test('downloadNenAttachments řeší kolize názvů získaných z hlaviček', async () => {
+  await withTmpDir(async (dir) => {
+    const firstUrl = 'https://nen.nipez.cz/file?id=collision-1';
+    const secondUrl = 'https://nen.nipez.cz/file?id=collision-2';
+    const headers = { 'content-disposition': 'attachment; filename="smluvni-vzor.docx"' };
+    const result = await downloadNenAttachments(
+      [
+        { nazev: 'Smluvní vzor A', url: firstUrl },
+        { nazev: 'Smluvní vzor B', url: secondUrl },
+      ],
+      dir,
+      { fetchFn: fetchWithResponses({
+        [firstUrl]: { body: 'FIRST', headers },
+        [secondUrl]: { body: 'SECOND', headers },
+      }) },
+    );
+    assert.equal(result.pocet_stazenych, 2);
+    assert.deepEqual((await readdir(dir)).sort(), ['smluvni-vzor-2.docx', 'smluvni-vzor.docx']);
+  });
+});
+
+test('downloadNenAttachments sanitizuje traversal pokus v Content-Disposition', async () => {
+  await withTmpDir(async (dir) => {
+    const url = 'https://nen.nipez.cz/file?id=traversal';
+    const result = await downloadNenAttachments(
+      [{ nazev: 'Dokument bez přípony', url }],
+      dir,
+      { fetchFn: fetchWithResponses({
+        [url]: { body: 'SAFE', headers: { 'content-disposition': 'attachment; filename="../../etc/passwd.docx"' } },
+      }) },
+    );
+    assert.equal(result.pocet_stazenych, 1);
+    assert.deepEqual(await readdir(dir), ['passwd.docx']);
+    assert.equal(await readFile(join(dir, 'passwd.docx'), 'utf-8'), 'SAFE');
   });
 });
 

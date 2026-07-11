@@ -277,6 +277,25 @@ test('scoreFeedItem výrazně zvýhodní kategorii zájmu a srazí kategorii mim
   assert.equal(outside.doporuceni, 'NOGO');
 });
 
+test('scoreFeedItem bez hodnoty skládá důvody rozpočtu, sektoru, lhůty a kategorie', () => {
+  const result = scoreFeedItem(
+    {
+      nazev: 'Dodávka notebooků',
+      kategorie: 'it_av',
+      zadavatel: 'Kraj',
+      predpokladana_hodnota: null,
+      lhuta_nabidek: '2026-08-01',
+    },
+    { obory: ['IT'], keyword_filters: { IT: ['notebook'] } },
+    NOW,
+    MONITORING_CONFIG,
+  );
+  assert.ok(result.duvody.includes('Zadavatel neuvedl předpokládanou hodnotu — rozpočtový faktor nezapočítán'));
+  assert.ok(result.duvody.some((reason) => reason.includes('odpovídá oborům firmy')));
+  assert.ok(result.duvody.some((reason) => reason.includes('Na přípravu zbývá')));
+  assert.ok(result.duvody.some((reason) => reason.includes('Kategorie zakázky odpovídá')));
+});
+
 test('scoreFeedItem nastaví NOGO při vyloučeném slovu v názvu', () => {
   const result = scoreFeedItem(
     { nazev: 'Pronájem notebooků', kategorie: 'it_av', zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null },

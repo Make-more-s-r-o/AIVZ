@@ -183,7 +183,7 @@ export function parseNenListing(html: string): NenTenderCandidate[] {
 // --- Přílohy zadávací dokumentace (podstránka /zadavaci-dokumentace) ---
 
 export interface NenAttachment {
-  /** Zobrazovaný název souboru z tabulky ZD (např. „Krycí list.docx"). */
+  /** Zobrazovaný název z tabulky ZD; NEN jej může uvést i bez přípony. */
   nazev: string;
   /** Absolutní odkaz na stažení souboru (NEN `/file?id=…`, 302 → skutečný obsah). */
   url: string;
@@ -232,7 +232,8 @@ export function parseNenAttachments(html: string): NenAttachment[] {
  * Natáhne seznam příloh zadávací dokumentace pro danou zakázku z NEN. `detailUrl` je
  * odkaz na detail zakázky (z feedu `monitoring_zakazky.url`). Graceful: jakákoli chyba
  * (nedostupný zdroj, HTTP != 2xx, timeout) vrací prázdné pole — volající to bere jako
- * „přílohy nejsou k dispozici", ne jako pád.
+ * „přílohy nejsou k dispozici", ne jako pád. Názvy zde záměrně nefiltrujeme podle
+ * přípony: skutečný název a typ může dodat až odpověď `/file` v HTTP hlavičkách.
  */
 export async function fetchNenAttachments(
   detailUrl: string,
