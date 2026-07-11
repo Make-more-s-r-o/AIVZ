@@ -25,6 +25,8 @@ interface ItemPriceCalculatorProps {
   historySubject?: string;
   historyCacheKey?: string;
   onWinPriceBandLoaded?: (cacheKey: string, subject: string, band: WinPriceBand) => void;
+  /** Výchozí marže (%) z nastavení firmy — předvyplní se místo dřívější nuly. */
+  defaultMarzeProcent: number;
 }
 
 export default function ItemPriceCalculator({
@@ -38,6 +40,7 @@ export default function ItemPriceCalculator({
   historySubject,
   historyCacheKey,
   onWinPriceBandLoaded,
+  defaultMarzeProcent,
 }: ItemPriceCalculatorProps) {
   const [nakupniCena, setNakupniCena] = useState<number>(0);
   const [marzeProcent, setMarzeProcent] = useState<number>(0);
@@ -60,14 +63,21 @@ export default function ItemPriceCalculator({
   useEffect(() => {
     if (existingOverride) {
       setNakupniCena(existingOverride.nakupni_cena_bez_dph);
-      setMarzeProcent(existingOverride.marze_procent);
+      // NEpotvrzená nula = otrávený default (AI-prefill ve starých prod datech),
+      // ne rozhodnutí operátora → předvyplň výchozí marži firmy. Potvrzenou nulu
+      // respektuj — tu operátor potvrdil vědomě.
+      setMarzeProcent(
+        !existingOverride.potvrzeno && existingOverride.marze_procent === 0
+          ? defaultMarzeProcent
+          : existingOverride.marze_procent,
+      );
       setPoznamka(existingOverride.poznamka || '');
       setIsConfirmed(existingOverride.potvrzeno);
     } else if (selectedProduct) {
       setNakupniCena(selectedProduct.cena_bez_dph);
-      setMarzeProcent(0);
+      setMarzeProcent(defaultMarzeProcent);
     }
-  }, [existingOverride, selectedProduct]);
+  }, [existingOverride, selectedProduct, defaultMarzeProcent]);
 
   useEffect(() => {
     if (historyQuery.data && normalizedHistorySubject && onWinPriceBandLoaded) {

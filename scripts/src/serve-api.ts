@@ -59,6 +59,7 @@ import { generateMissingEmbeddings } from './lib/embedding-service.js';
 import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
 import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
+import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import {
   RUN_ALL_STEPS,
@@ -1134,6 +1135,16 @@ app.get('/api/tenders/:id/product-match', async (req, res) => {
   } catch {
     res.status(404).json({ error: 'Not found — run match step first' });
   }
+});
+
+// GET /api/tenders/:id/pricing-defaults — výchozí marže pro cenové potvrzení v UI.
+// Resolve řetězec: firma zakázky → default firma → legacy config/company.json → 10 %.
+// Záměrně vždy 200 (resolvePricingDefaults nikdy nevyhazuje) — je to UI default,
+// ne kritická data; 5xx by zbytečně rozbilo cenový panel.
+app.get('/api/tenders/:id/pricing-defaults', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  res.json(await resolvePricingDefaults(id));
 });
 
 // GET /api/tenders/:id/documents - list generated documents
