@@ -31,6 +31,27 @@ test('parser zachová kompatibilitu se starou single-source odpovědí', async (
   assert.equal(parsed.web_cena_s_dph, 2_420);
   assert.equal(parsed.zdroje?.[0]?.url, 'https://legacy-shop.cz/model-y');
   assert.equal(parsed.dodavatel, 'Legacy Shop');
+  assert.equal(parsed.shoda_typ, 'presny');
+  assert.equal(parsed.realita?.rozdil_procent, null);
+});
+
+test('parser zachová shoda_typ, názvy produktů a realitu multi-source ekvivalentu', async () => {
+  const response = await readFile(new URL('price-verifier-equivalent-response.txt', FIXTURES), 'utf-8');
+  const parsed = parseWebPriceResponse(
+    response,
+    { ai_cena_bez_dph: 20 },
+    '2026-07-11T10:00:00.000Z',
+  );
+
+  assert.equal(parsed.stav, 'ekvivalent');
+  assert.equal(parsed.shoda_typ, 'ekvivalent');
+  assert.deepEqual(parsed.zdroje?.map((source) => source.nazev_produktu), [
+    'Brusné plátno arch 230 × 280 mm P120',
+    'Brusné plátno 230x280 zrnitost 120',
+  ]);
+  assert.equal(parsed.realita?.nejlevnejsi_bez_dph, 30);
+  assert.equal(parsed.realita?.rozdil_procent, 50);
+  assert.equal(parsed.realita?.pod_trhem, true);
 });
 
 test('M5: top-level legacy pole pocházejí výhradně z nejlevnějšího validního zdroje', () => {

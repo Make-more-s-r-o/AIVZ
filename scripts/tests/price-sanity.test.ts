@@ -22,6 +22,8 @@ function item(
     purchaseWithoutVat?: number;
     offerWithoutVat?: number;
     withOverride?: boolean;
+    marketWithoutVat?: number;
+    aiBelowMarket?: boolean;
   } = {},
 ): PolozkaMatch {
   const priceWithoutVat = options.offerWithoutVat ?? priceWithVat / 1.21;
@@ -39,7 +41,7 @@ function item(
     dostupnost: 'skladem',
   };
 
-  return {
+  const result: PolozkaMatch = {
     polozka_nazev: `Položka ${polozkaIndex}`,
     polozka_index: polozkaIndex,
     mnozstvi: options.quantity ?? 1,
@@ -57,6 +59,20 @@ function item(
       potvrzeno: false,
     },
   };
+  if (options.marketWithoutVat !== undefined) {
+    result.overeni_ceny = {
+      stav: 'nalezeno',
+      shoda_typ: 'presny',
+      dodavatel: 'Reálný dodavatel',
+      overeno_at: '2026-07-11T10:00:00.000Z',
+      realita: {
+        nejlevnejsi_bez_dph: options.marketWithoutVat,
+        rozdil_procent: 25,
+        pod_trhem: options.aiBelowMarket ?? true,
+      },
+    };
+  }
+  return result;
 }
 
 function codes(items: PolozkaMatch[]): string[] {
@@ -91,6 +107,36 @@ test('below_cost: prodej pod nákupní cenou je HARD', () => {
     item(0, 968, { purchaseWithoutVat: 1_000, offerWithoutVat: 800 }),
   ], {});
   assert.equal(findings.some((finding) => finding.level === 'hard' && finding.code === 'below_cost'), true);
+});
+
+test('ai_cena_pod_trhem: nabídka pod reálnou nákupní cenou vytvoří pouze WARN s čísly a zdrojem', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120 }),
+  ]);
+  const finding = findings.find((candidate) => candidate.code === 'ai_cena_pod_trhem');
+  assert.ok(finding);
+  assert.equal(finding.level, 'warn');
+  assert.match(finding.message, /Nabídková cena 100 Kč.*nákupní cenou 120 Kč.*Reálný dodavatel.*ztrátová/);
+  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem' && candidate.level === 'hard'), false);
+});
+
+test('ai_cena_pod_trhem: nevznikne bez reality flagu ani při nabídce pod trhem', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, {
+      offerWithoutVat: 100,
+      purchaseWithoutVat: 80,
+      marketWithoutVat: 120,
+      aiBelowMarket: false,
+    }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem'), false);
+});
+
+test('ai_cena_pod_trhem: nevznikne, když je potvrzovaná nabídka alespoň na reálném trhu', () => {
+  const findings = checkPriceSanity([
+    item(4, 145.2, { offerWithoutVat: 120, purchaseWithoutVat: 100, marketWithoutVat: 120 }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'ai_cena_pod_trhem'), false);
 });
 
 test('bid_share: přes 40 % se varuje jen u více než tří položek', () => {

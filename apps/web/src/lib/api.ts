@@ -1410,6 +1410,7 @@ export async function detachTag(id: string, stitekId: string): Promise<{ success
 export interface WebPriceSource {
   url: string;
   dodavatel: string | null;
+  nazev_produktu?: string;
   cena_bez_dph: number | null;
   cena_s_dph: number | null;
   dostupnost: string | null;
@@ -1417,7 +1418,8 @@ export interface WebPriceSource {
 }
 
 export interface OvereniCeny {
-  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
+  stav: 'nalezeno' | 'ekvivalent' | 'nenalezeno' | 'chyba';
+  shoda_typ?: 'presny' | 'ekvivalent';
   web_cena_bez_dph?: number;
   web_cena_s_dph?: number;
   mena?: string;
@@ -1428,6 +1430,11 @@ export interface OvereniCeny {
   overeno_at: string;
   prekracuje_strop?: boolean;
   zdroje?: WebPriceSource[];
+  realita?: {
+    nejlevnejsi_bez_dph: number | null;
+    rozdil_procent: number | null;
+    pod_trhem: boolean;
+  };
 }
 
 /** Spustí background job ověření cen (web search) — vrací jobId pro polling přes getJobStatus. */

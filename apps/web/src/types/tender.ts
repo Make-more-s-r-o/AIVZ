@@ -65,7 +65,7 @@ export interface PriceOverride {
 export interface PriceSanityFlag {
   polozka_index: number;
   level: 'hard' | 'warn';
-  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch' | 'extreme_outlier';
+  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch' | 'extreme_outlier' | 'ai_cena_pod_trhem';
   message: string;
 }
 
@@ -76,6 +76,7 @@ export interface PriceSanityFlag {
 export interface WebPriceSource {
   url: string;
   dodavatel: string | null;
+  nazev_produktu?: string;
   cena_bez_dph: number | null;
   cena_s_dph: number | null;
   dostupnost: string | null;
@@ -83,7 +84,8 @@ export interface WebPriceSource {
 }
 
 export interface OvereniCeny {
-  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
+  stav: 'nalezeno' | 'ekvivalent' | 'nenalezeno' | 'chyba';
+  shoda_typ?: 'presny' | 'ekvivalent';
   web_cena_bez_dph?: number;
   web_cena_s_dph?: number;
   mena?: string;
@@ -94,6 +96,11 @@ export interface OvereniCeny {
   overeno_at: string;
   prekracuje_strop?: boolean;
   zdroje?: WebPriceSource[];
+  realita?: {
+    nejlevnejsi_bez_dph: number | null;
+    rozdil_procent: number | null;
+    pod_trhem: boolean;
+  };
 }
 
 export interface PolozkaMatch {

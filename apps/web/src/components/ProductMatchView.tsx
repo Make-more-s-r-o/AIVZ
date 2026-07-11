@@ -260,7 +260,7 @@ interface OvereniCenyChipProps {
 }
 
 function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
-  if (overeni.stav === 'nalezeno') {
+  if (overeni.stav === 'nalezeno' || overeni.stav === 'ekvivalent') {
     const cenaSdph = overeni.web_cena_s_dph
       ?? (overeni.web_cena_bez_dph != null ? calculateItemPrice(overeni.web_cena_bez_dph, 0).nakupni_cena_s_dph : undefined);
     return (
@@ -272,6 +272,9 @@ function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
         <span className="font-medium text-gray-800">
           Web: {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH` : '—'}
         </span>
+        {overeni.shoda_typ === 'ekvivalent' && (
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">EKVIVALENT</span>
+        )}
         {overeni.dodavatel && <span className="text-gray-500">· {overeni.dodavatel}</span>}
         {overeni.dostupnost && <span className="text-gray-500">· {overeni.dostupnost}</span>}
         {overeni.prekracuje_strop && (
@@ -530,6 +533,12 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
 
   const allConfirmed = polozky.every((pm) => pm.cenova_uprava?.potvrzeno);
   const confirmedCount = polozky.filter((pm) => pm.cenova_uprava?.potvrzeno).length;
+  const belowMarketCount = polozky.filter((pm, index) => {
+    const market = pm.overeni_ceny?.realita?.nejlevnejsi_bez_dph;
+    if (pm.overeni_ceny?.realita?.pod_trhem !== true || market == null) return false;
+    const confirmation = buildConfirmData(pm, priceDrafts.get(index), defaultMarze);
+    return confirmation != null && confirmation.nabidkova_cena_bez_dph < market;
+  }).length;
 
   // Indexy nepotvrzených položek (pořadí = index v poli polozky, což používá i per-item confirm).
   const unconfirmedIndices = polozky
@@ -681,6 +690,13 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
         </div>
       )}
 
+      {belowMarketCount > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-red-300 bg-orange-50 px-3 py-2 text-sm font-semibold text-red-900">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+          <span>{belowMarketCount} {belowMarketCount === 1 ? 'položka má' : 'položek má'} odhad pod reálným trhem — před hromadným potvrzením zkontrolujte.</span>
+        </div>
+      )}
+
       {/* Hromadné potvrzení cen — zobraz jen dokud zbývá nepotvrzená položka. */}
       {!allConfirmed && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
@@ -799,7 +815,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                {pm.overeni_ceny?.stav === 'nalezeno' && pm.overeni_ceny.prekracuje_strop && (
+                {(pm.overeni_ceny?.stav === 'nalezeno' || pm.overeni_ceny?.stav === 'ekvivalent') && pm.overeni_ceny.prekracuje_strop && (
                   <span className="rounded bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
                     NAD STROP
                   </span>

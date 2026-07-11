@@ -139,6 +139,22 @@ export function checkPriceSanity(
       });
     }
 
+    const realMarketPrice = item.overeni_ceny?.realita?.nejlevnejsi_bez_dph;
+    if (
+      item.overeni_ceny?.realita?.pod_trhem === true
+      && typeof realMarketPrice === 'number'
+      && Number.isFinite(realMarketPrice)
+      && realMarketPrice > 0
+      && price.unitWithoutVat < realMarketPrice
+    ) {
+      addFinding({
+        polozka_index: item.polozka_index,
+        level: 'warn',
+        code: 'ai_cena_pod_trhem',
+        message: `Nabídková cena ${formatPrice(price.unitWithoutVat)} Kč je pod reálnou nákupní cenou ${formatPrice(realMarketPrice)} Kč (zdroj: ${item.overeni_ceny.dodavatel ?? 'neznámý dodavatel'}) — nabídka by byla ztrátová.`,
+      });
+    }
+
     const share = bidTotalWithVat > 0 ? price.lineTotalWithVat / bidTotalWithVat : 0;
     if (polozkyMatch.length > 3 && share > BID_SHARE_THRESHOLD) {
       addFinding({

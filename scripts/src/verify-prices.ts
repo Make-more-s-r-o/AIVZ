@@ -48,7 +48,7 @@ function findingsFromResults(
   results: ItemVerification[],
 ): WebFindingInput[] {
   return results.flatMap((result) => {
-    if (result.overeni_ceny.stav !== 'nalezeno') return [];
+    if (result.overeni_ceny.stav !== 'nalezeno' && result.overeni_ceny.stav !== 'ekvivalent') return [];
     const candidate = selectedCandidate(matchData, result.polozka_index);
     const produkt = candidate ? `${candidate.vyrobce} ${candidate.model}`.trim() : null;
     const sources = result.overeni_ceny.zdroje?.length

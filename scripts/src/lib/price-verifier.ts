@@ -13,6 +13,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { resolveModelId, getModelPricing } from './ai-client.js';
 import { logCost } from './cost-tracker.js';
+import { compareAiVsMarket } from './price-reality.js';
 import type {
   ProductMatch,
   ProductCandidate,
@@ -47,6 +48,10 @@ export interface VerifyInput {
   model: string;
   nazev?: string;
   specifikace?: string;
+  mnozstvi?: number;
+  jednotka?: string;
+  /** AI odhad jednotkové ceny bez DPH, pouze pro porovnání s reálným trhem. */
+  ai_cena_bez_dph?: number | null;
   // Cenový strop položky (s DPH) — pro výpočet prekracuje_strop
   cena_max_s_dph?: number | null;
 }
@@ -95,19 +100,24 @@ export interface VerifyAllResult {
 // ----------------------------------------------------------------------------
 // Prompt
 // ----------------------------------------------------------------------------
-const PRICE_VERIFY_SYSTEM = `Jsi asistent nákupčího ve veřejných zakázkách. Tvým úkolem je pomocí web search dohledat AKTUÁLNÍ tržní cenu konkrétního produktu v českých e-shopech.
+const PRICE_VERIFY_SYSTEM = `Jsi asistent nákupčího ve veřejných zakázkách. Tvým úkolem je pomocí web search dohledat AKTUÁLNÍ tržní cenu zboží v českých e-shopech.
 
 Pravidla:
 - Hledej výhradně v českých e-shopech (ceny v Kč, doména .cz).
-- Najdi konkrétní produkt podle výrobce a modelu. Pokud přesný model nenajdeš, vrať nalezeno=false (neodhaduj cenu jiného produktu).
+- Hledej ve dvou krocích:
+  KROK A: nejprve hledej přesný produkt podle výrobce a modelu. Nalezené zdroje označ shoda_typ="presny".
+  KROK B: pokud přesný model nenajdeš, hledej EKVIVALENTNÍ zboží splňující SPECIFIKACI položky ze zadání — zejména rozměry, materiál, zrnitost, počet kusů v balení a technické parametry. Nalezené zdroje označ shoda_typ="ekvivalent". Nevyžaduj shodu s modelem, který není podstatnou součástí specifikace.
+- U komoditního zboží (např. brusné plátno, řezný kotouč, stahovací pásky nebo těsnicí vlákno) hledej v Kroku B podle požadovaných parametrů, ne podle modelu, který mohl být pouze odhadem.
+- NIKDY nenabízej zboží jiného rozsahu/měřítka (např. sadu místo jednoho kusu, balení 100 ks místo 1 ks) — cena musí být za JEDNU JEDNOTKU dle položky (viz množství a jednotka). Pokud e-shop prodává jen balení, přepočti cenu na jednotku a napiš to do poznámky.
 - Najdi až 3 různé nákupní zdroje. Preferuj e-shopy, kde je produkt skladem a s jasně uvedenou cenou.
 - Uveď cenu bez DPH i s DPH, pokud to jde (české e-shopy běžně uvádějí obojí; sazba DPH je 21 %).
 - U každého zdroje vrať přímý odkaz na konkrétní produktovou stránku, ne odkaz na výsledky vyhledávání.
+- U každého zdroje vrať v nazev_produktu skutečný název produktu z produktové stránky.
 - Zdroje seřaď od nejlevnějšího podle ceny s DPH. Neopakuj stejnou URL.
 
 Odpověz VÝHRADNĚ jedním JSON objektem jako ÚPLNĚ POSLEDNÍ blok textu, bez jakéhokoli komentáře za ním, přesně v tomto tvaru:
-{"nalezeno": true|false, "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
-Když přesný produkt nenajdeš, vrať {"nalezeno": false, "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
+{"nalezeno": true|false, "shoda_typ": "presny"|"ekvivalent", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "poznamka": "krátká poznámka včetně případného přepočtu balení na jednotku"}], "poznamka": "volitelná souhrnná poznámka"}
+Když nenajdeš přesný ani specifikaci splňující ekvivalent, vrať {"nalezeno": false, "shoda_typ": "presny", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
 Ceny uváděj jako čistá čísla bez měny a mezer (např. 3509, ne "3 509 Kč").`;
 
 function buildUserMessage(input: VerifyInput): string {
@@ -121,6 +131,9 @@ function buildUserMessage(input: VerifyInput): string {
     const spec = input.specifikace.length > 300 ? input.specifikace.slice(0, 300) + '…' : input.specifikace;
     lines.push(`Specifikace: ${spec}`);
   }
+  lines.push(`Množství v zakázce: ${input.mnozstvi ?? 1}`);
+  lines.push(`Jednotka položky: ${input.jednotka?.trim() || 'ks'}`);
+  lines.push('Všechny vrácené ceny musí být přepočtené na jednu uvedenou jednotku.');
   return lines.join('\n');
 }
 
@@ -135,6 +148,7 @@ const RawWebPriceSourceSchema = z
     // Tolerujeme i starší pojmenování, pokud ho model navzdory promptu použije.
     zdroj_url: z.union([z.string(), z.null()]).optional(),
     dodavatel: z.union([z.string(), z.null()]).optional(),
+    nazev_produktu: z.union([z.string(), z.null()]).optional(),
     cena_bez_dph: z.union([z.number(), z.string(), z.null()]).optional(),
     cena_s_dph: z.union([z.number(), z.string(), z.null()]).optional(),
     dostupnost: z.union([z.string(), z.null()]).optional(),
@@ -145,11 +159,13 @@ const RawWebPriceSourceSchema = z
 const RawWebPriceSchema = z
   .object({
     nalezeno: z.union([z.boolean(), z.string()]).optional(),
+    shoda_typ: z.enum(['presny', 'ekvivalent']).optional(),
     cena_bez_dph: z.union([z.number(), z.string(), z.null()]).optional(),
     cena_s_dph: z.union([z.number(), z.string(), z.null()]).optional(),
     mena: z.union([z.string(), z.null()]).optional(),
     zdroj_url: z.union([z.string(), z.null()]).optional(),
     dodavatel: z.union([z.string(), z.null()]).optional(),
+    nazev_produktu: z.union([z.string(), z.null()]).optional(),
     dostupnost: z.union([z.string(), z.null()]).optional(),
     poznamka: z.union([z.string(), z.null()]).optional(),
     zdroje: z.array(RawWebPriceSourceSchema).optional(),
@@ -237,6 +253,7 @@ function normalizeSource(raw: RawWebPriceSource): WebPriceSource | null {
   return {
     url,
     dodavatel: cleanStr(raw.dodavatel) ?? null,
+    ...(cleanStr(raw.nazev_produktu) ? { nazev_produktu: cleanStr(raw.nazev_produktu)! } : {}),
     cena_bez_dph: cenaBezDph ?? null,
     cena_s_dph: cenaSdph ?? null,
     dostupnost: cleanStr(raw.dostupnost) ?? null,
@@ -256,24 +273,25 @@ function sourceGrossPrice(source: WebPriceSource): number {
  */
 export function parseWebPriceResponse(
   text: string,
-  input: Pick<VerifyInput, 'cena_max_s_dph'> = {},
+  input: Pick<VerifyInput, 'cena_max_s_dph' | 'ai_cena_bez_dph'> = {},
   overenoAt = new Date().toISOString(),
 ): OvereniCeny {
+  const emptyReality = compareAiVsMarket(input.ai_cena_bez_dph ?? null, []);
   const jsonStr = extractJsonObject(text);
   if (!jsonStr) {
-    return { stav: 'nenalezeno', poznamka: 'AI nevrátila strukturovanou odpověď', overeno_at: overenoAt };
+    return { stav: 'nenalezeno', poznamka: 'AI nevrátila strukturovanou odpověď', overeno_at: overenoAt, realita: emptyReality };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
   } catch {
-    return { stav: 'nenalezeno', poznamka: 'Odpověď AI nešla naparsovat jako JSON', overeno_at: overenoAt };
+    return { stav: 'nenalezeno', poznamka: 'Odpověď AI nešla naparsovat jako JSON', overeno_at: overenoAt, realita: emptyReality };
   }
 
   const valid = RawWebPriceSchema.safeParse(parsed);
   if (!valid.success) {
-    return { stav: 'nenalezeno', poznamka: 'Odpověď AI neodpovídá očekávanému tvaru', overeno_at: overenoAt };
+    return { stav: 'nenalezeno', poznamka: 'Odpověď AI neodpovídá očekávanému tvaru', overeno_at: overenoAt, realita: emptyReality };
   }
 
   const raw = valid.data;
@@ -283,6 +301,7 @@ export function parseWebPriceResponse(
     rawSources.push({
       url: raw.zdroj_url,
       dodavatel: raw.dodavatel,
+      nazev_produktu: raw.nazev_produktu,
       cena_bez_dph: raw.cena_bez_dph,
       cena_s_dph: raw.cena_s_dph,
       dostupnost: raw.dostupnost,
@@ -332,6 +351,7 @@ export function parseWebPriceResponse(
       poznamka: cleanStr(raw.poznamka) ?? 'Cena nenalezena',
       overeno_at: overenoAt,
       ...(zdroje.length > 0 ? { zdroje } : {}),
+      realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, zdroje),
     };
   }
 
@@ -342,9 +362,11 @@ export function parseWebPriceResponse(
   const prekracujeStrop = typeof strop === 'number' && strop > 0 && sdph !== undefined
     ? sdph > strop
     : undefined;
+  const shodaTyp = raw.shoda_typ ?? 'presny';
 
   return {
-    stav: 'nalezeno',
+    stav: shodaTyp === 'ekvivalent' ? 'ekvivalent' : 'nalezeno',
+    shoda_typ: shodaTyp,
     web_cena_bez_dph: bez,
     web_cena_s_dph: sdph,
     mena: cleanStr(raw.mena) ?? 'CZK',
@@ -355,6 +377,7 @@ export function parseWebPriceResponse(
     overeno_at: overenoAt,
     prekracuje_strop: prekracujeStrop,
     ...(zdroje.length > 0 ? { zdroje } : {}),
+    realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, zdroje),
   };
 }
 
@@ -473,7 +496,12 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
   } catch (err) {
     // Per-item chyba nesmí shodit celek
     return {
-      overeni: { stav: 'chyba', poznamka: `Chyba ověření: ${(err as Error).message}`, overeno_at: now() },
+      overeni: {
+        stav: 'chyba',
+        poznamka: `Chyba ověření: ${(err as Error).message}`,
+        overeno_at: now(),
+        realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, []),
+      },
       inputTokens: 0,
       outputTokens: 0,
       searches: 0,
@@ -541,6 +569,9 @@ function buildTargets(matchData: ProductMatch): Target[] {
           model: cand.model,
           nazev: item.polozka_nazev,
           specifikace: item.specifikace ?? cand.popis,
+          mnozstvi: item.mnozstvi,
+          jednotka: item.jednotka,
+          ai_cena_bez_dph: cand.cena_bez_dph,
           cena_max_s_dph: item.cena_max_s_dph ?? null,
         },
       });
@@ -557,6 +588,9 @@ function buildTargets(matchData: ProductMatch): Target[] {
           model: cand.model,
           nazev: `${cand.vyrobce} ${cand.model}`,
           specifikace: cand.popis,
+          mnozstvi: 1,
+          jednotka: 'ks',
+          ai_cena_bez_dph: cand.cena_bez_dph,
           cena_max_s_dph: null,
         },
       });
@@ -588,7 +622,7 @@ export function mergePriceVerifications(matchData: ProductMatch, results: ItemVe
 }
 
 function formatPrice(ov: OvereniCeny): string {
-  if (ov.stav !== 'nalezeno') return ov.stav + (ov.poznamka ? ` (${ov.poznamka})` : '');
+  if (ov.stav !== 'nalezeno' && ov.stav !== 'ekvivalent') return ov.stav + (ov.poznamka ? ` (${ov.poznamka})` : '');
   const cena = ov.web_cena_s_dph ?? ov.web_cena_bez_dph;
   const suffix = ov.web_cena_s_dph !== undefined ? ' s DPH' : ' bez DPH';
   const dod = ov.dodavatel ? ` — ${ov.dodavatel}` : '';
@@ -632,7 +666,7 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
 
   const summary = {
     total,
-    nalezeno: results.filter((r) => r.overeni_ceny.stav === 'nalezeno').length,
+    nalezeno: results.filter((r) => r.overeni_ceny.stav === 'nalezeno' || r.overeni_ceny.stav === 'ekvivalent').length,
     nenalezeno: results.filter((r) => r.overeni_ceny.stav === 'nenalezeno').length,
     chyba: results.filter((r) => r.overeni_ceny.stav === 'chyba').length,
     prekracuje_strop: results.filter((r) => r.overeni_ceny.prekracuje_strop === true).length,

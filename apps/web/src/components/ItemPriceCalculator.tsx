@@ -275,7 +275,13 @@ export default function ItemPriceCalculator({
                   key={`${source.url}-${index}`}
                   className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 text-[11px] text-emerald-950"
                 >
-                  <span className="font-medium">{source.dodavatel || 'Neznámý dodavatel'}</span>
+                  <span className="font-medium">{source.nazev_produktu || 'Název produktu neuveden'}</span>
+                  {overeniCeny.shoda_typ === 'ekvivalent' && (
+                    <span className="rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-800">
+                      ekvivalent
+                    </span>
+                  )}
+                  <span>· {source.dodavatel || 'Neznámý dodavatel'}</span>
                   <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH` : 'cena neuvedena'}</span>
                   {source.dostupnost && <span>· {source.dostupnost}</span>}
                   {safeUrl && (
@@ -424,6 +430,19 @@ export default function ItemPriceCalculator({
           style={{ border: '1px solid var(--danger-bg)', background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}
         >
           {saveError}
+        </div>
+      )}
+
+      {overeniCeny?.realita?.pod_trhem
+        && overeniCeny.realita.nejlevnejsi_bez_dph != null
+        && overeniCeny.realita.rozdil_procent != null && (
+        <div className="mb-3 flex items-start gap-2 rounded-md border border-red-300 bg-orange-50 px-3 py-2 text-xs font-semibold text-red-900">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+          <span>
+            Reálná nákupní cena je {overeniCeny.realita.nejlevnejsi_bez_dph.toLocaleString('cs-CZ')} Kč bez DPH
+            {' '}(o {overeniCeny.realita.rozdil_procent.toLocaleString('cs-CZ')} % víc než odhad) — potvrzením odhadu
+            byste prodávali pod nákupem. Použijte cenu ze zdroje.
+          </span>
         </div>
       )}
 

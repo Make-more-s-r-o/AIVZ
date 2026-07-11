@@ -25,13 +25,15 @@ test('ProductMatchSchema přijímá staré overeni_ceny bez pole zdroje', () => 
 
   assert.equal(parsed.success, true);
   if (parsed.success) assert.equal(parsed.data.overeni_ceny?.zdroje, undefined);
+  if (parsed.success) assert.equal(parsed.data.overeni_ceny?.realita, undefined);
 });
 
 test('ProductMatchSchema přijímá a zachová nové multi-source overeni_ceny', () => {
   const parsed = ProductMatchSchema.safeParse({
     ...base,
     overeni_ceny: {
-      stav: 'nalezeno',
+      stav: 'ekvivalent',
+      shoda_typ: 'ekvivalent',
       web_cena_bez_dph: 900,
       web_cena_s_dph: 1_089,
       mena: 'CZK',
@@ -41,6 +43,7 @@ test('ProductMatchSchema přijímá a zachová nové multi-source overeni_ceny',
         {
           url: 'https://shop-a.cz/model',
           dodavatel: 'Shop A',
+          nazev_produktu: 'Skutečně nalezený produkt A',
           cena_bez_dph: 900,
           cena_s_dph: 1_089,
           dostupnost: 'skladem',
@@ -55,9 +58,19 @@ test('ProductMatchSchema přijímá a zachová nové multi-source overeni_ceny',
           poznamka: null,
         },
       ],
+      realita: {
+        nejlevnejsi_bez_dph: 900,
+        rozdil_procent: 12.5,
+        pod_trhem: true,
+      },
     },
   });
 
   assert.equal(parsed.success, true);
-  if (parsed.success) assert.equal(parsed.data.overeni_ceny?.zdroje?.length, 2);
+  if (parsed.success) {
+    assert.equal(parsed.data.overeni_ceny?.zdroje?.length, 2);
+    assert.equal(parsed.data.overeni_ceny?.stav, 'ekvivalent');
+    assert.equal(parsed.data.overeni_ceny?.zdroje?.[0]?.nazev_produktu, 'Skutečně nalezený produkt A');
+    assert.equal(parsed.data.overeni_ceny?.realita?.pod_trhem, true);
+  }
 });

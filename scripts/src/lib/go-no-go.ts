@@ -249,6 +249,8 @@ export const BID_MARGIN_WEIGHT = 30;
 export const BID_ABS_PROFIT_WEIGHT = 20;
 export const BID_MATCH_QUALITY_WEIGHT = 25;
 export const BID_WIN_PRICE_WEIGHT = 25;
+// WARN za prodej pod ověřenou nákupní cenou skóre viditelně sníží, ale sám nevynutí NOGO.
+export const BID_BELOW_MARKET_PENALTY = 15;
 
 // Cílový absolutní hrubý zisk, při kterém je faktor plně nasycen (value = 1).
 export const BID_TARGET_PROFIT_CZK = 50_000;
@@ -266,6 +268,7 @@ export interface BidEconomics {
   polozek: number;
   slabych_polozek: number;  // bez reálné shody / nízká spolehlivost / bez ceny
   hard_flagu: number;
+  ztratovych_polozek: number;
 }
 
 export interface BidScoreResult {
@@ -278,6 +281,7 @@ export interface BidScoreResult {
 
 // Minimální strukturální tvar položky — sjednocuje multi-product i legacy single-product.
 interface BidLineItem {
+  polozka_index?: number;
   mnozstvi?: number | null;
   vybrany_index?: number;
   kandidati?: Array<{
@@ -293,7 +297,7 @@ interface BidLineItem {
     nabidkova_cena_bez_dph?: number;
     potvrzeno?: boolean;
   };
-  sanity_flags?: Array<{ level?: string }>;
+  sanity_flags?: Array<{ level?: string; code?: string }>;
 }
 
 function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
@@ -324,11 +328,13 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
   let vazenyZisk = 0;
   let slabych = 0;
   let hardFlagu = 0;
+  let ztratovychPolozek = 0;
 
   for (const item of items) {
     const mnozstvi = isPositiveNumber(item.mnozstvi) ? item.mnozstvi : 1;
     const candidate = item.kandidati?.[item.vybrany_index ?? -1];
     hardFlagu += item.sanity_flags?.filter((f) => f?.level === 'hard').length ?? 0;
+    if (item.sanity_flags?.some((f) => f?.code === 'ai_cena_pod_trhem')) ztratovychPolozek++;
 
     const uprava = item.cenova_uprava;
     const nabidkova = isPositiveNumber(uprava?.nabidkova_cena_bez_dph)
@@ -366,6 +372,7 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
     polozek: items.length,
     slabych_polozek: slabych,
     hard_flagu: hardFlagu,
+    ztratovych_polozek: ztratovychPolozek,
   };
 }
 
@@ -432,6 +439,11 @@ export function scoreBid(
   let score = clamp(Math.round((weightedScore / totalWeight) * 100), 0, 100);
 
   const duvody = factors.map((factor) => factor.reason);
+
+  if (econ.ztratovych_polozek > 0) {
+    score = Math.max(0, score - BID_BELOW_MARKET_PENALTY);
+    duvody.unshift(`${econ.ztratovych_polozek} položek by se prodávalo pod reálnou nákupní cenou.`);
+  }
 
   // (d) HARD sanity flag = automatická srážka a NOGO strop — cena není důvěryhodná.
   if (econ.hard_flagu > 0) {

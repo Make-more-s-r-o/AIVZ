@@ -1,0 +1,29 @@
+Nalezen přesný parametrický ekvivalent komoditního zboží.
+
+```json
+{
+  "nalezeno": true,
+  "shoda_typ": "ekvivalent",
+  "mena": "CZK",
+  "zdroje": [
+    {
+      "url": "https://naradi.cz/brusne-platno-p120",
+      "dodavatel": "Nářadí CZ",
+      "nazev_produktu": "Brusné plátno arch 230 × 280 mm P120",
+      "cena_bez_dph": null,
+      "cena_s_dph": 36.30,
+      "dostupnost": "skladem",
+      "poznamka": "Cena balení 10 ks byla přepočtena na 1 arch"
+    },
+    {
+      "url": "https://brusivo.cz/platno-230-280-p120",
+      "dodavatel": "Brusivo CZ",
+      "nazev_produktu": "Brusné plátno 230x280 zrnitost 120",
+      "cena_bez_dph": 32,
+      "cena_s_dph": 38.72,
+      "dostupnost": "skladem",
+      "poznamka": null
+    }
+  ]
+}
+```

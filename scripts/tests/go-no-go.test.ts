@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-import { scoreGoNoGo, scoreBid } from '../src/lib/go-no-go.js';
+import { BID_BELOW_MARKET_PENALTY, scoreGoNoGo, scoreBid } from '../src/lib/go-no-go.js';
 import { TenderAnalysisSchema, type ProductMatch, type TenderAnalysis } from '../src/lib/types.js';
 import type { PriceBand } from '../src/lib/winprice-query.js';
 
@@ -125,6 +125,7 @@ function pricedItem(overrides: {
   potvrzeno?: boolean;
   spolehlivost?: 'vysoka' | 'stredni' | 'nizka';
   hardFlag?: boolean;
+  belowMarketFlag?: boolean;
 } = {}) {
   const nakupni = overrides.nakupni ?? 100_000;
   const nabidkova = overrides.nabidkova ?? 130_000;
@@ -155,9 +156,14 @@ function pricedItem(overrides: {
       nabidkova_cena_s_dph: nabidkova * 1.21,
       potvrzeno: overrides.potvrzeno ?? true,
     },
-    sanity_flags: overrides.hardFlag
-      ? [{ polozka_index: overrides.index ?? 0, level: 'hard' as const, code: 'zero_price' as const, message: 'Nulová cena' }]
-      : [],
+    sanity_flags: [
+      ...(overrides.hardFlag
+        ? [{ polozka_index: overrides.index ?? 0, level: 'hard' as const, code: 'zero_price' as const, message: 'Nulová cena' }]
+        : []),
+      ...(overrides.belowMarketFlag
+        ? [{ polozka_index: overrides.index ?? 0, level: 'warn' as const, code: 'ai_cena_pod_trhem' as const, message: 'Pod trhem' }]
+        : []),
+    ],
   };
 }
 
@@ -213,6 +219,25 @@ test('scoreBid: HARD sanity flag → NOGO strop i při dobré ekonomice', () => 
   assert.equal(result.doporuceni, 'NOGO');
   assert.ok(result.score < 45, `score ${result.score}`);
   assert.ok(result.duvody.some((d) => /HARD/.test(d)), result.duvody.join(' | '));
+});
+
+test('scoreBid: ai_cena_pod_trhem odečte body a přidá důvod s počtem položek', () => {
+  const safe = bidMatch([
+    pricedItem({ index: 0 }),
+    pricedItem({ index: 1 }),
+    pricedItem({ index: 2 }),
+  ]);
+  const risky = bidMatch([
+    pricedItem({ index: 0, belowMarketFlag: true }),
+    pricedItem({ index: 1, belowMarketFlag: true }),
+    pricedItem({ index: 2 }),
+  ]);
+
+  const safeResult = scoreBid(analysis(), safe, { default_marze_procent: 10 }, undefined);
+  const riskyResult = scoreBid(analysis(), risky, { default_marze_procent: 10 }, undefined);
+  assert.equal(riskyResult.score, safeResult.score - BID_BELOW_MARKET_PENALTY);
+  assert.ok(riskyResult.duvody.some((reason) => /2 položek by se prodávalo pod reálnou nákupní cenou/.test(reason)));
+  assert.equal(riskyResult.doporuceni === 'NOGO' && riskyResult.score >= 45, false, 'WARN sám nesmí vynutit NOGO');
 });
 
 test('scoreBid: naše cena nad P75 → srážka za win-price', () => {
