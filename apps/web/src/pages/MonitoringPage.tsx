@@ -68,7 +68,14 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     try {
       const created = await uploadFiles(files);
       await qc.invalidateQueries({ queryKey: ['tenders'] });
-      toast(`Nahráno ${files.length} soubor(ů) — zakázka připravena ke zpracování`, 'success');
+      // ZIP archivy: doplň info kolik souborů obsahují (náhled bez rozbalení, viz peekZipFileCount).
+      const zipInfo = (created.zipFiles ?? [])
+        .map((z) => z.fileCount != null ? `${z.filename} (${z.fileCount} souborů)` : `${z.filename} (nelze přečíst)`)
+        .join(', ');
+      const message = zipInfo
+        ? `Nahráno ${files.length} soubor(ů) — ZIP: ${zipInfo} — zakázka připravena ke zpracování`
+        : `Nahráno ${files.length} soubor(ů) — zakázka připravena ke zpracování`;
+      toast(message, 'success');
       if (created?.id && onOpen) onOpen(created.id);
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Nahrání selhalo', 'danger');

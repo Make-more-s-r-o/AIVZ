@@ -39,6 +39,8 @@ import {
 import { computeSubmitGate } from './lib/submit-gate.js';
 import { checkPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
+import { peekZipFileCount } from './lib/input-discovery.js';
+import { isStale } from './lib/stale-check.js';
 import {
   getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy, getDueReminders, markReminded,
 } from './lib/terminy-store.js';
@@ -538,10 +540,12 @@ const upload = multer({
   }),
   fileFilter: (_req, file, cb) => {
     const ext = extname(file.originalname).toLowerCase();
-    if (['.pdf', '.docx', '.doc', '.xls', '.xlsx'].includes(ext)) {
+    // .zip povolen — extract krok (discoverInputFiles, viz lib/input-discovery.ts) ho už
+    // bezpečně rozbaluje (zip-slip ochrana, cap na velikost), stačí ho pustit do input/<id>/.
+    if (['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.zip'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF, DOCX, DOC, XLS, and XLSX files are allowed'));
+      cb(new Error('Only PDF, DOCX, DOC, XLS, XLSX, and ZIP files are allowed'));
     }
   },
 });
@@ -599,7 +603,28 @@ async function getPipelineStatus(tenderId: string) {
     error: latestRunAll.error,
   } : undefined;
 
-  return { tenderId, steps, runAll };
+  // Zastaralost vygenerovaných dokumentů vůči poslední změně cen (viz lib/stale-check.ts).
+  // Porovnává se s NEJSTARŠÍM generovaným souborem dávky (MIN mtime) — i jediný zastaralý
+  // dokument má banner vyvolat. Jen když je generate hotové, jinak není co porovnávat.
+  let stale = false;
+  if (steps.generate === 'done') {
+    try {
+      const files = await readdir(outputDir);
+      const docFiles = files.filter((f) => f.endsWith('.docx') || f.endsWith('.xlsx') || f.endsWith('.pdf'));
+      let oldestDocMs: number | null = null;
+      for (const f of docFiles) {
+        const st = await stat(join(outputDir, f));
+        if (oldestDocMs === null || st.mtimeMs < oldestDocMs) oldestDocMs = st.mtimeMs;
+      }
+      const matchRaw = await readFile(join(outputDir, 'product-match.json'), 'utf-8');
+      const productMatch = JSON.parse(matchRaw);
+      stale = isStale(oldestDocMs, productMatch?.prices_updated_at ?? null);
+    } catch {
+      // Chybějící/poškozený product-match.json nebo výstupní soubor → žádná falešná pozitiva.
+    }
+  }
+
+  return { tenderId, steps, runAll, stale };
 }
 
 // CRM (M2): převod pipeline steps → boolean flags + výpočet efektivní fáze (persistovaná ?? odvozená).
@@ -1082,6 +1107,24 @@ app.get('/api/inbox', async (req, res) => {
   }
 });
 
+// Lehký náhled nahraných ZIPů BEZ rozbalení na disk (peekZipFileCount) — pro okamžitou
+// UI odezvu "archiv obsahuje N souborů" hned po uploadu, ať uživatel nečeká na extract krok.
+// Vrací undefined (→ klíč se do JSON odpovědi vůbec nedostane), když žádný ZIP nahrán nebyl.
+async function buildZipInfo(
+  files: Express.Multer.File[]
+): Promise<Array<{ filename: string; fileCount: number | null }> | undefined> {
+  const zipFiles = files.filter((f) => extname(f.originalname).toLowerCase() === '.zip');
+  if (zipFiles.length === 0) return undefined;
+  return Promise.all(zipFiles.map(async (f) => {
+    try {
+      const buf = await readFile(f.path);
+      return { filename: f.filename, fileCount: peekZipFileCount(buf) };
+    } catch {
+      return { filename: f.filename, fileCount: null };
+    }
+  }));
+}
+
 // POST /api/tenders/upload - upload new tender documents
 app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async (req, res) => {
   try {
@@ -1095,6 +1138,7 @@ app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async
     res.json({
       id: tenderId,
       uploadedFiles: files.map((f) => f.filename),
+      zipFiles: await buildZipInfo(files),
       ...status,
     });
   } catch (err) {
@@ -1113,6 +1157,7 @@ app.post('/api/tenders/:id/upload', upload.array('files', 20), async (req, res) 
     res.json({
       id: req.params.id,
       uploadedFiles: files.map((f) => f.filename),
+      zipFiles: await buildZipInfo(files),
       ...status,
     });
   } catch (err) {
@@ -1138,7 +1183,7 @@ app.post('/api/tenders/upload-url', async (req, res) => {
       return res.status(400).json({ error: 'Invalid tenderId' });
     }
 
-    const allowedExts = ['.pdf', '.docx', '.doc', '.xls', '.xlsx'];
+    const allowedExts = ['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.zip'];
     const tenderId = customId || `tender-${Date.now()}`;
     const dir = join(INPUT_DIR, tenderId);
     await mkdir(dir, { recursive: true });
@@ -1189,6 +1234,7 @@ app.post('/api/tenders/upload-url', async (req, res) => {
           if (ct.includes('pdf')) filename += '.pdf';
           else if (ct.includes('word') || ct.includes('docx')) filename += '.docx';
           else if (ct.includes('spreadsheet') || ct.includes('xlsx')) filename += '.xlsx';
+          else if (ct.includes('zip')) filename += '.zip';
           else {
             errors.push(`${url}: unsupported file type (${ext || ct})`);
             continue;
@@ -1617,6 +1663,9 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
 
     // Merge into product-match.json
     productMatch.cenova_uprava = parsed;
+    // Zastaralost dokumentů (viz lib/stale-check.ts + GET /api/tenders/:id/status): timestamp
+    // poslední změny ceny, aby šlo poznat, že vygenerované dokumenty už neodpovídají.
+    productMatch.prices_updated_at = new Date().toISOString();
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
     res.json({ success: true, cenova_uprava: parsed });
@@ -1715,6 +1764,7 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
       }
       warnings = confirmedFindings.filter((finding) => finding.level === 'warn');
     }
+    productMatch.prices_updated_at = new Date().toISOString();
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
     res.json({ success: true, updated: validated.length, warnings });
@@ -1756,6 +1806,7 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
       }
       warnings = itemFindings.filter((finding) => finding.level === 'warn');
     }
+    productMatch.prices_updated_at = new Date().toISOString();
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
     res.json({ success: true, itemIndex: idx, cenova_uprava: parsed, warnings });
@@ -1821,6 +1872,9 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
       priceCleared = true;
     }
     target.vybrany_index = candIdx;
+    // Zastaralost dokumentů (viz lib/stale-check.ts): jiný kandidát = jiný produkt/cena,
+    // i když se cena zrovna zrušila (priceCleared) — vygenerované dokumenty už neplatí.
+    productMatch.prices_updated_at = new Date().toISOString();
 
     const tmpPath = `${matchPath}.tmp`;
     await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');

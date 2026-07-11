@@ -275,7 +275,19 @@ export async function getTendersSummary(): Promise<TenderSummary[]> {
   return fetchJson('/tenders?include=analysis,cost');
 }
 
-export async function uploadFiles(files: File[], tenderId?: string): Promise<TenderSummary> {
+/** Náhled obsahu nahraného ZIPu (bez rozbalení) — kolik souborů archiv obsahuje. */
+export interface UploadZipInfo {
+  filename: string;
+  fileCount: number | null;
+}
+
+export interface UploadResponse extends TenderSummary {
+  uploadedFiles: string[];
+  /** Přítomné jen pokud byl mezi nahranými soubory ZIP. */
+  zipFiles?: UploadZipInfo[];
+}
+
+export async function uploadFiles(files: File[], tenderId?: string): Promise<UploadResponse> {
   const formData = new FormData();
   files.forEach((f) => formData.append('files', f));
 
@@ -303,6 +315,9 @@ export interface TenderStatusResponse {
   assignee?: string | null;
   effectiveStatus?: StageKey;
   allowedNext?: StageKey[];
+  // Vygenerované dokumenty jsou starší než poslední změna/potvrzení ceny — je třeba
+  // spustit krok Generování znovu (viz lib/stale-check.ts na backendu).
+  stale?: boolean;
 }
 
 export async function getTenderStatus(id: string): Promise<TenderStatusResponse> {
