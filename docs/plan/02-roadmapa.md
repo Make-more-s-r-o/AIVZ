@@ -1,13 +1,16 @@
 # Roadmapa: od dneška k autonomní mašině na peníze
 
+> **Verze 2 (po adversariální oponentuře Codexu, 2026-07-12).**
 > Dokument plánu, 2026-07-11. Navazuje na `docs/audit-goal-2026-07-10.md` (6 dimenzí, baseline ~30 %),
 > `docs/report-2026-07-11-den.md` (aktuální ~55 %), `docs/roadmap-autonomie.md` (pilíře) a
 > `docs/product-brief-vz.md` (trh, právní rámec). Stav Fáze 0 je ověřen přímo v kódu na `main`
 > (`scripts/src/`, `scripts/migrations/001–017`), ne opsán z reportů.
 >
 > **Cíl (Dan):** autonomní stroj na peníze — monitoring nových VZ → go/no-go → nacenění s marží
-> a win-price → podatelné dokumenty → podání → feedback výher. Člověk jen schvaluje go/no-go
-> a nákupy. Priorita = ZISK + FUNKČNOST; manuál je OK, autonomie se přidává postupně.
+> a win-price → podatelné dokumenty → podání → feedback výher. Člověk drží tři checkpointy:
+> go/no-go, **individuální potvrzení každé položky nabídky (tvrdý invariant — human review
+> 100 %, bez cenových prahů; nasazeno PR #63)** a nákupy. Priorita = ZISK + FUNKČNOST;
+> manuál je OK, autonomie se přidává postupně.
 
 ---
 
@@ -23,6 +26,13 @@
   „vyhraná" zakázka kandidát na ztrátu. Verify hit-rate je proto podmínka ziskovosti, ne nice-to-have.
 - Druhý poznatek: **k dalšímu posunu skóre vede hlavně PROVOZ, ne kód** (shodně audit i Codex
   oponentura). Fáze 1 je z větší části provozní disciplína, ne vývoj.
+- **Tvrdý invariant majitele (nadřazen všem fázím):** každá položka nabídky projde
+  individuálním lidským potvrzením — per-item attestace se serverovou auditní stopou,
+  změna produktu/ceny potvrzení ruší (nasazeno PR #63). Žádná fáze nesmí zavést cenový
+  práh ani bulk cestu, která to obchází. Kapacitní čísla fází = kapacita stroje; tempo
+  podání určuje lidská kontrola.
+- **Mimo rozsah plánu:** cenový sklad (warehouse matching) zůstává vypnutý
+  (`WAREHOUSE_MATCH_ENABLED`) — vědomé vynechání dle priority majitele, ne opomenutí.
 
 ---
 
@@ -41,6 +51,9 @@ Rozpad dimenzí (report 2026-07-11): průchodnost 68, kvalita 68, UX 60, provoz 
   (halucinace 280 000 Kč za adaptér byla zablokována; po root-cause fixech správná cena 280 Kč).
 - **Marže**: company default (10 % fallback) jednotně ve všech cestách (panel, bulk, web-cena);
   nepotvrzená nula se přepisuje, potvrzená nula operátora se respektuje.
+- **Per-item attestace potvrzení cen (PR #63):** každé potvrzení nese serverovou auditní
+  stopu (kdo/kdy), bulk potvrzuje POUZE explicitně attestované položky, slepé „Potvrdit vše"
+  odstraněno, změna produktu/ceny potvrzení automaticky ruší.
 - **Win-price pásma**: migrace 011/013, ~10 000 záznamů z Registru smluv, 11 kategorií,
   hygiena dat (dopočet bez DPH, vadné datumy), pásma v UI Ocenění + faktor v go/no-go.
 - **Web-verify cen** (`price-verifier.ts`, Anthropic web_search): reálné nákupní zdroje, až 3
@@ -94,15 +107,24 @@ Rozpad dimenzí (report 2026-07-11): průchodnost 68, kvalita 68, UX 60, provoz 
 
 ---
 
-## Fáze 1 — „První vyhraná koruna"
+## Fáze 1 — „První bezvadně podaná nabídka"
 
-**Cíl:** jedna reálně podaná (a ideálně vyhraná) nabídka přes celý flow, s výsledkem zapsaným
-do systému — důkaz, že mašina umí vydělat první korunu.
+**Cíl:** bezvadně podaná nabídka přes celý flow — důkaz PROCESU. Výhra a peníze jsou
+samostatné milníky s vlastní latencí, ne podmínka postupu:
 
-**Vstupní podmínka:** stav Fáze 0 (splněno dnes) + Dan vybere 2–3 pilotní živé zakázky
-z monitoring feedu (go/no-go skóre je vodítko, rozhodnutí lidské).
+- **M1 — bezvadné podání:** ≥ 2 nabídky `odeslana`, 0 formálních vad
+  (= výstupní kritérium fáze, jediné, které blokuje Fázi 2);
+- **M2 — první výhra:** oznámení o výběru + podepsaná smlouva (přijde s latencí týdnů);
+- **M3 — kladná contribution margin:** výhra je v plusu i po odečtení nákupu, dopravy
+  a financování (ne jen katalogové marže);
+- **M4 — první inkaso:** peníze na účtu.
 
-**Výstupní kritérium (měřitelné):**
+**Vstupní podmínka:** stav Fáze 0 (splněno dnes) + **A-00 připravenost entity a dodávky
+schválená Danem (entita, kvalifikace, NEN registrace, sourcing, logistika, strop kapitálové
+expozice, min. contribution margin — viz 03)** + Dan vybere pilotní zakázku (nejprve 1,
+po retrospektivě +2; go/no-go skóre je vodítko, rozhodnutí lidské).
+
+**Výstupní kritérium (měřitelné, = M1):**
 - ≥ 2 nabídky ve stavu `odeslana` s vyplněnou evidencí podání (portál, čas, ev. číslo) a
   immutable balíkem v cockpitu;
 - 0 diskvalifikací pro formální vadu (neúplnost, chybějící doklad, špatný formát);
@@ -118,9 +140,10 @@ business skóre — žádný kód nenahradí první reálné podání.
 
 | # | Balík | Velikost | Poznámka |
 |---|---|---|---|
-| 1.1 | **Výběr pilotů**: 2–3 živé zakázky z feedu — malé, komoditní, s dostupným sortimentem (mainstream značky kvůli verify hit-rate), lhůta ≥ 10 dní | S (provoz) | Rozhoduje Dan (go/no-go). Vybírat zakázky, kde verify NAJDE ceny — první pilot nemá testovat long-tail. |
+| 1.0 | **Připravenost entity a dodávky (A-00)**: entita, kvalifikace + registrace dodavatele NEN, sourcing, logistika, DPH, pojištění, strop kapitálové expozice, min. contribution margin | S–M (rozhodnutí + checklist) | **Blokuje 1.1 i jakékoli podání.** Rozhoduje Dan. |
+| 1.1 | **Výběr pilotů**: nejprve 1 živá zakázka z feedu (po retrospektivě +2) — malá, komoditní, s dostupným sortimentem (mainstream značky kvůli verify hit-rate), lhůta ≥ 10 dní, **v rámci stropu expozice a dle reálné schopnosti dodat** | S (provoz) | Rozhoduje Dan (go/no-go). Vybírat zakázky, kde verify NAJDE ceny — první pilot nemá testovat long-tail. |
 | 1.2 | **100% cenová jistota pilotu**: web-verify na každou položku; kde verify nenajde, ruční dohledání nákupní ceny (e-shop, poptávka dodavateli); vše potvrzeno přes gate | M (provoz + drobný kód) | Přímý důsledek nálezu „AI odhady −42 % pod trhem". Bez toho hrozí výhra se ztrátou. |
-| 1.3 | **Checklist úplnosti balíku vs. ZD**: deterministický seznam požadovaných dokumentů/příloh z analýzy ZD (kvalifikace, ČP, smlouva, soupis…) odškrtávaný v cockpitu; doklady s platností už hlídané | M | Největší riziko pilotu = formální vada, ne cena. Dnes kontroluje jen člověk bez opory. |
+| 1.3 | **Checklist úplnosti balíku vs. ZD**: deterministický seznam požadovaných dokumentů/příloh z analýzy ZD (kvalifikace, ČP, smlouva, soupis…) odškrtávaný v cockpitu; **povinné položky = hard gate na finalize s auditovanou per-item výjimkou** (viz 03 A-01); doklady s platností už hlídané | M | Největší riziko pilotu = formální vada, ne cena. Advisory režim z v1 zrušen po oponentuře — slib „0 diskvalifikací" s měkkým varováním nešel dohromady. |
 | 1.4 | **Runbook ručního podání NEN/profil**: krok za krokem (přihlášení, formát příloh, limity velikosti, potvrzení), evidence podání do cockpitu hned po odeslání | S (dokument) | §211/7 fikce podpisu — právně čisté. Runbook je základ pozdější automatizace (Fáze 5). |
 | 1.5 | **Lidské QA vygenerovaných dokumentů**: přečíst DOCX/PDF očima zadavatele, porovnat se spec-compliance reportem, zaznamenat každou ručně opravenou vadu jako issue | S (provoz) | Seznam ručních oprav = backlog kvality pro Fázi 2. |
 | 1.6 | **Zápis výsledků + retrospektiva**: outcome do tabu Výsledek; u prohry delta vs. vítěz; 1stránková retrospektiva per pilot (co drhlo, kolik minut kde) | S (provoz) | Naplní poprvé win-rate loop reálnými daty. Měření času = baseline pro Fázi 2. |
@@ -132,11 +155,16 @@ business skóre — žádný kód nenahradí první reálné podání.
 - **Cena mimo pásmo**: příliš vysoká = prohra, příliš nízká = ztrátová výhra; mitigace 1.2 +
   win-price pásmo + HARD gate pod nákupem.
 - **Malý vzorek**: 2–3 nabídky nic nedokazují statisticky — fáze dokazuje PROCES, ne win-rate.
-- **Výsledek se dozvíme pozdě** (týdny) — fáze se považuje za splněnou podáním + zápisem,
-  na výhru se nečeká se startem Fáze 2.
+- **Výsledek se dozvíme pozdě** (týdny) — fáze je splněná milníkem M1 (podání + zápis);
+  M2–M4 se sledují průběžně a start Fáze 2 neblokují.
 
 **Hraje na dimenze:** business (nejvíc — z 46 výš je bez podání nemožné), kvalita (checklist,
 QA), autonomie nepřímo (data pro kalibraci).
+
+**Souběžná stopa fáze 1 (primární business):** placené concierge validace — 2–3 externí
+komoditní dodavatelé, my obsluhujeme nástroj, oni schvalují go/no-go a každou položku,
+platí per nabídka. Měří se čas, opravy, zaplacená cena, opakovaná ochota platit (01 §5.1).
+Shánění partnerů a vlastní pilot se navzájem neblokují.
 
 ---
 
@@ -162,7 +190,7 @@ z retrospektiv 1.5/1.6 jako backlog.
 | 2.1 | **Kvalita matchingu**: povinné pole výrobce+model/katalogové číslo u kandidáta, penalizace generických kandidátů, měření match precision na zlatém setu z pilotů | M | Verify je jen tak dobrý, jak dobrá jsou katalogová čísla kandidátů (živý test: 0/4 u vágních kandidátů). |
 | 2.2 | **Verify fallback řetěz**: katalogové číslo → výrobce+model → generický ekvivalent s vyznačením úrovně jistoty; řízené čtení `warehouse_web_findings` jako cache (bez kontaminace matchingu) | M–L | Hlavní páka na hit-rate ≥ 70 %. |
 | 2.3 | **Auto-run-all po převzetí z monitoringu**: převzetí zakázky rovnou spustí řetěz až po `waiting_approval` checkpoint | S | Checkpoint mechanismus už existuje a je fail-closed — nízké riziko, velká úspora klikání. |
-| 2.4 | **Inbox jako pracovní plocha**: bulk akce přímo z inboxu (potvrdit ceny, spustit generate, finalize) bez otevírání detailu; řazení dle lhůty × skóre | M | Podmínka 5–10/den — dnes vše žije v detailu jedné zakázky. |
+| 2.4 | **Inbox jako pracovní plocha**: potvrzení cen s per-item attestací **HOTOVO (PR #63)** — auditní stopa kdo/kdy, žádné slepé „Potvrdit vše", změna ceny/produktu potvrzení ruší; zbývá spustit generate/finalize z inboxu + řazení dle lhůty × skóre (03 C-01b) | S–M (zbytek) | Žádné budoucí bulk UX nesmí obejít per-item attestaci (invariant). |
 | 2.5 | **Ruční revize vah go/no-go**: porovnat skóre pilotů s realitou (stálo to za práci?), upravit váhy ručně; zalogovat feature vektor skóre při podání (příprava na Fázi 3) | S | Ještě ne auto-kalibrace — na to není vzorek. Logování featurů ale začít HNED. |
 | 2.6 | **Cost + throughput observabilita**: agregace cost-trackeru (den/měsíc/zakázka), denní strop s degradací, latence per pipeline krok | S–M | Při 5–10/den už AI spend a hrdla potřebují číslo, ne pocit. |
 | 2.7 | **Šablonová robustnost**: měřit miss-rate fill enginu na nových zakázkách, review UI pro nevyplněné sloty | M | Historicky 30–40 % miss-rate šablon; každý miss = ruční práce proti limitu 45 min. |
@@ -190,8 +218,10 @@ feature vektory skóre logované od 2.5.
 - outcome watcher automaticky dohledá výsledek ≥ 80 % podaných zakázek bez ručního zásahu;
 - go/no-go skóre má změřenou přesnost na reálných datech (bucket analýza: podíl výher
   ve skóre pásmech) a váhy jsou aspoň jednou přepočteny z dat;
-- u každé zakázky je doporučená cena s odhadem P(win) z historického pásma a operátor vidí
-  trade-off marže × pravděpodobnost výhry;
+- operátor vidí historickou cenovou pozici (percentil win-price pásma) s intervalem
+  nejistoty a velikostí vzorku; **P(win) se zobrazuje až po backtestu na historických
+  outcomes a při minimálním počtu výsledků v daném segmentu** (viz 3.3) — do té doby
+  žádná pravděpodobnost v UI;
 - u každé prohry automatický rozpad delta vs. vítěz.
 
 ### Balíky práce
@@ -200,7 +230,7 @@ feature vektory skóre logované od 2.5.
 |---|---|---|---|
 | 3.1 | **Outcome watcher**: periodické dohledání výsledků (VVZ/ISVZ award notice, Registr smluv, NEN detail) párováním přes evidenční číslo + IČO; auto-zápis do `crm_vysledky` | M | Výsledky chodí se zpožděním týdny — proto začít sbírat CO NEJDŘÍV (viz pořadí na konci). |
 | 3.2 | **Kalibrační smyčka skóre**: párování feature vektorů (z 2.5) s outcomes, přepočet vah go/no-go, report „skóre vs. realita" | M | Na 20 nabídkách jen konzervativně (směr vah, ne přesná čísla). |
-| 3.3 | **Price-to-win model**: pozice naší ceny ve win-price pásmu → P(win); panel marže × P(win) v Ocenění; doporučená cena jako návrh (NIKDY auto-přepis) | L | Jádro konkurenční výhody (product brief §d). Vyžaduje hustá pásma → 3.4. |
+| 3.3 | **Price-to-win model (dvoustupňově)**: krok 1 = historická pozice ceny v pásmu + interval nejistoty + n (bez pravděpodobností); krok 2 = P(win) **až po backtestu a minimálním počtu výsledků v konkrétním segmentu** (kategorie × velikost); doporučená cena vždy jen návrh (NIKDY auto-přepis, potvrzení přes per-item gate) | L | Jádro konkurenční výhody (product brief §d). Vyžaduje hustá pásma → 3.4; malý vzorek = falešná přesnost. |
 | 3.4 | **Win-price obohacení**: PDF backfill položkových cen ze smluv Registru, počet uchazečů z VVZ, průběžný import nových smluv | L | Dnes 10k záznamů, ~6,4k s cenou; položkové ceny z PDF = skokové zlepšení pásem. |
 | 3.5 | **Ztrátová analýza**: u prohry automatický per-položkový rozdíl vs. vítězná cena (kde je dostupná), agregovaný report „proč prohráváme" | S | Levné, vysoká informační hodnota pro Dana. |
 
@@ -218,13 +248,19 @@ předpoklad auto-triáže ve Fázi 5).
 
 ## Fáze 4 — „Škálování"
 
-**Cíl:** desítky nabídek denně při konstantním lidském čase — mašina jede objem, člověk triáž.
+**Cíl:** kapacita na desítky nabídek denně — mašina jede objem; člověk drží triáž a
+per-item kontrolu (jeho čas roste s počtem položek — to je invariant, ne neefektivita).
 
-**Vstupní podmínka:** metriky Fáze 2 drží ≥ 1 měsíc provozu; Fáze 3 smyčka běží (aspoň watcher
-+ logging); rozhodnutí o zdrojích monitoringu (Hlídač licence, TED).
+**Vstupní podmínka (OBCHODNÍ kritérium — po oponentuře, ne produkční):** škáluje se, až když
+(a) existuje **opakovaná platba** externího zákazníka NEBO **kladná contribution margin**
+z vlastních výher, a zároveň (b) je reálná **kapacita dodat** (sourcing, logistika, kapitál
+v rámci stropu A-00). Bez toho vyšší throughput jen zvyšuje náklady. K tomu technicky:
+metriky Fáze 2 drží ≥ 1 měsíc provozu; Fáze 3 smyčka běží (aspoň watcher + logging);
+rozhodnutí o zdrojích monitoringu (Hlídač licence, TED).
 
 **Výstupní kritérium (měřitelné):**
-- ≥ 20 CN/den zpracováno (převzetí → submit-ready) při ≤ 2 h lidského času denně celkem;
+- **kapacita stroje** ≥ 20 CN/den (převzetí → submit-ready) prokázaná zátěžovým dnem —
+  reálné tempo podání určuje lidská per-item kontrola a obchodní poptávka, ne throughput;
 - ≥ 3 aktivní zdroje monitoringu (NEN + Hlídač + TED/profily), deduplikované;
 - deploy/restart nepřeruší žádný job (fronta mimo API proces);
 - AI spend pod nastaveným stropem s automatickou degradací, alert při 80 %.
@@ -253,20 +289,23 @@ předpoklad auto-triáže ve Fázi 5).
 
 ## Fáze 5 — „Autonomie"
 
-**Cíl:** člověk dělá jen go/no-go a schvaluje nákupy — vše ostatní včetně podání (kde to jde
-legálně) provede mašina po explicitním schválení.
+**Cíl:** člověk drží tři checkpointy — go/no-go, **individuální potvrzení každé položky
+(human review 100 %, bez cenových prahů — invariant)** a nákupy; vše ostatní včetně podání
+(kde to jde legálně) provede mašina po explicitním schválení.
 
 **Vstupní podmínka:** kalibrovaný go/no-go (Fáze 3, ≥ 50 outcomes), stabilní throughput
 (Fáze 4); **právní konzultace k modelu přístupu k NEN účtu uzavřená** (zmocnění, podmínky užití).
 
 **Výstupní kritérium (měřitelné):**
-- ≥ 80 % nabídek projde od převzetí po submit-ready bez lidského zásahu (mimo go/no-go
-  a schválení cen nad prahem);
+- ≥ 80 % nabídek projde od převzetí po submit-ready bez lidského zásahu mimo tři
+  checkpointy (go/no-go, **per-item potvrzení VŠECH položek — žádný cenový práh
+  neexistuje**, nákupy);
 - podání: systém sestaví a odešle nabídku po expl. kliknutí člověka „Odeslat" (asistované),
   na portálech s API plně automaticky po schválení;
 - každá autonomní akce v audit logu, kill-switch funkční (otestovaný), denní limit Kč
   bez schválení vynucený;
-- lidský čas ≤ 1 h/den na desítky nabídek.
+- lidský čas mimo tři checkpointy ≤ 15 min/den; čas NA checkpointech roste s počtem
+  položek — záměr, ne neefektivita.
 
 ### Balíky práce
 
@@ -277,7 +316,7 @@ legálně) provede mašina po explicitním schválení.
 | 5.3 | **API podání kde existuje**: prověřit E-ZAK/Tender arena/Josephine možnosti; kde API není, zůstává 5.2 | L–XL | Pokrytí portálů rozhodne, kolik % podání jde plně automatizovat. |
 | 5.4 | **Auto-triáž go/no-go**: skóre nad kalibrovaným prahem → auto-příprava celého balíku; člověk schvaluje frontu „připraveno k podání" místo jednotlivých kroků | M | Bezpečné až s kalibrací z Fáze 3; jinak mašina plýtvá na špatné zakázky. |
 | 5.5 | **Nákupní automatizace**: z `crm_nakupy` objednávkové podklady (košíky/poptávky), člověk schvaluje nákup jedním klikem | M | Druhý lidský checkpoint dle cíle. Kód tabu Nákup existuje, chybí generování podkladů. |
-| 5.6 | **Governance a fail-safe**: kill-switch podání, audit log, denní/týdenní limity (Kč, počet podání), alarm při anomálii (např. cena 2σ mimo pásmo prošla) | M | Podmínka důvěry — autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone money-path). |
+| 5.6 | **Governance a fail-safe**: audit log, denní/týdenní limity (Kč, počet podání), alarm při anomálii (např. cena 2σ mimo pásmo prošla). **Základní kill-switch existuje už od vlny B (03 B-00 — předsunuto po oponentuře, protože auto-run-all a bulk cesty vznikají dřív); tady se rozšiřuje** | M | Podmínka důvěry — autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone money-path). |
 
 ### Rizika
 - **Právní/reputační**: formálně vadné automatické podání poškozuje jméno firmy u zadavatelů;
@@ -295,12 +334,14 @@ legálně) provede mašina po explicitním schválení.
 
 | Přechod | Blokátor | Typ | Kdo odblokuje |
 |---|---|---|---|
-| 0 → 1 | Výběr 2–3 pilotních zakázek z feedu | rozhodnutí | **Dan** (go/no-go je jeho checkpoint) |
+| 0 → 1 | **A-00 připravenost entity a dodávky** (entita, kvalifikace, NEN registrace, strop expozice, min. contribution margin) | rozhodnutí + provoz | **Dan** |
+| 0 → 1 | Výběr pilotní zakázky z feedu (nejprve 1, po retrospektivě +2) | rozhodnutí | **Dan** (go/no-go je jeho checkpoint) |
 | 0 → 1 | Ruční dohledání cen tam, kde verify nenajde | provoz | operátor (Dan/pověřený člověk) |
 | 1 → 2 | ≥ 2 podání bez formální vady + retrospektivy (backlog ručních zásahů) | provoz | operátor |
 | 1 → 2 | HLIDAC_TOKEN na prod (druhý zdroj feedu, stabilita vstupu) | rozhodnutí + config | **Dan** (příp. komerční licence Hlídače) |
 | 2 → 3 | ≥ 10–20 podaných nabídek s výsledky (vzorek pro kalibraci) | provoz + čas | provoz Fáze 2 (výsledky chodí se zpožděním týdnů) |
 | 2 → 3 | Logování feature vektorů skóre od začátku Fáze 2 (balík 2.5) | kód (S) | vývoj — udělat brzy, zpětně nejde |
+| 3 → 4 | **Obchodní kritérium škálování: opakovaná platba NEBO kladná contribution margin, + reálná kapacita dodat** | business + provoz | **Dan** |
 | 3 → 4 | Rozhodnutí o zdrojích: komerční licence Hlídač? TED? profily? | rozhodnutí | **Dan** (náklad vs. pokrytí) |
 | 3 → 4 | Metriky Fáze 2 držené ≥ 1 měsíc (důkaz stability před objemem) | provoz | operátor + dashboard 2.6 |
 | 4 → 5 | Právní konzultace: model přístupu k NEN účtu, zmocnění, podmínky užití | rozhodnutí + externí | **Dan** + právník (lze začít kdykoliv dřív) |
@@ -312,22 +353,34 @@ legálně) provede mašina po explicitním schválení.
 že **latence výsledků VZ je týdny** — sběrné mechanismy se vyplatí spustit dřív, než je jejich
 fáze „na řadě":
 
-1. **Pilotní podání (F1.1–1.6)** — okamžitě; provoz, ne kód. Vše ostatní je bez prvního podání
-   akademické. Kódová podpora jen 1.3 (checklist úplnosti balíku).
-2. **HLIDAC_TOKEN (F1.7)** — jednorázové rozhodnutí Dana, odblokuje stabilitu vstupu.
-3. **Logování feature vektorů go/no-go (F2.5)** — S, udělat hned; zpětně data nevzniknou.
-4. **Outcome watcher (F3.1) předběžně** — začít sbírat výsledky co nejdřív kvůli latenci
+1. **A-00 připravenost entity a dodávky (F1.0)** — rozhodnutí Dana; blokuje jakékoli
+   reálné podání.
+2. **Placené concierge validace** — oslovit design partnery hned; primární business,
+   běží paralelně s vlastním pilotem (neblokují se).
+3. **Pilotní podání (F1.1–1.6)** — 1 podání → retrospektiva → další 2; provoz, ne kód.
+   Kódová podpora jen 1.3 (hard completeness gate).
+4. **Základní kill-switch (03 B-00)** — PŘED auto-run-all a jakoukoli další automatizací
+   money-path (předsunuto z fáze 5 po oponentuře).
+5. **HLIDAC_TOKEN (F1.7)** — jednorázové rozhodnutí Dana, odblokuje stabilitu vstupu.
+6. **Logování feature vektorů go/no-go (F2.5)** — S, udělat hned; zpětně data nevzniknou.
+7. **Outcome watcher (F3.1) předběžně** — začít sbírat výsledky co nejdřív kvůli latenci
    zveřejňování; stačí minimální verze (VVZ award notice podle ev. čísla).
-5. **Verify hit-rate + kvalita matchingu (F2.1, 2.2)** — hlavní kódová práce nejbližších týdnů;
+8. **Verify hit-rate + kvalita matchingu (F2.1, 2.2)** — hlavní kódová práce nejbližších týdnů;
    podmínka ziskovosti (odhady −42 % pod trhem) i podmínka 5–10/den.
-6. **Auto-run-all po převzetí (F2.3)** — S, checkpoint už je bezpečný, velká úspora klikání.
-7. **Inbox bulk akce (F2.4)** + **cost/throughput observabilita (F2.6)** — poloautomat UX.
-8. **Právní konzultace NEN (F5.1)** — externí, dlouhá latence → zadat už během Fáze 2.
-9. **Kalibrace skóre (F3.2) a price-to-win (F3.3, 3.4)** — jakmile je vzorek outcomes.
-10. **Postgres worker fronta (F4.2) a další zdroje feedu (F4.1)** — až metriky poloautomatu drží.
-11. **Asistované podání (F5.2) a auto-triáž (F5.4)** — poslední, na ověřeném základě.
+9. **Auto-run-all po převzetí (F2.3)** — S, checkpoint je fail-closed; až po kill-switchi (4).
+10. **Inbox zbytek (F2.4 — generate/finalize; potvrzení s attestací HOTOVO PR #63)**
+    + **cost/throughput observabilita (F2.6)** — poloautomat UX.
+11. **Právní konzultace (F5.1 + GDPR/data okruh)** — externí, dlouhá latence → zadat hned;
+    GDPR/licence/ToS scraping musí být uzavřené PŘED prvním externím pilotem.
+12. **Kalibrace skóre (F3.2) a price-to-win (F3.3, 3.4)** — jakmile je vzorek outcomes;
+    P(win) až po backtestu.
+13. **Postgres worker fronta (F4.2) a další zdroje feedu (F4.1)** — až drží obchodní
+    kritérium škálování.
+14. **Asistované podání (F5.2) a auto-triáž (F5.4)** — poslední, na ověřeném základě.
 
 **Anti-pořadí (čemu se vyhnout):** nestavět podávací automatizaci před prvním ručním podáním
-(runbook 1.4 je její specifikace); nekalibrovat skóre na < 10 výsledcích; neškálovat frontu,
-dokud operátor nezvládne 5/den ručně (jinak se škáluje chaos); nerozšiřovat sortiment/záběr,
-dokud verify hit-rate nedrží na současném.
+(runbook 1.4 je její specifikace); nekalibrovat skóre na < 10 výsledcích; nezobrazovat P(win)
+bez backtestu a minima výsledků v segmentu; neškálovat frontu, dokud operátor nezvládne 5/den
+ručně a není splněno obchodní kritérium (opakovaná platba / contribution margin / kapacita
+dodat); nerozšiřovat sortiment/záběr, dokud verify hit-rate nedrží na současném; nepodávat
+nic mimo strop kapitálové expozice z A-00.

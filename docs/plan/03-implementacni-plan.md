@@ -1,5 +1,6 @@
 # Implementační plán: exekuce roadmapy krok po kroku
 
+> **Verze 2 (po adversariální oponentuře Codexu, 2026-07-12).**
 > Dokument plánu, část 3/N. Stav k 2026-07-11 (skóre ~55 %). Navazuje na
 > `docs/plan/01-business-model.md` (business model, Model 0 + tiered SaaS) a
 > `docs/plan/02-roadmapa.md` (fáze 1–5). Podklad: `docs/audit-goal-2026-07-10.md`,
@@ -16,6 +17,11 @@
 
 ## 0. Jak číst tento plán
 
+- **TVRDÝ INVARIANT (Dan): lidská kontrola každé položky nabídky — human_review_rate
+  = 100 %, bez cenových prahů.** Nasazeno (PR #63): per-item attestace, serverová
+  auditní stopa kdo/kdy, žádné slepé „Potvrdit vše", změna produktu/ceny potvrzení
+  ruší. Žádný task nesmí zavést cestu, která položku potvrdí bez explicitní lidské
+  attestace — adversariální oponentura každého money-path tasku to explicitně hledá.
 - **Vlny A–F** = pořadí exekuce. Tasky uvnitř vlny jsou navrženy tak, aby šly dělat
   **souběžně** (dotýkají se různých souborů; kde se potkávají v `serve-api.ts`, platí
   pravidlo integrace přes společnou integrační větev — viz §9). Další vlna se otevírá,
@@ -50,29 +56,55 @@
 bez formální vady, plus sběrné mechanismy, které se zpětně dohnat nedají.
 
 **Výstupní podmínka vlny (blokuje otevření vlny B jen zčásti — viz pozn.):**
-≥ 2 nabídky ve stavu `odeslana` s evidencí podání a immutable balíkem; 0 diskvalifikací
-pro formální vadu; 100 % potvrzených cen s reálným nákupním zdrojem; výsledky (jakmile
-přijdou) zapsané v `crm_vysledky`. *Pozn.: kódové tasky vlny B lze začít hned po
-dokončení kódových tasků vlny A — na samotné podání (provoz, lhůty v týdnech) se
-s vývojem nečeká.*
+A-00 schválené Danem; ≥ 2 nabídky ve stavu `odeslana` s evidencí podání a immutable
+balíkem; 0 diskvalifikací pro formální vadu; 100 % potvrzených cen s reálným nákupním
+zdrojem a per-item attestací; výsledky (jakmile přijdou) zapsané v `crm_vysledky`.
+*Pozn.: kódové tasky vlny B lze začít hned po dokončení kódových tasků vlny A — na
+samotné podání (provoz, lhůty v týdnech) se s vývojem nečeká.*
 
 ### Tasky
 
-- [ ] **A-01 — Checklist úplnosti balíku vs. ZD** · **MONEY-PATH — adversariální oponentura povinná**
+- [ ] **A-00 — Připravenost entity a dodávky** (lidský krok + S kód; **BLOKUJE jakékoli reálné podání**)
+  - **Proč:** oponentura HIGH — před prvním podáním musí existovat entita schopná
+    kvalifikace, nákupu, dodání a přežití cash-flow; jinak je i „vyhraná" zakázka
+    průšvih. Kryje riziko R9 (cash-flow) i registraci dodavatele na NEN. Dimenze: business.
+  - **Obsah (checklist, schvaluje Dan):** (1) volba podávající entity (Make more / jiná);
+    (2) kvalifikační předpoklady: výpis OR/ŽR, bezúhonnost, reference, vzory ČP;
+    (3) registrace dodavatele na NEN (vlastní latence — začít hned); (4) sourcing:
+    dodavatelé pro cílové kategorie, ověřená dostupnost a dodací lhůty; (5) logistika
+    dodání a kdo ji fyzicky provede; (6) DPH a fakturační režim; (7) pojištění
+    odpovědnosti; (8) **tvrdý strop souběžné kapitálové expozice v Kč**;
+    (9) **minimální contribution margin per zakázka** (po započtení dopravy a financování).
+  - **Kódový dodatek (S):** faktor kapitálové náročnosti do `scripts/src/lib/go-no-go.ts`
+    (zobrazení, ne auto-blok) + zobrazení aktuální souběžné expozice (suma vysoutěženého
+    nedodaného objemu) vedle stropu; test `scripts/tests/go-no-go.test.ts` rozšířit.
+  - **Akceptace:** checklist vyplněn a schválen Danem (zapsáno do `docs/plan/` follow-upu
+    nebo company config); strop expozice a min. contribution margin zapsané jako konkrétní
+    čísla; registrace NEN aktivní; go/no-go ukazuje kapitálový faktor a expozici.
+  - **Závislosti:** žádné. **Blokuje: A-06, A-07** (bez A-00 se nepodává).
+    **Velikost:** S–M (převážně Dan). **Kdo:** **Dan** rozhodnutí + Codex kódový dodatek.
+
+- [ ] **A-01 — Checklist úplnosti balíku vs. ZD (HARD gate)** · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F1.3; největší riziko pilotu = formální diskvalifikace, ne cena. Dimenze: kvalita, business.
   - **Soubory:** nový `scripts/src/lib/bid-completeness.ts` (deterministický výtah požadovaných
     dokumentů/příloh z `analysis.json` — kvalifikace, ČP, návrh smlouvy, soupis, doklady);
     endpoint v `scripts/src/serve-api.ts` (`GET /api/tenders/:id/completeness`); napojení do
-    `scripts/src/lib/podani.ts` (finalize warning při neodškrtnutém checklistu — advisory,
-    ne HARD, aby nešlo o nový blokátor bez kalibrace); UI v
-    `apps/web/src/components/SubmissionCockpit.tsx` (odškrtávací seznam, stav per položka);
+    `scripts/src/lib/podani.ts` (**HARD gate: finalize s neodškrtnutou POVINNOU položkou
+    checklistu vrací 409; výjimka jen auditovaná per-item — kdo/kdy/důvod, vzor
+    `override_pod_nakupem`**); UI v `apps/web/src/components/SubmissionCockpit.tsx`
+    (odškrtávací seznam, stav per položka, override dialog s důvodem);
     test `scripts/tests/bid-completeness.test.ts`.
   - **Akceptace:** na zakázce n-485400 (existující analysis v `output/`) vrátí endpoint seznam
-    požadovaných dokumentů shodný s ručním čtením ZD; cockpit zobrazuje checklist a finalize
-    ukáže varování, dokud není odškrtán; unit testy na parser (min. 3 reálné analysis fixtures).
+    požadovaných dokumentů shodný s ručním čtením ZD; finalize s neodškrtnutou povinnou
+    položkou vrátí 409, projde jen s explicitním auditovaným override per položka; **před
+    prvním podáním navíc nezávislé dvojí čtení ZD** (druhý člověk/agent porovná checklist
+    proti ZD, zapsáno v cockpitu); unit testy na parser (min. 3 reálné analysis fixtures)
+    + na gate/override.
   - **Závislosti:** žádné. **Velikost:** M.
   - **Rizika:** analysis nemusí obsahovat všechny požadavky (extraction gap) → checklist musí
-    umět ruční přidání položky operátorem; advisory režim záměrně (fail-closed by pilot zablokoval).
+    umět ruční přidání položky operátorem a dvojí čtení ZD je povinné před prvním podáním.
+    Advisory režim z v1 po oponentuře ZRUŠEN — slib „0 formálních diskvalifikací" s měkkým
+    varováním nešel dohromady; falešný blok řeší auditovaná výjimka, ne měkkost gate.
 
 - [ ] **A-02 — Runbook ručního podání NEN / profil zadavatele**
   - **Proč:** F1.4; runbook je zároveň specifikace budoucí automatizace podání (F-02 ve vlně F). Dimenze: business, provoz.
@@ -124,25 +156,33 @@ s vývojem nečeká.*
   - **Závislosti:** **Dan** — registrace na hlidacstatu.cz, získání tokenu, rozhodnutí o komerční
     licenci (api@hlidacstatu.cz). **Velikost:** S. **Rizika:** licenční — CC BY 3.0 vs. komerční užití.
 
-- [ ] **A-06 — Výběr 2–3 pilotních zakázek** (lidský krok, **MONEY-PATH rozhodnutí**)
+- [ ] **A-06 — Výběr pilotních zakázek (nejprve 1, po retrospektivě +2)** (lidský krok, **MONEY-PATH rozhodnutí**)
   - **Proč:** F1.1; vše ostatní je bez podání akademické. Dimenze: business (hlavní páka 46 → výš).
   - **Postup:** Dan v MonitoringPage (`apps/web/src/pages/MonitoringPage.tsx`) vybere z feedu
-    dle go/no-go skóre: malé komoditní dodávky do ~1 M Kč, **mainstream značky** (kvůli verify
-    hit-rate — pilot nemá testovat long-tail), lhůta ≥ 10 dní, dostupný sortiment.
-  - **Akceptace:** 2–3 zakázky převzaté do CRM, pipeline spuštěná, rozhodnutí zapsáno
-    (komentář u zakázky: proč go).
-  - **Závislosti:** žádné kódové (feed žije, 63 aktuálních zakázek). **Velikost:** S (rozhodnutí). **Kdo:** výhradně **Dan**.
+    dle go/no-go skóre **nejprve JEDNU** zakázku (další 2 až po retrospektivě prvního podání):
+    malá komoditní dodávka do ~1 M Kč, **mainstream značky** (kvůli verify hit-rate — pilot
+    nemá testovat long-tail), lhůta ≥ 10 dní, **reálná schopnost dodat (sourcing, logistika)
+    a v rámci stropu kapitálové expozice z A-00**.
+  - **Akceptace:** zakázka převzatá do CRM, pipeline spuštěná, rozhodnutí zapsáno
+    (komentář u zakázky: proč go, vč. kapitálové úvahy).
+  - **Závislosti:** **A-00 (tvrdá)**; žádné kódové (feed žije, 63 aktuálních zakázek).
+    **Velikost:** S (rozhodnutí). **Kdo:** výhradně **Dan**.
 
 - [ ] **A-07 — Pilotní provoz: 100% cenová jistota + lidské QA + podání** (provoz, **MONEY-PATH**)
   - **Proč:** F1.2 + F1.5 + samotné podání. Dimenze: business, kvalita.
-  - **Postup:** (1) web-verify na každou položku pilotů (`POST` verify z Ocenění; kde nenajde →
-    ruční dohledání nákupní ceny e-shop/poptávka a zápis přes „Použít cenu"); (2) všechny ceny
-    potvrzeny přes gate s marží ≥ company default; (3) přečíst vygenerované DOCX/PDF očima
-    zadavatele, porovnat s validation reportem, **každou ruční opravu zapsat jako issue do
-    `docs/bugs-and-todos.md`** (= backlog vlny B/C); (4) finalize → immutable balík → ruční
-    podání dle runbooku A-02 → evidence podání v cockpitu ihned.
-  - **Akceptace:** = výstupní podmínka vlny A (≥ 2 `odeslana`, 0 formálních vad, evidence úplná).
-  - **Závislosti:** A-01 (checklist), A-02 (runbook), A-06 (výběr). **Velikost:** M–L (provoz, ne kód). **Kdo:** **Dan/operátor**; agent jen asistuje (dohledávání cen, kontrola).
+  - **Postup:** (0) **per-item sourcing dossier**: u každé položky dostupnost, dodací lhůta,
+    doprava, DPH, platnost nákupní ceny — PŘED potvrzováním cen; (1) web-verify na každou
+    položku pilotů (`POST` verify z Ocenění; kde nenajde → ruční dohledání nákupní ceny
+    e-shop/poptávka a zápis přes „Použít cenu"); (2) všechny ceny potvrzeny přes gate
+    s per-item attestací (PR #63) a marží ≥ company default; (3) přečíst vygenerované
+    DOCX/PDF očima zadavatele, porovnat s validation reportem, **každou ruční opravu zapsat
+    jako issue do `docs/bugs-and-todos.md`** (= backlog vlny B/C); (4) finalize (hard
+    completeness gate A-01) → immutable balík → ruční podání dle runbooku A-02 → evidence
+    podání v cockpitu ihned; (5) **po PRVNÍM podání retrospektiva (A-08) a oprava procesu
+    PŘED dalšími dvěma podáními**.
+  - **Akceptace:** = výstupní podmínka vlny A (≥ 2 `odeslana`, 0 formálních vad, evidence úplná,
+    sourcing dossier u každé položky).
+  - **Závislosti:** **A-00**, A-01 (hard gate), A-02 (runbook), A-06 (výběr). **Velikost:** M–L (provoz, ne kód). **Kdo:** **Dan/operátor**; agent jen asistuje (dohledávání cen, kontrola).
   - **Rizika:** lhůta propadne (deadline alarm v inboxu hlídat denně); cena mimo pásmo
     (mitigace: win-price pásmo + HARD gate pod nákupem — obojí nasazeno).
 
@@ -155,20 +195,25 @@ s vývojem nečeká.*
   - **Závislosti:** A-07. **Velikost:** S. **Kdo:** Dan diktuje, Sonnet zapisuje.
 
 - [ ] **A-09 — Zadání právní konzultace (dlouhá latence — zadat TEĎ)** (lidský krok)
-  - **Proč:** F5.1 má týdny–měsíce latence; blokuje vlnu F. Dva okruhy: (a) model přístupu
-    k NEN účtu dodavatele (zmocnění, podmínky užití, automatizace podání); (b) odpovědnostní
-    klauzule pro budoucí SaaS („nástroj = podklad, podává a odpovídá zákazník"). Dimenze: business, autonomie.
+  - **Proč:** F5.1 má týdny–měsíce latence; blokuje vlnu F a externí pilot. **Tři okruhy:**
+    (a) model přístupu k NEN účtu dodavatele (zmocnění, podmínky užití, automatizace podání);
+    (b) odpovědnostní klauzule pro managed service a budoucí SaaS („nástroj = podklad,
+    podává a odpovídá zákazník"); (c) **GDPR + licence dat + ToS automatizovaného stahování**
+    (scraping NEN, Registr smluv, ukládání ZD — data inventory, právní titul, retence,
+    mazání, DPA pro concierge klienty; provazba T-06). **Okruh (c) musí být uzavřen PŘED
+    prvním externím (placeným) pilotem, ne až před vlnou D.** Dimenze: business, autonomie.
   - **Akceptace:** poptávka odeslána právníkovi; otázky písemně (draft připraví agent do
-    `docs/pravni-dotazy-podani.md`); odpověď = vstupní podmínka vlny F.
+    `docs/pravni-dotazy-podani.md`, všechny tři okruhy); odpověď (a) = vstupní podmínka
+    vlny F, odpověď (c) = vstupní podmínka externího pilotu.
   - **Závislosti:** žádné. **Velikost:** S (zadání). **Kdo:** **Dan** (výběr právníka, odeslání).
 
 ### Rozdělení práce vlny A
 | Kdo | Tasky |
 |---|---|
-| Codex (bulk) | A-03, A-04, části A-01 (parser + endpoint) |
-| Opus/Fable (money-path + oponentura) | A-01 review, A-03/A-04 review (sahají do podani/outcomes) |
+| Codex (bulk) | A-00 kódový dodatek, A-03, A-04, části A-01 (parser + endpoint) |
+| Opus/Fable (money-path + oponentura) | A-01 review (hard gate + override), A-03/A-04 review (sahají do podani/outcomes) |
 | Sonnet (UI/doc) | A-01 cockpit UI, A-02 draft, A-08 zápis |
-| **Dan (nenahraditelný)** | A-05 token, A-06 výběr, A-07 podání, A-09 právník, A-02 verifikace na NEN |
+| **Dan (nenahraditelný)** | **A-00 checklist + strop expozice**, A-05 token, A-06 výběr, A-07 podání, A-09 právník, A-02 verifikace na NEN |
 
 ---
 
@@ -184,6 +229,23 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
 (B-03), match precision změřená, auto-run-all žije.
 
 ### Tasky
+
+- [ ] **B-00 — Základní kill-switch vrstva (předsunuto z F-01 po oponentuře)** · **MONEY-PATH — adversariální oponentura povinná**
+  - **Proč:** oponentura MEDIUM — B-05 a bulk cesty automatizují drahé a závazné části
+    workflow dřív, než by ve vlně F vznikla governance; společný stop mechanismus musí
+    existovat PŘED nimi, ne po nich. Dimenze: provoz, autonomie.
+  - **Soubory:** nový `scripts/src/lib/kill-switch.ts` (env přepínače per doména:
+    `KS_INGEST`, `KS_AI_JOBS`, `KS_GENERATE`, `KS_FINALIZE`, `KS_SUBMISSION` — vypnutá
+    doména = 503 s čitelným důvodem, **NIKDY tichý fallback na provedení**); integrace do
+    `scripts/src/lib/monitoring/monitoring-sync.ts`, `scripts/src/lib/pipeline-job-state.ts`
+    (run-all), generate a `scripts/src/lib/podani.ts` cest v `scripts/src/serve-api.ts`;
+    Slack alert při flipu přes existující watchdog; test `scripts/tests/kill-switch.test.ts`.
+  - **Akceptace:** flip každého přepínače zastaví příslušnou doménu (test per doména);
+    běžící checkpointované joby dokončí krok a pauznou; UI ukazuje „zastaveno kill-switchem"
+    místo generické chyby.
+  - **Závislosti:** žádné — záměrně PRVNÍ task vlny B; **B-05, C-01b a jakákoli další
+    automatizace na něm závisí**. **Velikost:** S–M. **Kdo:** Opus, Fable oponentura.
+  - **Pozn.:** F-01 na této vrstvě staví (přidává limity, audit log, anomálie) — nezaniká.
 
 - [ ] **B-01 — Povinná identifikace kandidáta (výrobce + model / katalogové číslo)** · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F2.1; živý test 0/4 verify nálezů byl způsoben vágními kandidáty bez skutečných
@@ -226,8 +288,10 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
     nový `scripts/src/eval-match.ts` (CLI: spustí match+verify nad setem, spočítá precision,
     hit-rate, MAPE cen vs. ověřená realita); report do `output/eval/`; npm script `eval` v
     `scripts/package.json`.
-  - **Akceptace:** `npm run eval` vypíše precision/hit-rate/MAPE; čísla PŘED a PO B-01+B-02
-    zapsaná v PR popisu (důkaz zlepšení); set verzovaný v repu (bez osobních údajů — pozor,
+  - **Akceptace (dvoustupňově):** **v1** — set z historických zakázek, `npm run eval` vypíše
+    precision/hit-rate/MAPE, čísla PŘED a PO B-01+B-02 v PR popisu (odblokuje vlnu B);
+    **v2** — re-měření po doplnění ručně ověřených cen z pilotů (A-07/A-08), potvrzuje
+    hit-rate ≥ 70 % PŘED otevřením vlny C. Set verzovaný v repu (bez osobních údajů — pozor,
     `input/` je v .gitignore záměrně, fixtures anonymizovat).
   - **Závislosti:** aspoň částečná data z A-07 (ručně ověřené ceny pilotů); jinak start
     z historických zakázek. **Velikost:** M. **Kdo:** Codex implementace, Sonnet sběr fixtures, Fable definice metrik.
@@ -257,8 +321,9 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
     default ON); test `scripts/tests/monitoring-tender-allocation.test.ts` (rozšířit).
   - **Akceptace:** převzetí zakázky z feedu bez dalšího kliknutí doběhne do `waiting_approval`
     (nepotvrzené ceny čekají na člověka); generate se BEZ potvrzení nespustí (existující hard
-    fail — regression test); ověřeno na prod na 1 živé zakázce.
-  - **Závislosti:** žádné. **Velikost:** S. **Kdo:** Codex, Fable smoke na prod.
+    fail — regression test); `KS_AI_JOBS` kill-switch auto-spouštění zastaví; ověřeno na prod
+    na 1 živé zakázce.
+  - **Závislosti:** **B-00 (kill-switch)**. **Velikost:** S. **Kdo:** Codex, Fable smoke na prod.
   - **Rizika:** automaticky spuštěné joby žerou AI kredit na irelevantních zakázkách →
     spouštět jen při převzetí (lidské rozhodnutí), NE plošně na celý feed (to až F-04 po kalibraci).
 
@@ -279,10 +344,10 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
 ### Rozdělení práce vlny B
 | Kdo | Tasky |
 |---|---|
-| Opus (money-path impl.) | B-01, B-02 |
+| Opus (money-path impl.) | **B-00**, B-01, B-02 |
 | Codex (bulk) | B-03 harness, B-04, B-05, B-06 engine |
 | Sonnet (UI/sběr) | B-02 badge, B-03 fixtures, B-06 UI |
-| Fable (oponentura + živá verifikace) | B-01, B-02, B-04 review; živé prod přeměření B-01/B-02 |
+| Fable (oponentura + živá verifikace) | **B-00**, B-01, B-02, B-04 review; živé prod přeměření B-01/B-02 |
 | Dan | dodá ručně ověřené ceny pilotů do zlatého setu (z A-07); rozhodne TTL cache a cap verify nákladů |
 
 ---
@@ -299,21 +364,31 @@ viditelné na jedné obrazovce.
 
 ### Tasky
 
-- [ ] **C-01 — Inbox jako pracovní plocha (bulk akce)** · **MONEY-PATH — adversariální oponentura povinná**
-  - **Proč:** F2.4; dnes vše žije v detailu jedné zakázky — limit pro 5–10/den. Dimenze: UX (60 → 75+).
-  - **Soubory:** `scripts/src/lib/inbox.ts` (agregace akcí — přidat akční payloady);
-    `scripts/src/serve-api.ts` (bulk endpointy: potvrdit ceny přes existující
-    `price-confirmation.ts` — NIKDY neobcházet gate, spustit generate, finalize);
-    `apps/web/src/pages/InboxPage.tsx` (výběr řádků, bulk tlačítka, řazení lhůta × skóre,
-    potvrzovací dialog s částkami — vzor ludone-money-ux); testy `scripts/tests/inbox.test.ts`
-    (rozšířit) + `price-confirmation.test.ts` (bulk cesta přes gate).
-  - **Akceptace:** z inboxu lze bez otevření detailu: potvrdit ceny vybraných zakázek (gate
-    409 se propaguje per zakázka, ne all-or-nothing), spustit generate, finalize; HARD flag
-    zakázku z bulk potvrzení VYŘADÍ (nikdy tichý průchod); E2E Playwright scénář bulk potvrzení.
-  - **Závislosti:** žádné tvrdé. **Velikost:** M. **Kdo:** Opus BE (bulk přes gate = money-path), Sonnet FE, Fable oponentura.
-  - **Rizika:** bulk potvrzení je nejnebezpečnější UI v systému (one-click k mnoha závazným
-    cenám) → dialog musí ukázat součet, počet nepotvrzených, HARD/WARN flagy; známý bug-vzor
-    „desync draftu s hromadným potvrzením" (PR #53) — regression test povinný.
+- [x] **C-01 — Potvrzení cen s per-item attestací** · **MONEY-PATH** — **HOTOVO (PR #63, nasazeno)**
+  - Původní v1 znění („bulk potvrzení cen z inboxu jedním klikem") označila oponentura
+    jako CRITICAL porušení invariantu. Task byl přepsán a implementován takto: každé
+    potvrzení ceny nese **serverovou auditní stopu (kdo/kdy)**, bulk operace potvrzuje
+    **pouze položky s explicitní per-item attestací**, slepé „Potvrdit vše" bylo
+    odstraněno, **změna produktu nebo ceny potvrzení automaticky ruší** (invalidace).
+  - **Trvalé pravidlo pro navazující tasky (C-01b, E-03):** žádné budoucí inbox/bulk UX
+    per-item attestaci neobchází — adversariální oponentura to u každého diffu explicitně
+    hledá.
+
+- [ ] **C-01b — Inbox jako pracovní plocha (zbytek: generate/finalize, řazení)**
+  - **Proč:** F2.4; potvrzení cen je vyřešeno (C-01/PR #63), zbývá spouštění generate a
+    finalize z inboxu a řazení dle lhůty × skóre. Dimenze: UX (60 → 75+).
+  - **Soubory:** `scripts/src/lib/inbox.ts` (akční payloady); `scripts/src/serve-api.ts`
+    (bulk generate/finalize — obě akce jen nad zakázkami se 100 % attestovaných položek,
+    jinak per-zakázka 409, ne all-or-nothing); `apps/web/src/pages/InboxPage.tsx` (výběr
+    řádků, bulk tlačítka, řazení lhůta × skóre, potvrzovací dialog — vzor ludone-money-ux);
+    testy `scripts/tests/inbox.test.ts` rozšířit.
+  - **Akceptace:** z inboxu lze spustit generate/finalize vybraných zakázek; zakázka
+    s neattestovanou položkou nebo HARD flagem se z akce VYŘADÍ s viditelným důvodem
+    (nikdy tichý průchod); E2E Playwright scénář.
+  - **Závislosti:** B-00 (kill-switch). **Velikost:** S–M. **Kdo:** Codex BE, Sonnet FE,
+    Fable review.
+  - **Rizika:** známý bug-vzor „desync draftu s hromadným potvrzením" (PR #53) —
+    regression test povinný.
 
 - [ ] **C-02 — Cost + throughput agregace**
   - **Proč:** F2.6; cost-tracker je per zakázka, chybí agregace/trend. Dimenze: provoz (50 → 70).
@@ -368,10 +443,9 @@ viditelné na jedné obrazovce.
 ### Rozdělení práce vlny C
 | Kdo | Tasky |
 |---|---|
-| Opus | C-01 backend (bulk přes gate) |
-| Codex | C-02, C-03, C-04, C-05 refactor, C-06 |
-| Sonnet | C-01 FE, C-02 widget |
-| Fable | C-01 oponentura (povinná), C-03 fail-closed review |
+| Codex | C-01b BE, C-02, C-03, C-04, C-05 refactor, C-06 |
+| Sonnet | C-01b FE, C-02 widget |
+| Fable | C-01b review (attestace se neobchází), C-03 fail-closed review |
 | Dan | C-05 revize vah; průběžný provoz 5–10/den (generuje data pro vlnu D) |
 
 ---
@@ -411,22 +485,28 @@ P(win) panel v Ocenění; automatický rozpad delta vs. vítěz u proher.
   - **Rizika:** kalibrace na < 30 výsledcích může být horší než ruční váhy → plná automatika
     až od ~50 výsledků (tvrdě zakódovaný práh pro auto-návrhy).
 
-- [ ] **D-03 — Price-to-win model (P(win) × marže panel)** · **MONEY-PATH — adversariální oponentura povinná**
-  - **Proč:** F3.3; jádro konkurenční výhody — pozice naší ceny ve win-price pásmu → odhad
-    P(win), operátor vidí trade-off marže × pravděpodobnost. Dimenze: business (46 → 65+).
+- [ ] **D-03 — Price-to-win: historická pozice ceny, P(win) až po backtestu** · **MONEY-PATH — adversariální oponentura povinná**
+  - **Proč:** F3.3; jádro konkurenční výhody. Po oponentuře **dvoustupňově** — malý vzorek
+    nesmí vyrábět falešné pravděpodobnosti. Dimenze: business (46 → 65+).
+  - **Krok 1 (stavět hned):** historická pozice naší ceny ve win-price pásmu (percentil)
+    + **interval nejistoty + velikost vzorku n** — žádná pravděpodobnost v UI.
+  - **Krok 2 (P(win) — odemyká se až po):** (a) backtest modelu na historických outcomes
+    (D-02 data) s dokumentovanou přesností, (b) **minimální počet výsledků v KONKRÉTNÍM
+    segmentu** (kategorie × velikost zakázky; práh tvrdě v kódu, start ≥ 20, zvýšit lze).
   - **Soubory:** `scripts/src/lib/winprice-query.ts` + `scripts/src/lib/winprice-api.ts`
     (percentil pozice ceny v pásmu kategorie); nový `scripts/src/lib/price-to-win.ts`
-    (empirická P(win) křivka z pásma + outcomes; **doporučená cena je VŽDY návrh, NIKDY
-    auto-přepis** — potvrzení jde dál výhradně přes `price-confirmation.ts` gate);
+    (krok 1 + gated krok 2; **doporučená cena je VŽDY návrh, NIKDY auto-přepis** —
+    potvrzení jde dál výhradně přes `price-confirmation.ts` gate s per-item attestací);
     UI panel v `apps/web/src/components/ItemPriceCalculator.tsx` / záložce Ocenění v
-    `apps/web/src/pages/TenderDetailPage.tsx` (slider marže → P(win) + očekávaný zisk);
-    test `scripts/tests/price-to-win.test.ts`.
-  - **Akceptace:** u zakázky s dostupným pásmem vidí operátor: naše cena je na X. percentilu,
-    odhad P(win) Y %, očekávaná hodnota (P(win) × zisk) pro 3 scénáře marže; žádná cesta
-    v kódu nezapisuje doporučenou cenu bez lidského potvrzení (oponentura to explicitně hledá);
-    unit testy na percentily a hrany (prázdné pásmo, n < 5 → „nedostatek dat", ne falešné číslo).
-  - **Závislosti:** D-04 zvyšuje kvalitu (hustší pásma), ale neblokuje. **Velikost:** L. **Kdo:** Opus, Fable oponentura povinná.
-  - **Rizika:** falešná přesnost („P(win) 73 %" z n=8) → povinné zobrazení n a intervalu;
+    `apps/web/src/pages/TenderDetailPage.tsx`; test `scripts/tests/price-to-win.test.ts`.
+  - **Akceptace:** u zakázky s dostupným pásmem vidí operátor percentil + interval + n;
+    **P(win) se zobrazí JEN po splněném backtestu a segmentovém prahu (test na hranu —
+    pod prahem UI ukazuje „nedostatek dat", nikdy číslo)**; žádná cesta v kódu nezapisuje
+    doporučenou cenu bez lidského per-item potvrzení (oponentura to explicitně hledá);
+    unit testy na percentily a hrany (prázdné pásmo, n < 5).
+  - **Závislosti:** D-01/D-02 (outcomes + backtest pro krok 2); D-04 zvyšuje kvalitu
+    (hustší pásma), ale neblokuje krok 1. **Velikost:** L. **Kdo:** Opus, Fable oponentura povinná.
+  - **Rizika:** falešná přesnost („P(win) 73 %" z n=8) → řešeno konstrukcí (krok 2 gated);
     UI nesmí vyvolat dojem garantované výhry.
 
 - [ ] **D-04 — Win-price obohacení (PDF backfill + počet uchazečů)**
@@ -466,13 +546,18 @@ P(win) panel v Ocenění; automatický rozpad delta vs. vítěz u proher.
 
 ---
 
-## 5. VLNA E — Škálování (desítky denně)
+## 5. VLNA E — Škálování (kapacita na desítky denně)
 
-**Fáze roadmapy:** 4. **Cíl vlny:** ≥ 20 CN/den (převzetí → submit-ready) při ≤ 2 h
-lidského času; ≥ 3 zdroje feedu; deploy nepřeruší žádný job.
+**Fáze roadmapy:** 4. **Cíl vlny:** kapacita stroje ≥ 20 CN/den (převzetí → submit-ready);
+≥ 3 zdroje feedu; deploy nepřeruší žádný job. Reálné tempo podání určuje lidská per-item
+kontrola (invariant) a obchodní poptávka — throughput je kapacita, ne cíl sám o sobě.
 
-**Vstupní podmínka:** metriky vlny C drží ≥ 1 měsíc provozu; D-01 watcher běží;
-**rozhodnutí Dana o zdrojích** (komerční licence Hlídač? TED? profily?).
+**Vstupní podmínka (OBCHODNÍ kritérium — po oponentuře):** vlna se otvírá, až když
+(a) existuje **opakovaná platba externího zákazníka** NEBO **kladná contribution margin
+z vlastních výher**, a zároveň (b) je **reálná kapacita dodat** (sourcing, logistika,
+kapitál v rámci stropu A-00). Bez toho throughput jen zvyšuje náklady. Technicky dále:
+metriky vlny C drží ≥ 1 měsíc provozu; D-01 watcher běží; **rozhodnutí Dana o zdrojích**
+(komerční licence Hlídač? TED? profily?).
 
 ### Tasky
 
@@ -516,7 +601,8 @@ lidského času; ≥ 3 zdroje feedu; deploy nepřeruší žádný job.
     zakázka — TOCTOU vzor už řešen v PR #50, zachovat).
   - **Akceptace:** 20 nových zakázek lze roztřídit < 10 min bez otevření detailu (změřit);
     převzaté rovnou startují auto-run-all (B-05).
-  - **Závislosti:** B-05, C-01. **Velikost:** M. **Kdo:** Sonnet FE, Codex BE.
+  - **Závislosti:** B-05, C-01b; per-item attestace (C-01/PR #63) se dávkovým převzetím
+    ani triáží NIKDY neobchází. **Velikost:** M. **Kdo:** Sonnet FE, Codex BE.
 
 - [ ] **E-04 — Model tiering (levná triáž)**
   - **Proč:** F4.4; při desítkách/den je spend řiditelný náklad — analyze/triáž levným modelem,
@@ -562,18 +648,20 @@ throughput z vlny E. **Bez uzavřené právní otázky se F-02/F-03 NEZAČÍNÁ.
 
 ### Tasky
 
-- [ ] **F-01 — Governance a fail-safe vrstva** (stavět PRVNÍ, před jakoukoli autonomní akcí) · **MONEY-PATH — adversariální oponentura povinná**
+- [ ] **F-01 — Governance a fail-safe vrstva (rozšíření B-00)** (stavět PRVNÍ ve vlně, před jakoukoli autonomní akcí) · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F5.6; autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone
-    money-path: kill-switch, limity, audit). Dimenze: provoz, autonomie.
-  - **Soubory:** nový `scripts/src/lib/autonomy-guard.ts` (env kill-switch
-    `AUTONOMY_ENABLED`, denní limit počtu podání a součtu Kč bez schválení, anomálie alarm —
-    cena mimo 2σ pásma prošla gatem); migrace `021_audit_log.sql` (append-only audit každé
-    autonomní akce: kdo/co/kdy/vstupy); integrace do `podani.ts`, `tender-allocation.ts`,
-    budoucí submit cesty; Slack alert přes watchdog; testy `autonomy-guard.test.ts`.
+    money-path). **Základní kill-switch per doména existuje od vlny B (B-00)** — tady se
+    přidávají limity, audit a anomálie. Dimenze: provoz, autonomie.
+  - **Soubory:** rozšíření `scripts/src/lib/kill-switch.ts` (B-00) + nový
+    `scripts/src/lib/autonomy-guard.ts` (env `AUTONOMY_ENABLED`, denní limit počtu podání
+    a součtu Kč bez schválení, anomálie alarm — cena mimo 2σ pásma prošla gatem); migrace
+    `021_audit_log.sql` (append-only audit každé autonomní akce: kdo/co/kdy/vstupy);
+    integrace do `podani.ts`, `tender-allocation.ts`, budoucí submit cesty; Slack alert
+    přes watchdog; testy `autonomy-guard.test.ts`.
   - **Akceptace:** kill-switch flip → žádná autonomní akce neproběhne (503, NIKDY tichý
     fallback na provedení); limity vynuceny s testem; audit log neobsahuje mezery (každá
     akce F-02/F-04/F-05 zapisuje).
-  - **Závislosti:** žádné kódové — schválně první task vlny. **Velikost:** M. **Kdo:** Opus, Fable oponentura.
+  - **Závislosti:** B-00. **Velikost:** M. **Kdo:** Opus, Fable oponentura.
 
 - [ ] **F-02 — Asistované podání NEN (UI automatizace)** · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F5.2; NEN nemá veřejné podávací API → Playwright automatizace formuláře podle
@@ -606,8 +694,10 @@ throughput z vlny E. **Bez uzavřené právní otázky se F-02/F-03 NEZAČÍNÁ.
     `scripts/src/lib/inbox.ts` (fronta „připraveno k podání"); guard přes F-01 (denní limit
     auto-převzetí); `MonitoringSettings.tsx` (práh + on/off).
   - **Akceptace:** zakázka nad prahem doběhne bez lidského kliku do `waiting_approval`
-    s kompletním balíkem; pod prahem se nic neděje; denní limit vynucen; simulace na
-    historickém feedu ukazuje, kolik % by auto-triáž vzala (report pro Dana PŘED zapnutím).
+    s kompletním balíkem — **dál nikdy: per-item potvrzení všech položek člověkem zůstává
+    100 % (invariant), auto-triáž ho nezkracuje**; pod prahem se nic neděje; denní limit
+    vynucen; simulace na historickém feedu ukazuje, kolik % by auto-triáž vzala (report
+    pro Dana PŘED zapnutím).
   - **Závislosti:** D-02 (≥ 50 outcomes), B-05, F-01. **Velikost:** M. **Kdo:** Opus + Fable oponentura; **Dan zapíná** (business rozhodnutí).
   - **Rizika:** nekalibrovaný práh = plýtvání AI spend na špatné zakázky → tvrdá závislost na D-02.
 
@@ -631,6 +721,16 @@ throughput z vlny E. **Bez uzavřené právní otázky se F-02/F-03 NEZAČÍNÁ.
 | Sonnet | UI (cockpit, settings), F-03 doc |
 | Fable | oponentura F-01/F-02/F-04 (všechno money-path) |
 | **Dan (nenahraditelný)** | právní závěr (vstup vlny), každé ostré podání F-02, zapnutí F-04, schvalování nákupů F-05 |
+
+### SaaS větev — VĚDOMĚ ODLOŽENO (rozhodnutí po oponentuře)
+
+První externí zákazník jede **managed service** na naší instanci: obsluhujeme my, klient
+schvaluje go/no-go a každou položku (per-item attestace platí i pro něj), **žádný přímý
+přístup klienta do systému**. Samostatná SaaS-foundation větev (tenant izolace, role,
+onboarding, fakturace, lifecycle zákaznických dat) se otevírá **až po placené validaci**
+(opakovaná platba od ≥ 2 zákazníků) — do té doby se žádné multi-tenant tasky neplánují
+a architektura zůstává vědomě single-tenant (CLAUDE.md DEFER). Předpoklad externího
+pilotu: uzavřený okruh (c) právní konzultace A-09 (GDPR/licence dat/ToS) a T-06.
 
 ---
 
@@ -682,14 +782,20 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
     (součást definition of done vlny).
   - **Velikost:** S per vlna. **Kdo:** Sonnet.
 
-- [ ] **T-06 — GDPR / licenční režim dat (Registr smluv, Hlídač)** (před vlnou D akceptací; lidský krok)
-  - **Proč:** win-price data obsahují údaje z Registru smluv (mazání znepřístupněných záznamů),
-    Hlídač = CC BY 3.0 vs. komerční licence; před komercializací (SaaS) nutno vyřešit. Dimenze: business (riziko R6).
-  - **Postup:** (a) implementovat re-sync mazání znepřístupněných záznamů RS (malý kód
-    v `fetch-win-prices.ts`); (b) **Dan**: poptat komerční licenci Hlídače, rozhodnout režim.
+- [ ] **T-06 — GDPR / licence dat / ToS scrapingu (Registr smluv, Hlídač, NEN)** (**před prvním externím pilotem** — předsunuto po oponentuře; lidský krok + S kód)
+  - **Proč:** sběr a komerční použití dat začíná DŘÍV než vlna D — win-price data z Registru
+    smluv (mazání znepřístupněných záznamů), Hlídač CC BY 3.0 vs. komerční licence, NEN
+    scraping bez vyjasněných podmínek, ukládaná ZD. Před prvním placeným (concierge)
+    zákazníkem musí být čisto. Dimenze: business (riziko R6).
+  - **Postup:** (a) kód: re-sync mazání znepřístupněných záznamů RS (`fetch-win-prices.ts`);
+    (b) data inventory + právní titul + retence pro vše, co ukládáme (ZD, win-price,
+    monitoring feed); (c) právní závěr ke scrapingu NEN (ToS) a ukládání ZD — jde okruhem
+    (c) konzultace A-09; (d) **Dan**: poptat komerční licenci Hlídače, rozhodnout režim;
+    (e) DPA šablona pro concierge klienty.
   - **Akceptace:** znepřístupněný záznam RS zmizí z win_prices při dalším syncu (test);
-    licenční rozhodnutí zapsáno v `docs/plan/01-business-model.md` follow-upu.
-  - **Velikost:** S kód + rozhodnutí. **Kdo:** Codex + **Dan**.
+    body (b)–(e) uzavřené PŘED prvním externím placeným pilotem; licenční rozhodnutí
+    zapsáno v `docs/plan/01-business-model.md` follow-upu.
+  - **Velikost:** S kód + rozhodnutí/právo. **Kdo:** Codex + **Dan** + právník (A-09c).
 
 - [ ] **T-07 — Bug intake provoz** (průběžně, běží)
   - **Proč:** Slack #ludone-vz + GitHub issues Make-more-s-r-o/AIVZ — bugy od Patrika/uživatelů
@@ -697,24 +803,46 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
   - **Akceptace:** žádný money-path bug starší 24 h bez reakce.
   - **Kdo:** dle povahy (money-path → Opus + oponentura; UI → Sonnet).
 
+- [ ] **T-08 — Bottom-up SAM (adresovatelný trh)** (research; před prodejní expanzí)
+  - **Proč:** oponentura HIGH — top-down „40–45 tis. nabídek" z v1 byl nepoužitelný;
+    01 §1.1 teď přiznává, že SAM chybí, a definuje postup. Dimenze: business.
+  - **Postup:** open data VVZ/ISVZ (+ NEN export): filtr CPV komoditních dodávek → typ
+    řízení → ruční vzorek ZD na existenci položkového soupisu → velikost → kvalifikace;
+    výstup = počet obsloužitelných zakázek/rok × průměr nabídek v segmentu.
+  - **Akceptace:** číslo SAM s popsanou metodikou a limity zapsané v
+    `docs/plan/01-business-model.md` §1.1 (nahradí „zatím nemáme").
+  - **Velikost:** M (research). **Kdo:** Codex/Sonnet + Fable sanity, Dan interpretace.
+
+- [ ] **T-09 — Legacy `?token=` v backendu odstranit** (S; do konce vlny B)
+  - **Proč:** JWT je pryč z FE query stringu, ale backend query-parametr pro skripty
+    zůstal — token v query = token v nginx lozích. Dimenze: provoz/bezpečnost.
+  - **Soubory:** `scripts/src/lib/jwt-auth.ts` (query podporu vypnout), interní skripty
+    převést na Authorization hlavičku.
+  - **Akceptace:** request s `?token=` vrací 401; skripty fungují přes hlavičku.
+  - **Velikost:** S. **Kdo:** Codex.
+
 ---
 
 ## 8. Mapa závislostí mezi vlnami (souhrn)
 
 ```
-VLNA A (pilot + sběr)  ──┬─ kód (A-01,03,04) ──► VLNA B (verify/match) ──► VLNA C (poloautomat UX)
-                         │                                                        │
-                         └─ provoz (A-06,07,08) ─── podané nabídky ──► výsledky ──► VLNA D (feedback)
-                              A-05 token ────────────────────────────────► E-02   │
-                              A-09 právník ─────────────────(týdny–měsíce)────────┼──► VLNA F
-                                                                                  ▼
-                                                      metriky C drží 1 měsíc ► VLNA E (škálování)
-                                                      D-02 kalibrace (n≥50) ─► F-04 auto-triáž
+A-00 (entita+dodávka, Dan) ─── BLOKUJE ──► provoz vlny A (A-06,07,08)
+
+VLNA A ──┬─ kód (A-01,03,04) ──► VLNA B (B-00 kill-switch PRVNÍ; verify/match) ──► VLNA C (poloautomat UX)
+         │                                                                               │
+         └─ provoz (A-06,07,08) ─── podané nabídky ──► výsledky ──► VLNA D (feedback) ◄──┘
+              A-05 token ─────────────────────────────────► E-02
+              A-09 (a) NEN podání ────────(týdny–měsíce)──────────► VLNA F
+              A-09 (c) GDPR/data + T-06 ──► PŘED prvním externím (placeným) pilotem
+              obchodní kritérium (opakovaná platba / CM / kapacita dodat) ─► VLNA E (škálování)
+              D-02 kalibrace + backtest ─► D-03 krok 2 (P(win)); n≥50 ─► F-04 auto-triáž
 ```
 
 Kalendářní realita: **latence výsledků VZ (týdny) a právní konzultace (týdny–měsíce)
 jsou nejdelší cesty** — proto A-03, A-04, A-09 startují ve vlně A, i když „patří" do
 fází 3 a 5. Kód vln B/C se dělá, zatímco provoz vlny A čeká na lhůty a výsledky.
+Souběžná provozní stopa mimo vlny: **placené concierge validace** (design partneři,
+01 §5.1) — neblokují vlastní pilot a naopak.
 
 ---
 
@@ -770,13 +898,20 @@ fází 3 a 5. Kód vln B/C se dělá, zatímco provoz vlny A čeká na lhůty a 
 
 ## 10. Otevřené body pro majitele (soustředěno z celého plánu)
 
-1. **A-06/A-07:** výběr 2–3 pilotních zakázek + provedení podání — bez toho stojí business
-   dimenze celá.
-2. **A-05:** HLIDAC_TOKEN (+ rozhodnutí o komerční licenci Hlídače — souvisí s T-06).
-3. **A-09:** zadat právní konzultaci (NEN účet/zmocnění; SaaS odpovědnostní klauzule) —
-   nejdelší latence v plánu, blokuje vlnu F.
-4. **C-05:** revize vah go/no-go po pilotech; potvrzení reálné cílové marže per kategorie
+1. **A-00:** potvrzení strategie (managed service primárně, Model 0 omezený experiment)
+   + entita, **tvrdý strop kapitálové expozice v Kč**, minimální contribution margin —
+   **blokuje jakékoli reálné podání**.
+2. **Concierge:** 2–3 design partneři (MSP dodavatelé ze sítě) + pilotní cena per nabídka
+   (~1 990 Kč/CN [ODHAD]) — primární business, běží paralelně s vlastním pilotem.
+3. **A-06/A-07:** výběr pilotní zakázky (nejprve 1, po retrospektivě +2) + provedení
+   podání — bez toho stojí business dimenze celá.
+4. **A-05:** HLIDAC_TOKEN (+ rozhodnutí o komerční licenci Hlídače — souvisí s T-06).
+5. **A-09:** zadat právní konzultaci — tři okruhy (NEN podání; odpovědnost managed
+   service/SaaS; GDPR/licence dat/ToS scrapingu). Nejdelší latence v plánu; okruh (a)
+   blokuje vlnu F, okruh (c) blokuje externí pilot.
+6. **C-05:** revize vah go/no-go po pilotech; potvrzení reálné cílové marže per kategorie
    (dnes 10 % fallback — otevřeno z night2 §5.1).
-5. **E (vstup):** rozhodnutí o zdrojích feedu (TED, které profily zadavatelů) a případný
-   upsize VPS pro worker kontejner; denní AI budget (C-03 env hodnota).
-6. **F (vstup):** zapnutí auto-triáže (F-04) a režim podání (F-02) — výhradně Danovo go.
+7. **E (vstup):** potvrzení OBCHODNÍHO kritéria škálování (opakovaná platba / contribution
+   margin / kapacita dodat); zdroje feedu (TED, které profily zadavatelů); případný upsize
+   VPS pro worker kontejner; denní AI budget (C-03 env hodnota).
+8. **F (vstup):** zapnutí auto-triáže (F-04) a režim podání (F-02) — výhradně Danovo go.
