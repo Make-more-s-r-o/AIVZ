@@ -170,9 +170,10 @@ export interface JobStatus {
   totalLogLines: number;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
-    headers: authHeaders(),
+    ...init,
+    headers: { ...authHeaders(), ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
   });
   if (res.status === 401) {
     clearAuth();
@@ -1504,12 +1505,21 @@ export async function verifyPrices(id: string): Promise<{ jobId: string; status:
 export interface PrilohaChecklistItem {
   slot: string;
   label: string;
-  status: 'nahrano' | 'chybi';
+  status: 'nahrano' | 'chybi' | 'po_platnosti' | 'expiruje';
+  povinny: boolean;
   zdroj?: 'firma' | 'zakazka';
   filename?: string;
   platnost_do?: string | null;
   platnost_status?: 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
   poznamka?: string;  // např. „nahraný doklad je po platnosti" / „doklad brzy expiruje"
+  vyjimka?: { duvod: string; schvalil: string; at: string };
+}
+
+export async function createKvalifikaceVyjimka(id: string, slot: string, duvod: string): Promise<void> {
+  await fetchJson(`/tenders/${encodeURIComponent(id)}/kvalifikace/vyjimka`, {
+    method: 'POST',
+    body: JSON.stringify({ slot, duvod }),
+  });
 }
 
 export interface PrilohaChecklist {

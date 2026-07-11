@@ -29,8 +29,11 @@ import {
 } from './lib/company-store.js';
 import {
   DOC_SLOTS, type DocSlotType, type DocSlotEntry,
-  docExpiryStatus, daysUntilExpiry, isValidIsoDateString, buildChecklistItem,
+  docExpiryStatus, daysUntilExpiry, isValidIsoDateString,
 } from './lib/doc-slots.js';
+import {
+  buildPrilohaChecklist, isValidKvalifikaceVyjimka, validateVyjimkaInput, type KvalifikaceVyjimky,
+} from './lib/priloha-checklist.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
@@ -2578,8 +2581,6 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
     if (!Array.isArray(kval) || kval.length === 0) {
       return res.json({ items: [], company_id: null, analyza_hotova: !!analysis });
     }
-    const requiredSlots = mapQualifikaceToSlots(kval);
-
     // Firma zakázky (tender-meta.json) → manifest jejích dokladů.
     let companyId: string | null = null;
     try {
@@ -2587,13 +2588,10 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
       companyId = typeof meta.company_id === 'string' ? meta.company_id : null;
     } catch {}
     // Slot → firemní doklad (celý entry, nese platnost_do pro kontrolu expirace).
-    const slotToCompanyEntry = new Map<string, DocSlotEntry>();
+    let manifest = { version: 1, entries: [] as DocSlotEntry[] };
     if (companyId) {
       try {
-        const manifest = await getDocManifest(companyId);
-        for (const e of manifest.entries) {
-          if (!slotToCompanyEntry.has(e.slot)) slotToCompanyEntry.set(e.slot, e);
-        }
+        manifest = await getDocManifest(companyId);
       } catch {}
     }
 
@@ -2602,20 +2600,42 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
     try {
       attachments = (await readdir(join(OUTPUT_DIR, id, 'prilohy'))).filter((f) => !f.startsWith('.'));
     } catch {}
-    const attachmentsLower = attachments.map((f) => f.toLowerCase());
-
-    const items = requiredSlots.map((slot) => {
-      const label = DOC_SLOTS.find((s) => s.type === slot)?.label ?? slot;
-      const companyEntry = slotToCompanyEntry.get(slot) ?? null;
-      const companyFile = companyEntry?.filename;
-      // Příloha zakázky se páruje volně dle názvu slotu/souboru firmy (přílohy nemají sloty).
-      const attMatch = attachments.find((f, i) =>
-        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, ''))) ?? null;
-      // Expirace se vyhodnocuje z firemního dokladu (viz buildChecklistItem).
-      return buildChecklistItem({ slot, label, companyEntry, attachmentFilename: attMatch });
-    });
+    let vyjimky: KvalifikaceVyjimky = {};
+    try { vyjimky = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'kvalifikace-vyjimky.json'), 'utf-8')); } catch {}
+    const items = buildPrilohaChecklist({ kvalifikace: kval, manifest, attachments }).map((item) => ({
+      ...item,
+      vyjimka: isValidKvalifikaceVyjimka(vyjimky[item.slot]) ? vyjimky[item.slot] : undefined,
+    }));
 
     res.json({ items, company_id: companyId, analyza_hotova: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Auditovaná výjimka pouze pro kvalifikační gate. Identita schvalovatele se vždy
+// bere z ověřeného JWT; klient ji nemůže podvrhnout v request body.
+app.post('/api/tenders/:id/kvalifikace/vyjimka', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const id = String(req.params.id);
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const input = validateVyjimkaInput(req.body);
+  if (!input) {
+    return res.status(400).json({ error: 'duvod_too_short', reason: 'Důvod musí mít alespoň 10 znaků.' });
+  }
+  const { slot, duvod } = input;
+  try {
+    const path = join(OUTPUT_DIR, id, 'kvalifikace-vyjimky.json');
+    let vyjimky: KvalifikaceVyjimky = {};
+    try { vyjimky = JSON.parse(await readFile(path, 'utf-8')); } catch {}
+    const actor = (req as any).user;
+    vyjimky[slot as DocSlotType] = {
+      duvod,
+      schvalil: actor?.name || actor?.email || actor?.sub,
+      at: new Date().toISOString(),
+    };
+    await mkdir(join(OUTPUT_DIR, id), { recursive: true });
+    await writeFile(path, JSON.stringify(vyjimky, null, 2), 'utf-8');
+    res.json({ success: true, slot, vyjimka: vyjimky[slot as DocSlotType] });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
