@@ -34,7 +34,7 @@ const WAREHOUSE_TAB_LABELS: Record<WarehouseTab, string> = {
   dashboard: 'Přehled', products: 'Produkty', import: 'Import', scraping: 'Scraping', sources: 'Zdroje',
 };
 const SETTINGS_LABELS: Record<SettingsSection, string> = {
-  firmy: 'Firmy', monitoring: 'Monitoring', uzivatele: 'Uživatelé a role', heslo: 'Heslo', stitky: 'Štítky',
+  firmy: 'Firmy', monitoring: 'Monitoring', governance: 'Governance / Kill-switch', uzivatele: 'Uživatelé a role', heslo: 'Heslo', stitky: 'Štítky',
 };
 
 function parseHash(): Route {
@@ -66,6 +66,7 @@ function parseHash(): Route {
   if (path === '/warehouse/dashboard') return { view: 'warehouse', tab: 'dashboard' };
   if (path === '/settings/companies') return { view: 'settings', section: 'firmy' };
   if (path === '/settings/monitoring') return { view: 'settings', section: 'monitoring' };
+  if (path === '/settings/governance') return { view: 'settings', section: 'governance' };
   if (path === '/settings/users') return { view: 'settings', section: 'uzivatele' };
   if (path === '/settings/password') return { view: 'settings', section: 'heslo' };
   if (path === '/settings/tags') return { view: 'settings', section: 'stitky' };
@@ -194,6 +195,7 @@ export default function App() {
           onNavSection={(s) => navigate(
             s === 'firmy' ? '/settings/companies'
               : s === 'monitoring' ? '/settings/monitoring'
+                : s === 'governance' ? '/settings/governance'
                 : s === 'uzivatele' ? '/settings/users'
                   : s === 'heslo' ? '/settings/password'
                     : '/settings/tags'

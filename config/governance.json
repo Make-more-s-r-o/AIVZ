@@ -1,0 +1,11 @@
+{
+  "ingest_enabled": true,
+  "ai_jobs_enabled": true,
+  "generate_enabled": true,
+  "finalize_enabled": true,
+  "submission_enabled": true,
+  "denni_ai_limit_czk": 2000,
+  "poznamka": null,
+  "zmeneno_at": null,
+  "zmeneno_kym": null
+}

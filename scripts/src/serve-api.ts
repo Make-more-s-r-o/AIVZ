@@ -107,6 +107,14 @@ import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
 import { getMonitoringConfig, saveMonitoringConfig } from './lib/monitoring/monitoring-config.js';
 import {
+  GovernancePatchSchema,
+  dailyAiLimitBlock,
+  getGovernance,
+  governanceSwitchBlock,
+  setGovernance,
+  type GovernanceSwitch,
+} from './lib/governance.js';
+import {
   RUN_ALL_STEPS,
   ApprovalRequiredError,
   advanceRunAllChain,
@@ -559,6 +567,8 @@ function startJob(job: Job) {
       return;
     }
     void advanceRunAllChain(parent, job, async (nextStep) => {
+      const governanceError = await aiEnqueueBlock(nextStep);
+      if (governanceError) throw new Error(governanceError);
       // Money-gate před generate: nepotvrzené ceny řetězec NEshodí do error, ale PAUZNOU
       // ho do waiting_approval (ApprovalRequiredError). Lidský checkpoint, ne chyba.
       if (nextStep === 'generate') {
@@ -802,6 +812,50 @@ function requireRole(...roles: UserRole[]) {
   };
 }
 
+/** Sdílený HTTP guard governance. Volání s checkAiLimit patří výhradně těsně před enqueue. */
+async function enforceGovernance(
+  res: express.Response,
+  key: GovernanceSwitch,
+  checkAiLimit = false,
+): Promise<boolean> {
+  try {
+    const governance = await getGovernance();
+    const switchError = governanceSwitchBlock(governance, key);
+    if (switchError) {
+      res.status(503).json({ error: switchError, governance_switch: key });
+      return false;
+    }
+    if (checkAiLimit) {
+      const aiError = governanceSwitchBlock(governance, 'ai_jobs_enabled');
+      if (aiError) {
+        res.status(503).json({ error: aiError, governance_switch: 'ai_jobs_enabled' });
+        return false;
+      }
+      const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+      if (limitError) {
+        res.status(503).json({ error: limitError, governance_switch: 'denni_ai_limit_czk' });
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    res.status(503).json({ error: `Governance konfiguraci nelze ověřit: ${String(error)}` });
+    return false;
+  }
+}
+
+/** Kontrola pro navazující AI kroky run/all, které se enqueueují bez HTTP response. */
+async function aiEnqueueBlock(step: string): Promise<string | null> {
+  const governance = await getGovernance();
+  const aiError = governanceSwitchBlock(governance, 'ai_jobs_enabled');
+  if (aiError) return aiError;
+  if (step === 'generate') {
+    const generateError = governanceSwitchBlock(governance, 'generate_enabled');
+    if (generateError) return generateError;
+  }
+  return dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+}
+
 // GET /api/auth/status - check if setup is required
 app.get('/api/auth/status', async (_req, res) => {
   try {
@@ -931,10 +985,44 @@ app.put('/api/monitoring/config', requireJwt, async (req, res) => {
   }
 });
 
+// GET/PUT /api/governance — kill-switch je čitelný všem přihlášeným, mění jej jen admin.
+app.get('/api/governance', requireJwt, async (_req, res) => {
+  try {
+    res.json(await getGovernance());
+  } catch (err) {
+    res.status(500).json({ error: `Governance konfiguraci nelze načíst: ${String(err)}` });
+  }
+});
+
+app.put('/api/governance', requireJwt, requireRole('admin'), async (req, res) => {
+  try {
+    // Metadata poslaná klientem schema odfiltruje; autorita identity je pouze JWT.
+    const patch = GovernancePatchSchema.parse(req.body);
+    const previous = await getGovernance();
+    const user = (req as any).user;
+    const identity = String(user?.name || user?.email || user?.sub || 'admin');
+    const saved = await setGovernance(patch, identity);
+    const diff = Object.fromEntries(Object.keys(patch).map((key) => [key, {
+      predchozi: previous[key as keyof typeof previous],
+      nova: saved[key as keyof typeof saved],
+    }]));
+    const payload = { diff, identity, zmeneno_at: saved.zmeneno_at };
+    await logActivity('__governance__', 'governance_zmena', user?.sub ?? null, payload);
+    console.info('governance_zmena', JSON.stringify(payload));
+    res.json(saved);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.issues[0]?.message ?? 'Neplatné nastavení Governance.' });
+    }
+    res.status(500).json({ error: `Governance konfiguraci nelze uložit: ${String(err)}` });
+  }
+});
+
 // POST /api/monitoring/sync - natáhne nové zakázky ze zdroje do tabulky monitoring_zakazky.
 // Idempotentní: opakovaný běh nové jen doplní, stav dřív převzatých/ignorovaných nechá.
 // zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
 app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
+  if (!(await enforceGovernance(res, 'ingest_enabled'))) return;
   try {
     const zdroj = (typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen') as MonitoringSource;
     const hasExplicitQuery = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'q');
@@ -1034,6 +1122,8 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const actor = (req as any).user?.sub ?? null;
   const stahnoutZd = req.body?.stahnout_zd === true;
   const spustit = req.body?.spustit === true;
+  if (!(await enforceGovernance(res, 'ingest_enabled'))) return;
+  if (spustit && !(await enforceGovernance(res, 'ai_jobs_enabled', true))) return;
   try {
     const item = await getFeedItem(id);
     if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
@@ -2627,6 +2717,7 @@ app.get('/api/jobs/:jobId', (req, res) => {
 // POST /api/tenders/:id/run/all - zařadí celý pipeline jako jeden řetězený job
 app.post('/api/tenders/:id/run/all', async (req, res) => {
   const { id } = req.params;
+  if (!(await enforceGovernance(res, 'ai_jobs_enabled', true))) return;
   try {
     await stat(join(INPUT_DIR, id));
   } catch {
@@ -2646,6 +2737,7 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
 // stále nepotvrzené ceny → 409 s počtem.
 app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   const { id } = req.params;
+  if (!(await enforceGovernance(res, 'generate_enabled', true))) return;
 
   // Bez await mezi nalezením a změnou stavu: první request synchronně claimne parent job,
   // druhý už waiting_approval neuvidí a nemůže zařadit duplicitní generate.
@@ -2702,6 +2794,12 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
 
   if (!STEP_FILES[step]) {
     return res.status(400).json({ error: `Unknown step: ${step}` });
+  }
+
+  const aiSteps = new Set(['analyze', 'match', 'generate', 'validate', 'verify-prices']);
+  if (aiSteps.has(step)) {
+    const governanceKey: GovernanceSwitch = step === 'generate' ? 'generate_enabled' : 'ai_jobs_enabled';
+    if (!(await enforceGovernance(res, governanceKey, true))) return;
   }
 
   // Check input exists
@@ -3085,6 +3183,7 @@ async function buildSubmissionBundle(tenderId: string): Promise<{ manifest: Subm
 // NEPŘEPÍNÁ na 'odeslana' — to dělá až POST /podano se skutečnou evidencí podání.
 app.post('/api/tenders/:id/finalize', async (req, res) => {
   const { id } = req.params;
+  if (!(await enforceGovernance(res, 'finalize_enabled'))) return;
   if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
   const outputDir = join(OUTPUT_DIR, id);
   const evidenceConflict = finalizeEvidenceConflict(existsSync(join(outputDir, 'podani', 'evidence.json')));
@@ -3179,6 +3278,7 @@ app.get('/api/tenders/:id/podani/download', async (req, res) => {
 // zakázku na 'odeslana'. Vyžaduje existující balík (manifest).
 app.post('/api/tenders/:id/podano', async (req, res) => {
   const { id } = req.params;
+  if (!(await enforceGovernance(res, 'submission_enabled'))) return;
   if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   const parsed = evidenceInputSchema.safeParse(req.body);
