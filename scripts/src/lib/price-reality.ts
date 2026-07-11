@@ -35,6 +35,20 @@ function packageCostForGuard(source: WebPriceSource): number | null {
  * neznámé balení vrací null a nesmí ovlivnit peněžní gate.
  */
 export function realCostForQuantity(source: WebPriceSource, mnozstvi: number): number | null {
+  // Kritický money-path invariant: nedoložená shoda nikdy nesmí aktivovat HARD gate.
+  if (source.orientacni === true) return null;
+  const packageSize = positiveNumber(source.baleni_ks);
+  const packageCost = packageCostForGuard(source);
+  const quantity = positiveNumber(mnozstvi);
+  if (packageSize === null || packageCost === null || quantity === null) return null;
+  return Math.ceil(quantity / packageSize) * packageCost;
+}
+
+/**
+ * Referenční náklad pro neblokující WARN. Na rozdíl od HARD guardu smí číst i
+ * orientační zdroj, ale nesmí být použit jako autoritativní nákupní cena.
+ */
+export function informationalCostForQuantity(source: WebPriceSource, mnozstvi: number): number | null {
   const packageSize = positiveNumber(source.baleni_ks);
   const packageCost = packageCostForGuard(source);
   const quantity = positiveNumber(mnozstvi);
@@ -72,11 +86,13 @@ export function compareAiVsMarket(
   const market = cheapest?.unit ?? null;
   const validAi = positiveNumber(aiCenaBezDph);
   const excludedUnavailable = zdroje.some((source) => !isAvailableForGuard(source));
-  const excludedPackaging = zdroje.some((source) => isAvailableForGuard(source) && positiveNumber(source.baleni_ks) === null);
+  const excludedOrientational = zdroje.some((source) => source.orientacni === true);
+  const excludedPackaging = zdroje.some((source) => source.orientacni !== true && isAvailableForGuard(source) && positiveNumber(source.baleni_ks) === null);
 
   const notes: string[] = [];
   if (zdroje.length > 0 && usable.length === 0) notes.push('Žádný použitelný zdroj pro ochranu proti ztrátě.');
   if (excludedUnavailable) notes.push('Nedostupné zdroje a zdroje na dotaz byly z ochrany vyloučeny.');
+  if (excludedOrientational) notes.push('Orientační zdroje bez doložené shody parametrů byly z ochrany proti ztrátě vyloučeny.');
   if (excludedPackaging) notes.push('Zdroj s nejasným počtem kusů v balení byl z ochrany vyloučen.');
   if (cheapest?.source.sazba_dph === null) notes.push('Kvůli nejasné sazbě DPH byla použita cena s DPH jako konzervativní horní odhad.');
 

@@ -252,6 +252,8 @@ export const BID_MATCH_QUALITY_WEIGHT = 25;
 export const BID_WIN_PRICE_WEIGHT = 25;
 // WARN za prodej pod ověřenou nákupní cenou skóre viditelně sníží, ale sám nevynutí NOGO.
 export const BID_BELOW_MARKET_PENALTY = 15;
+// Každý AI kandidát doloženě vyvrácený fází 1 snižuje důvěru v kvalitu shod.
+export const BID_NONEXISTENT_CANDIDATE_PENALTY = 5;
 
 // Cílový absolutní hrubý zisk, při kterém je faktor plně nasycen (value = 1).
 export const BID_TARGET_PROFIT_CZK = 50_000;
@@ -270,6 +272,7 @@ export interface BidEconomics {
   slabych_polozek: number;  // bez reálné shody / nízká spolehlivost / bez ceny
   hard_flagu: number;
   ztratovych_polozek: number;
+  neexistujicich_kandidatu: number;
 }
 
 export interface BidScoreResult {
@@ -299,6 +302,7 @@ interface BidLineItem {
     potvrzeno?: boolean;
   };
   sanity_flags?: Array<{ level?: string; code?: string }>;
+  overeni_ceny?: { kandidat_neexistuje?: boolean };
 }
 
 function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
@@ -313,6 +317,7 @@ function normalizeBidItems(productMatch?: ProductMatch): BidLineItem[] {
       kandidati: productMatch.kandidati,
       cenova_uprava: productMatch.cenova_uprava,
       sanity_flags: [],
+      overeni_ceny: productMatch.overeni_ceny,
     }];
   }
   return [];
@@ -347,6 +352,7 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
   let slabych = 0;
   let hardFlagu = 0;
   let ztratovychPolozek = 0;
+  let neexistujicichKandidatu = 0;
 
   for (const item of items) {
     const mnozstvi = isPositiveNumber(item.mnozstvi) ? item.mnozstvi : 1;
@@ -354,6 +360,7 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
     const itemFindings = currentFindings.filter((finding) => finding.polozka_index === item.polozka_index);
     hardFlagu += itemFindings.filter((finding) => finding.level === 'hard').length;
     if (itemFindings.some((finding) => finding.code === 'cena_pod_nakupem')) ztratovychPolozek++;
+    if (item.overeni_ceny?.kandidat_neexistuje === true) neexistujicichKandidatu++;
 
     const uprava = item.cenova_uprava;
     const nabidkova = isPositiveNumber(uprava?.nabidkova_cena_bez_dph)
@@ -392,6 +399,7 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
     slabych_polozek: slabych,
     hard_flagu: hardFlagu,
     ztratovych_polozek: ztratovychPolozek,
+    neexistujicich_kandidatu: neexistujicichKandidatu,
   };
 }
 
@@ -462,6 +470,14 @@ export function scoreBid(
   if (econ.ztratovych_polozek > 0) {
     score = Math.max(0, score - BID_BELOW_MARKET_PENALTY);
     duvody.unshift(`${econ.ztratovych_polozek} položek by se prodávalo pod reálnou nákupní cenou.`);
+  }
+
+  if (econ.neexistujicich_kandidatu > 0) {
+    const penalty = econ.neexistujicich_kandidatu * BID_NONEXISTENT_CANDIDATE_PENALTY;
+    score = Math.max(0, score - penalty);
+    duvody.unshift(
+      `${econ.neexistujicich_kandidatu}× AI navržený produkt byl webovým ověřením vyvrácen (srážka ${penalty} bodů za kvalitu shod).`,
+    );
   }
 
   // (d) HARD sanity flag = automatická srážka a NOGO strop — cena není důvěryhodná.

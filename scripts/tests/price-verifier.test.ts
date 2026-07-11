@@ -9,13 +9,15 @@ import {
   parseWebPriceResponse,
   verifyAllPrices,
   verifyItemPrice,
+  EQUIVALENT_MAX_SEARCHES,
+  WEB_SEARCH_PHASE_TIMEOUT_MS,
   type PriceVerifierAiClient,
 } from '../src/lib/price-verifier.js';
 import type { ProductMatch, TenderAnalysis } from '../src/lib/types.js';
 
 const FIXTURES = new URL('./fixtures/', import.meta.url);
 
-function fakeAiClient(responses: string[], calls: Array<{ system: string; user: string }>): PriceVerifierAiClient {
+function fakeAiClient(responses: string[], calls: Array<{ system: string; user: string; maxUses?: number }>): PriceVerifierAiClient {
   let index = 0;
   return {
     messages: {
@@ -24,6 +26,7 @@ function fakeAiClient(responses: string[], calls: Array<{ system: string; user: 
         calls.push({
           system: typeof params.system === 'string' ? params.system : '',
           user: typeof user === 'string' ? user : JSON.stringify(user),
+          maxUses: (params.tools?.[0] as { max_uses?: number } | undefined)?.max_uses,
         });
         const text = responses[index++];
         assert.notEqual(text, undefined, 'Mock AI klient dostal více volání, než test očekával');
@@ -101,9 +104,71 @@ test('dvoufázové ověření spustí fallback jen po nenalezení a bez AI výro
   const fallbackPrompt = `${calls[1]!.system}\n${calls[1]!.user}`;
   assert.doesNotMatch(fallbackPrompt, /Mirka/i);
   assert.doesNotMatch(fallbackPrompt, /Gold 150 mm P80 plný disk/i);
+  assert.match(calls[1]!.system, /U KAŽDÉHO zdroje je POVINNÉ vyplnit nazev_produktu/);
+  assert.match(calls[1]!.system, /zdroj i tak vrať — operátor si ho ověří sám/);
   assert.equal(result.stav, 'ekvivalent');
   assert.equal(result.shoda_typ, 'ekvivalent');
   assert.equal(result.web_cena_bez_dph, 65);
+});
+
+test('fáze 2 má vlastní čtyřminutový limit a nejvýše tři webové search requesty', async () => {
+  const calls: Array<{ system: string; user: string; maxUses?: number }> = [];
+  await verifyItemPrice({
+    vyrobce: 'Test', model: 'Neznámý', nazev: 'Test',
+    specifikace: 'Dostatečně dlouhá závazná specifikace zadavatele',
+  }, {
+    maxSearches: 8,
+    aiClient: fakeAiClient([NOT_FOUND, sourceResponse({ matchType: 'ekvivalent' })], calls),
+  });
+
+  assert.equal(WEB_SEARCH_PHASE_TIMEOUT_MS, 240_000);
+  assert.equal(EQUIVALENT_MAX_SEARCHES, 3);
+  assert.equal(calls[0]?.maxUses, 8);
+  assert.equal(calls[1]?.maxUses, 3);
+});
+
+test('chyba fáze 2 zachová výsledek fáze 1 a uloží české vysvětlení', async () => {
+  let call = 0;
+  const aiClient: PriceVerifierAiClient = {
+    messages: {
+      async create() {
+        call++;
+        if (call === 2) throw Object.assign(new Error('upstream timeout'), { name: 'AbortError' });
+        return {
+          id: 'msg_first', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
+          content: [{ type: 'text', text: NOT_FOUND, citations: null }],
+          stop_reason: 'end_turn', stop_sequence: null,
+          usage: { input_tokens: 11, output_tokens: 7 },
+        };
+      },
+    },
+  };
+  const result = await verifyItemPrice({
+    vyrobce: 'Test', model: 'X', nazev: 'Položka',
+    specifikace: 'Dostatečně dlouhá závazná specifikace zadavatele',
+  }, { aiClient });
+
+  assert.equal(result.stav, 'nenalezeno');
+  assert.match(result.poznamka ?? '', /Hledání ekvivalentu překročilo časový limit 4 minuty/);
+  assert.match(result.poznamka ?? '', /Výsledek první fáze byl zachován/);
+});
+
+test('ekvivalent označí explicitně vyvrácený AI kandidát, obyčejné nenalezení nikoli', async () => {
+  const explicitNotFound = JSON.stringify({
+    nalezeno: false, shoda_typ: 'presny', mena: 'CZK', zdroje: [],
+    poznamka: 'Výrobce uvádí jiné rozměry a parametry neodpovídají zadání.',
+  });
+  const explicit = await verifyItemPrice({
+    vyrobce: 'Test', model: 'Vymyšlený', nazev: 'Položka',
+    specifikace: 'Dostatečně dlouhá závazná specifikace zadavatele',
+  }, { aiClient: fakeAiClient([explicitNotFound, sourceResponse({ matchType: 'ekvivalent' })], []) });
+  const uncertain = await verifyItemPrice({
+    vyrobce: 'Test', model: 'Nedohledaný', nazev: 'Položka',
+    specifikace: 'Dostatečně dlouhá závazná specifikace zadavatele',
+  }, { aiClient: fakeAiClient([NOT_FOUND, sourceResponse({ matchType: 'ekvivalent' })], []) });
+
+  assert.equal(explicit.kandidat_neexistuje, true);
+  assert.equal(uncertain.kandidat_neexistuje, false);
 });
 
 test('dvoufázové ověření fallback nespustí, když přesná fáze našla použitelný zdroj', async () => {
@@ -361,17 +426,34 @@ test('H3: výsledek se po souběžné změně kandidáta nepřilepí k jiné vol
   assert.equal(match.polozky_match?.[0]?.overeni_ceny, undefined);
 });
 
-test('H5: parser odmítne HTTP, vyhledávací URL, cizí měnu a nedoložený ekvivalent', () => {
+test('H5: parser odmítne HTTP, vyhledávací URL a cizí měnu', () => {
   const common = { cena_bez_dph: 100, cena_s_dph: 121, prodava_po_kusech: true, dostupnost: 'skladem' };
   for (const payload of [
     { shoda_typ: 'presny', mena: 'CZK', zdroje: [{ ...common, url: 'http://shop.cz/produkt' }] },
     { shoda_typ: 'presny', mena: 'CZK', zdroje: [{ ...common, url: 'https://shop.cz/search?q=model' }] },
     { shoda_typ: 'presny', mena: 'EUR', zdroje: [{ ...common, url: 'https://shop.cz/produkt' }] },
-    { shoda_typ: 'ekvivalent', mena: 'CZK', zdroje: [{ ...common, url: 'https://shop.cz/produkt', nazev_produktu: 'X', splnuje_specifikaci: false, shoda_parametru: [] }] },
   ]) {
     const parsed = parseWebPriceResponse(JSON.stringify({ nalezeno: true, ...payload }), { specifikace: 'Dostatečně dlouhá závazná specifikace' });
     assert.equal(parsed.stav, 'nenalezeno');
   }
+});
+
+test('nedoložený ekvivalent s platnou CZK cenou zůstane jako orientační zdroj', () => {
+  const parsed = parseWebPriceResponse(JSON.stringify({
+    nalezeno: true,
+    shoda_typ: 'ekvivalent',
+    mena: 'CZK',
+    zdroje: [{
+      url: 'https://shop.cz/produkt', dodavatel: 'Shop', cena_bez_dph: 100, cena_s_dph: 121,
+      prodava_po_kusech: true, dostupnost: 'skladem', splnuje_specifikaci: false,
+    }],
+  }), { ai_cena_bez_dph: 80, specifikace: 'Dostatečně dlouhá závazná specifikace' });
+
+  assert.equal(parsed.stav, 'orientacni');
+  assert.equal(parsed.zdroje?.[0]?.orientacni, true);
+  assert.equal(parsed.zdroje?.[0]?.splnuje_specifikaci, false);
+  assert.equal(parsed.realita?.nejlevnejsi_bez_dph, null);
+  assert.match(parsed.realita?.poznamka ?? '', /Orientační zdroje.*vyloučeny/);
 });
 
 test('H5: nekonzistentní DPH opraví hrubou cenu z ceny bez DPH a označí poznámkou', () => {

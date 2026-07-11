@@ -179,6 +179,7 @@ export const PriceSanityFlagSchema = z.object({
     'outlier_vs_batch',
     'extreme_outlier',
     'cena_pod_nakupem',
+    'orientacni_cena_nad_nabidkou',
     // Historické soubory zůstanou čitelné; při parse se starý název přepíše.
     'ai_cena_pod_trhem',
   ]).transform((code) => code === 'ai_cena_pod_trhem' ? 'cena_pod_nakupem' as const : code),
@@ -206,10 +207,12 @@ export const WebPriceSourceSchema = z.object({
   poznamka: z.string().nullable(),
   splnuje_specifikaci: z.boolean().optional(),
   shoda_parametru: z.array(z.string()).optional(),
+  // Orientační zdroj má použitelný odkaz a cenu, ale AI nedoložila shodu parametrů.
+  orientacni: z.boolean().optional(),
 });
 
 export const OvereniCenySchema = z.object({
-  stav: z.enum(['nalezeno', 'ekvivalent', 'nenalezeno', 'chyba']),
+  stav: z.enum(['nalezeno', 'ekvivalent', 'orientacni', 'nenalezeno', 'chyba']),
   // Nová pole jsou volitelná, aby zůstaly čitelné historické soubory se stavem `nalezeno`.
   shoda_typ: z.enum(['presny', 'ekvivalent']).optional(),
   web_cena_bez_dph: z.number().optional(),
@@ -222,6 +225,7 @@ export const OvereniCenySchema = z.object({
   overeno_at: z.string().datetime(),
   kandidat_fingerprint: z.string().optional(),
   prekracuje_strop: z.boolean().optional(),
+  kandidat_neexistuje: z.boolean().optional(),
   zdroje: z.array(WebPriceSourceSchema).max(3).optional(),
   realita: z.object({
     nejlevnejsi_bez_dph: z.number().nullable(),

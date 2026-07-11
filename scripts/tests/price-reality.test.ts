@@ -11,6 +11,7 @@ function source(options: {
   availability?: WebPriceSource['dostupnost'];
   tax?: number | null;
   supplier?: string;
+  orientacni?: boolean;
 } = {}): WebPriceSource {
   return {
     url: `https://shop.cz/${options.supplier ?? 'produkt'}`,
@@ -23,6 +24,7 @@ function source(options: {
     ...(options.tax !== undefined ? { sazba_dph: options.tax } : {}),
     dostupnost: options.availability ?? 'skladem',
     poznamka: null,
+    ...(options.orientacni ? { orientacni: true } : {}),
   };
 }
 
@@ -69,6 +71,16 @@ test('H4: bez použitelného zdroje zůstane guard neaktivní s poznámkou', () 
   assert.equal(reality.nejlevnejsi_bez_dph, null);
   assert.equal(reality.pod_trhem, false);
   assert.match(reality.poznamka ?? '', /Žádný použitelný zdroj/);
+});
+
+test('orientační zdroj se nikdy nezapočítá do ochrany proti ztrátě', () => {
+  const orientational = source({ net: 500, gross: 605, pack: 1, orientacni: true });
+  const reality = compareAiVsMarket(100, [orientational]);
+
+  assert.equal(realCostForQuantity(orientational, 1), null);
+  assert.equal(reality.nejlevnejsi_bez_dph, null);
+  assert.equal(reality.pod_trhem, false);
+  assert.match(reality.poznamka ?? '', /Orientační zdroje.*vyloučeny/);
 });
 
 test('M1: gross-only s typickou sazbou dopočte čistou cenu, nejasná sazba použije hrubou cenu', () => {

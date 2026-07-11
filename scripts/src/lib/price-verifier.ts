@@ -29,11 +29,14 @@ config({ path: new URL('../../../.env', import.meta.url).pathname });
 const USD_TO_CZK = 24;
 // Web search je účtován $10 za 1000 requestů (tokeny se počítají zvlášť)
 const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
+// Každá fáze dostává vlastní wall-clock rozpočet; fallback tedy nedědí vyčerpaný čas fáze 1.
+export const WEB_SEARCH_PHASE_TIMEOUT_MS = 4 * 60 * 1000;
+export const EQUIVALENT_MAX_SEARCHES = 3;
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
-  // Server-side web search přidává latenci (běh vyhledávání) — 3 min je bezpečná rezerva
-  timeout: 3 * 60 * 1000,
+  // Server-side web search může být pomalý; stejný strop hlídáme i wall-clock deadlinem fáze.
+  timeout: WEB_SEARCH_PHASE_TIMEOUT_MS,
   // Vlastní retry loop níže (createWithRetry) — SDK retry vypnut kvůli kontrole nad 429/5xx
   maxRetries: 0,
 });
@@ -68,7 +71,10 @@ export interface VerifyItemOptions {
 
 export interface PriceVerifierAiClient {
   messages: {
-    create(params: Anthropic.MessageCreateParamsNonStreaming): PromiseLike<Anthropic.Message>;
+    create(
+      params: Anthropic.MessageCreateParamsNonStreaming,
+      options?: { signal?: AbortSignal },
+    ): PromiseLike<Anthropic.Message>;
   };
 }
 
@@ -98,6 +104,7 @@ export interface VerifyAllResult {
     total: number;
     nalezeno: number;
     nenalezeno: number;
+    orientacni: number;
     chyba: number;
     prekracuje_strop: number;
     faze1_nalezeno: number;
@@ -123,6 +130,7 @@ Pravidla:
 - Hledej pouze přesný produkt podle uvedeného výrobce a modelu. Nalezené zdroje označ shoda_typ="presny".
 - Výrobce a model níže jsou NEZÁVAZNÝ ODHAD AI, ne požadavek zadavatele.
 - V této fázi nenabízej jinou značku ani náhradní produkt. Pokud přesný produkt nenajdeš, vrať nalezeno=false.
+- Pokud ověříš, že model neexistuje nebo má proti zadání jiné parametry, napiš tento závěr výslovně a konkrétně do poznamka. Samotné „nenalezeno“ není důkaz neexistence.
 - U každého zdroje zjisti skutečný počet kusů v prodávaném balení (baleni_ks) a cenu celého balení s DPH (cena_baleni_s_dph). Nic nepřepočítávej na fiktivní jednotlivý kus. Pokud e-shop jasně prodává po jednom kusu, nastav baleni_ks=1 a prodava_po_kusech=true. Když počet kusů nelze ověřit, nastav baleni_ks=null a prodava_po_kusech=false.
 - Najdi až 3 různé nákupní zdroje. Preferuj e-shopy, kde je produkt skladem a s jasně uvedenou cenou.
 - Uveď cenu celého balení bez DPH i s DPH. Uveď sazba_dph=21, jen když je známá nebo jde o běžné zboží s typickou sazbou; jinak sazba_dph=null.
@@ -143,16 +151,18 @@ Zadavatel nepředepisuje značku. Najdi v českých e-shopech konkrétní produk
 
 Pravidla:
 - Hledej výhradně v českých e-shopech (ceny v Kč, doména .cz).
-- Každý zdroj označ shoda_typ="ekvivalent", splnuje_specifikaci=true a v shoda_parametru konkrétně vyjmenuj všechna ověřená závazná kritéria.
-- Pokud u produktu nelze doložit splnění všech kritérií, nezařazuj ho.
+- Každý zdroj označ shoda_typ="ekvivalent".
+- U KAŽDÉHO zdroje je POVINNÉ vyplnit nazev_produktu (přesný název z e-shopu) a shoda_parametru (které parametry jsi ověřil).
+- Pokud si u některého parametru NEJSI jistý, uveď splnuje_specifikaci=false, ale zdroj i tak vrať — operátor si ho ověří sám.
+- splnuje_specifikaci=true použij pouze tehdy, když jsou na produktové stránce doložena všechna závazná kritéria.
 - U každého zdroje zjisti skutečný počet kusů v prodávaném balení (baleni_ks) a cenu celého balení s DPH (cena_baleni_s_dph). Nic nepřepočítávej na fiktivní jednotlivý kus. Pokud e-shop jasně prodává po jednom kusu, nastav baleni_ks=1 a prodava_po_kusech=true. Když počet kusů nelze ověřit, nastav baleni_ks=null a prodava_po_kusech=false.
 - Preferuj zboží skladem s jasně uvedenou cenou. Uveď cenu celého balení bez DPH i s DPH. Uveď sazba_dph=21, jen když je známá nebo jde o běžné zboží s typickou sazbou; jinak sazba_dph=null.
 - Vrať přímý HTTPS odkaz na konkrétní produktovou stránku, nikdy na výsledky vyhledávání, a skutečný název z této stránky.
 - Zdroje seřaď od nejlevnějšího podle ceny s DPH a neopakuj stejnou URL.
 
 Odpověz VÝHRADNĚ jedním JSON objektem jako ÚPLNĚ POSLEDNÍ blok textu, bez jakéhokoli komentáře za ním, přesně v tomto tvaru:
-{"nalezeno": true|false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "mena": "CZK", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "cena_baleni_s_dph": číslo|null, "baleni_ks": číslo|null, "prodava_po_kusech": true|false, "sazba_dph": 21|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "splnuje_specifikaci": true, "shoda_parametru": ["ověřený parametr"], "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
-Když žádný produkt nesplňuje všechna kritéria, vrať {"nalezeno": false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
+{"nalezeno": true|false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "mena": "CZK", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "cena_baleni_s_dph": číslo|null, "baleni_ks": číslo|null, "prodava_po_kusech": true|false, "sazba_dph": 21|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "splnuje_specifikaci": true|false, "shoda_parametru": ["ověřený parametr"], "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
+Když nenajdeš ani orientační produktovou stránku s cenou, vrať {"nalezeno": false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
 Ceny uváděj jako čistá čísla bez měny a mezer (např. 3509, ne "3 509 Kč").`;
 }
 
@@ -338,7 +348,8 @@ function normalizeSource(raw: RawWebPriceSource, context: SourceContext): WebPri
   const meetsSpecification = coerceBool(raw.splnuje_specifikaci);
   const matchedParameters = raw.shoda_parametru?.map((value) => value.trim()).filter(Boolean) ?? [];
   if (!url || currency !== 'CZK') return null;
-  if (context.equivalent && (!productName || !meetsSpecification || matchedParameters.length === 0)) return null;
+  const orientational = context.equivalent
+    && (!productName || !meetsSpecification || matchedParameters.length === 0);
 
   let net = coerceNumber(raw.cena_bez_dph);
   let gross = coerceNumber(raw.cena_baleni_s_dph) ?? coerceNumber(raw.cena_s_dph);
@@ -382,7 +393,11 @@ function normalizeSource(raw: RawWebPriceSource, context: SourceContext): WebPri
     sazba_dph: taxRate,
     dostupnost: normalizeAvailability(raw.dostupnost),
     poznamka: addNote(raw.poznamka, notes),
-    ...(context.equivalent ? { splnuje_specifikaci: true, shoda_parametru: matchedParameters } : {}),
+    ...(context.equivalent ? {
+      splnuje_specifikaci: meetsSpecification,
+      shoda_parametru: matchedParameters,
+      ...(orientational ? { orientacni: true } : {}),
+    } : {}),
   };
 }
 
@@ -478,9 +493,7 @@ export function parseWebPriceResponse(
       mena: currency,
       poznamka: currency && currency !== 'CZK'
         ? 'Zdroj byl vyřazen: měna musí být CZK.'
-        : shodaTyp === 'ekvivalent'
-          ? 'Ekvivalent nemá doložený název produktu nebo splnění závazné specifikace.'
-          : cleanStr(raw.poznamka) ?? 'Cena nenalezena nebo zdroj nesplnil validaci.',
+        : cleanStr(raw.poznamka) ?? 'Cena nenalezena nebo zdroj nesplnil validaci.',
       overeno_at: overenoAt,
       ...(zdroje.length > 0 ? { zdroje } : {}),
       realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, zdroje, quantity),
@@ -492,8 +505,9 @@ export function parseWebPriceResponse(
   const prekracujeStrop = typeof strop === 'number' && strop > 0 && sdph !== undefined
     ? sdph > strop
     : undefined;
+  const onlyOrientational = zdroje.length > 0 && zdroje.every((source) => source.orientacni === true);
   return {
-    stav: shodaTyp === 'ekvivalent' ? 'ekvivalent' : 'nalezeno',
+    stav: onlyOrientational ? 'orientacni' : shodaTyp === 'ekvivalent' ? 'ekvivalent' : 'nalezeno',
     shoda_typ: shodaTyp,
     web_cena_bez_dph: bez,
     web_cena_s_dph: sdph,
@@ -519,13 +533,39 @@ interface WebSearchUsage {
   searches: number;
 }
 
-async function createWithRetry(params: unknown, aiClient: PriceVerifierAiClient): Promise<Anthropic.Message> {
+class WebSearchPhaseTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Webové ověření překročilo časový limit ${Math.round(timeoutMs / 60_000)} minuty.`);
+    this.name = 'WebSearchPhaseTimeoutError';
+  }
+}
+
+async function createWithRetry(
+  params: unknown,
+  aiClient: PriceVerifierAiClient,
+  deadlineAt: number,
+  timeoutMs: number,
+): Promise<Anthropic.Message> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= 2; attempt++) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw new WebSearchPhaseTimeoutError(timeoutMs);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
     try {
       // params castujeme na any: SDK 0.39 typy neznají web_search tool (server-side tool)
-      return (await aiClient.messages.create(params as Anthropic.MessageCreateParamsNonStreaming)) as Anthropic.Message;
+      const request = Promise.resolve(aiClient.messages.create(
+        params as Anthropic.MessageCreateParamsNonStreaming,
+        { signal: controller.signal },
+      ));
+      const timeout = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener('abort', () => reject(new WebSearchPhaseTimeoutError(timeoutMs)), { once: true });
+      });
+      return (await Promise.race([request, timeout])) as Anthropic.Message;
     } catch (err) {
+      if (err instanceof WebSearchPhaseTimeoutError || controller.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
+        throw new WebSearchPhaseTimeoutError(timeoutMs);
+      }
       const status = (err as { status?: number })?.status;
       // 400/401 = neretryovatelné (chybný request / klíč)
       if (status === 400 || status === 401) throw err;
@@ -534,6 +574,8 @@ async function createWithRetry(params: unknown, aiClient: PriceVerifierAiClient)
         const delay = Math.min(Math.pow(2, attempt) * 2000, 15000);
         await new Promise((r) => setTimeout(r, delay));
       }
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr;
@@ -545,6 +587,7 @@ async function callWithWebSearch(
   modelId: string,
   maxSearches: number,
   aiClient: PriceVerifierAiClient,
+  timeoutMs = WEB_SEARCH_PHASE_TIMEOUT_MS,
 ): Promise<{ text: string; usage: WebSearchUsage }> {
   // Pozn.: user_location zde nepoužíváme — API kód země "CZ" nepodporuje;
   // omezení na české e-shopy řeší system prompt (doména .cz, ceny v Kč).
@@ -557,6 +600,7 @@ async function callWithWebSearch(
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMsg }];
   const usage: WebSearchUsage = { input: 0, output: 0, searches: 0 };
   let combinedText = '';
+  const deadlineAt = Date.now() + timeoutMs;
 
   // Server-side loop: běžně skončí na první odpovědi (end_turn); pause_turn = dlouhý turn
   for (let turn = 0; turn < 4; turn++) {
@@ -567,7 +611,7 @@ async function callWithWebSearch(
       system,
       messages,
       tools: [webSearchTool],
-    }, aiClient);
+    }, aiClient, deadlineAt, timeoutMs);
 
     usage.input += resp.usage.input_tokens;
     usage.output += resp.usage.output_tokens;
@@ -604,6 +648,26 @@ interface RawVerifyResult {
   costCZK: number;
 }
 
+/** Rozliší doložené zamítnutí AI kandidáta od obyčejného „nenalezeno“. */
+function candidateWasExplicitlyRejected(note: string | undefined): boolean {
+  if (!note) return false;
+  const normalized = note.toLocaleLowerCase('cs-CZ');
+  return /neexist|neexistující|nevyráb[íi]|výrobce.+neuvádí|jiné parametry|odlišné parametry|parametry.+neodpovíd|rozměry.+neodpovíd|rozměr.+jin[ýé]|does not exist|different (parameters|dimensions)/i.test(normalized);
+}
+
+/** Technický důvod převede na srozumitelnou českou zprávu pro uložený výsledek. */
+function verificationErrorMessage(error: unknown, phase: 1 | 2): string {
+  const prefix = phase === 1 ? 'První fáze ověření' : 'Hledání ekvivalentu';
+  if (error instanceof WebSearchPhaseTimeoutError || (error as { name?: string })?.name === 'AbortError') {
+    return `${prefix} překročilo časový limit 4 minuty.`;
+  }
+  const status = (error as { status?: number })?.status;
+  if (status === 429) return `${prefix} se nepodařilo dokončit kvůli dočasnému limitu AI služby.`;
+  if (status === 401) return `${prefix} se nepodařilo spustit kvůli neplatnému API klíči.`;
+  const detail = error instanceof Error && error.message.trim() ? ` Detail: ${error.message.trim()}` : '';
+  return `${prefix} selhalo kvůli neočekávané chybě.${detail}`;
+}
+
 async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): Promise<RawVerifyResult> {
   const modelId = resolveModelId(opts.model ?? 'sonnet');
   const pricing = getModelPricing(modelId);
@@ -611,35 +675,54 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
   const aiClient = opts.aiClient ?? client;
   const now = () => new Date().toISOString();
 
+  let first: Awaited<ReturnType<typeof callWithWebSearch>>;
   try {
-    const first = await callWithWebSearch(
+    first = await callWithWebSearch(
       exactPriceVerifySystem(),
       buildExactUserMessage(input),
       modelId,
       maxSearches,
       aiClient,
+      WEB_SEARCH_PHASE_TIMEOUT_MS,
     );
-    const firstCost =
-      first.usage.input * pricing.input +
-      first.usage.output * pricing.output +
-      first.usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
-    const firstResult = parseWebPriceResponse(first.text, input, now(), 'presny');
-    const firstBase = {
-      inputTokens: first.usage.input,
-      outputTokens: first.usage.output,
-      searches: first.usage.searches,
-      costCZK: firstCost,
+  } catch (err) {
+    return {
+      overeni: {
+        stav: 'chyba',
+        poznamka: verificationErrorMessage(err, 1),
+        overeno_at: now(),
+        realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, []),
+      },
+      hitPhase: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      searches: 0,
+      costCZK: 0,
     };
+  }
 
-    if (firstResult.stav === 'nalezeno') {
-      return { ...firstBase, overeni: firstResult, hitPhase: 1 };
-    }
+  const firstCost =
+    first.usage.input * pricing.input +
+    first.usage.output * pricing.output +
+    first.usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
+  const firstResult = parseWebPriceResponse(first.text, input, now(), 'presny');
+  const firstBase = {
+    inputTokens: first.usage.input,
+    outputTokens: first.usage.output,
+    searches: first.usage.searches,
+    costCZK: firstCost,
+  };
 
-    const specification = input.specifikace?.trim();
-    if (firstResult.stav !== 'nenalezeno' || !specification || specification.length < 10) {
-      return { ...firstBase, overeni: firstResult, hitPhase: null };
-    }
+  if (firstResult.stav === 'nalezeno') {
+    return { ...firstBase, overeni: firstResult, hitPhase: 1 };
+  }
 
+  const specification = input.specifikace?.trim();
+  if (firstResult.stav !== 'nenalezeno' || !specification || specification.length < 10) {
+    return { ...firstBase, overeni: firstResult, hitPhase: null };
+  }
+
+  try {
     const second = await callWithWebSearch(
       equivalentPriceVerifySystem(),
       buildEquivalentUserMessage({
@@ -649,8 +732,9 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
         jednotka: input.jednotka,
       }),
       modelId,
-      maxSearches,
+      Math.min(maxSearches, EQUIVALENT_MAX_SEARCHES),
       aiClient,
+      WEB_SEARCH_PHASE_TIMEOUT_MS,
     );
     const secondCost =
       second.usage.input * pricing.input +
@@ -664,8 +748,15 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
       costCZK: firstBase.costCZK + secondCost,
     };
 
-    if (secondResult.stav === 'ekvivalent') {
-      return { ...combinedBase, overeni: secondResult, hitPhase: 2 };
+    if (secondResult.stav === 'ekvivalent' || secondResult.stav === 'orientacni') {
+      return {
+        ...combinedBase,
+        overeni: {
+          ...secondResult,
+          kandidat_neexistuje: candidateWasExplicitlyRejected(firstResult.poznamka),
+        },
+        hitPhase: 2,
+      };
     }
 
     return {
@@ -682,19 +773,17 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
       },
     };
   } catch (err) {
-    // Per-item chyba nesmí shodit celek
+    // Fallback má vlastní chybovou hranici: dokončenou fázi 1 nikdy nepřepíšeme stavem chyba.
     return {
       overeni: {
-        stav: 'chyba',
-        poznamka: `Chyba ověření: ${(err as Error).message}`,
-        overeno_at: now(),
-        realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, []),
+        ...firstResult,
+        poznamka: [
+          firstResult.poznamka,
+          `${verificationErrorMessage(err, 2)} Výsledek první fáze byl zachován.`,
+        ].filter(Boolean).join(' '),
       },
       hitPhase: null,
-      inputTokens: 0,
-      outputTokens: 0,
-      searches: 0,
-      costCZK: 0,
+      ...firstBase,
     };
   }
 }
@@ -870,7 +959,9 @@ export function mergePriceVerifications(matchData: ProductMatch, results: ItemVe
 }
 
 function formatPrice(ov: OvereniCeny): string {
-  if (ov.stav !== 'nalezeno' && ov.stav !== 'ekvivalent') return ov.stav + (ov.poznamka ? ` (${ov.poznamka})` : '');
+  if (ov.stav !== 'nalezeno' && ov.stav !== 'ekvivalent' && ov.stav !== 'orientacni') {
+    return ov.stav + (ov.poznamka ? ` (${ov.poznamka})` : '');
+  }
   const cena = ov.web_cena_s_dph ?? ov.web_cena_bez_dph;
   const suffix = ov.web_cena_s_dph !== undefined ? ' s DPH' : ' bez DPH';
   const dod = ov.dodavatel ? ` — ${ov.dodavatel}` : '';
@@ -923,6 +1014,7 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
   const summary = {
     total,
     nalezeno: results.filter((r) => r.overeni_ceny.stav === 'nalezeno' || r.overeni_ceny.stav === 'ekvivalent').length,
+    orientacni: results.filter((r) => r.overeni_ceny.stav === 'orientacni').length,
     nenalezeno: results.filter((r) => r.overeni_ceny.stav === 'nenalezeno').length,
     chyba: results.filter((r) => r.overeni_ceny.stav === 'chyba').length,
     prekracuje_strop: results.filter((r) => r.overeni_ceny.prekracuje_strop === true).length,
