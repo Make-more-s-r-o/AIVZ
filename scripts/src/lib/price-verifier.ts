@@ -62,6 +62,14 @@ export interface VerifyItemOptions {
   model?: string;
   /** Max počet web searchů na položku. Default 3. */
   maxSearches?: number;
+  /** Injekce klienta pro deterministické testy bez síťového volání. */
+  aiClient?: PriceVerifierAiClient;
+}
+
+export interface PriceVerifierAiClient {
+  messages: {
+    create(params: Anthropic.MessageCreateParamsNonStreaming): PromiseLike<Anthropic.Message>;
+  };
 }
 
 export interface VerifyAllOptions extends VerifyItemOptions {
@@ -92,6 +100,10 @@ export interface VerifyAllResult {
     nenalezeno: number;
     chyba: number;
     prekracuje_strop: number;
+    faze1_nalezeno: number;
+    faze2_nalezeno: number;
+    realny_nakup_vyssi_nez_ai: number;
+    prumerny_narust_procent: number | null;
     searches: number;
     inputTokens: number;
     outputTokens: number;
@@ -101,17 +113,16 @@ export interface VerifyAllResult {
 }
 
 // ----------------------------------------------------------------------------
-// Prompt
+// Prompty jednotlivých fází
 // ----------------------------------------------------------------------------
-function priceVerifySystem(allowEquivalent: boolean): string {
+function exactPriceVerifySystem(): string {
   return `Jsi asistent nákupčího ve veřejných zakázkách. Tvým úkolem je pomocí web search dohledat AKTUÁLNÍ tržní cenu zboží v českých e-shopech.
 
 Pravidla:
 - Hledej výhradně v českých e-shopech (ceny v Kč, doména .cz).
-- Hledej ve dvou krocích:
-  KROK A: nejprve hledej přesný produkt podle výrobce a modelu. Nalezené zdroje označ shoda_typ="presny".
-  KROK B: ${allowEquivalent ? 'pokud přesný model nenajdeš, smíš hledat EKVIVALENTNÍ zboží splňující všechna ZÁVAZNÁ KRITÉRIA zadavatele. U každého zdroje musí být splnuje_specifikaci=true a shoda_parametru musí vyjmenovat konkrétně ověřené parametry.' : 'NEPROVÁDĚJ. Autoritativní specifikace zadavatele chybí nebo je příliš krátká, proto ekvivalent nesmíš nabídnout. Hledej pouze přesný výrobek.'}
-- U komoditního zboží (např. brusné plátno, řezný kotouč, stahovací pásky nebo těsnicí vlákno) hledej v Kroku B podle požadovaných parametrů, ne podle modelu, který mohl být pouze odhadem.
+- Hledej pouze přesný produkt podle uvedeného výrobce a modelu. Nalezené zdroje označ shoda_typ="presny".
+- Výrobce a model níže jsou NEZÁVAZNÝ ODHAD AI, ne požadavek zadavatele.
+- V této fázi nenabízej jinou značku ani náhradní produkt. Pokud přesný produkt nenajdeš, vrať nalezeno=false.
 - U každého zdroje zjisti skutečný počet kusů v prodávaném balení (baleni_ks) a cenu celého balení s DPH (cena_baleni_s_dph). Nic nepřepočítávej na fiktivní jednotlivý kus. Pokud e-shop jasně prodává po jednom kusu, nastav baleni_ks=1 a prodava_po_kusech=true. Když počet kusů nelze ověřit, nastav baleni_ks=null a prodava_po_kusech=false.
 - Najdi až 3 různé nákupní zdroje. Preferuj e-shopy, kde je produkt skladem a s jasně uvedenou cenou.
 - Uveď cenu celého balení bez DPH i s DPH. Uveď sazba_dph=21, jen když je známá nebo jde o běžné zboží s typickou sazbou; jinak sazba_dph=null.
@@ -120,12 +131,32 @@ Pravidla:
 - Zdroje seřaď od nejlevnějšího podle ceny s DPH. Neopakuj stejnou URL.
 
 Odpověz VÝHRADNĚ jedním JSON objektem jako ÚPLNĚ POSLEDNÍ blok textu, bez jakéhokoli komentáře za ním, přesně v tomto tvaru:
-{"nalezeno": true|false, "shoda_typ": "presny"|"ekvivalent", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "mena": "CZK", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "cena_baleni_s_dph": číslo|null, "baleni_ks": číslo|null, "prodava_po_kusech": true|false, "sazba_dph": 21|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "splnuje_specifikaci": true|false, "shoda_parametru": ["ověřený parametr"], "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
-Když nenajdeš přesný ani specifikaci splňující ekvivalent, vrať {"nalezeno": false, "shoda_typ": "presny", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
+{"nalezeno": true|false, "shoda_typ": "presny", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "mena": "CZK", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "cena_baleni_s_dph": číslo|null, "baleni_ks": číslo|null, "prodava_po_kusech": true|false, "sazba_dph": 21|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "splnuje_specifikaci": true|false, "shoda_parametru": ["ověřený parametr"], "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
+Když přesný produkt nenajdeš, vrať {"nalezeno": false, "shoda_typ": "presny", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
 Ceny uváděj jako čistá čísla bez měny a mezer (např. 3509, ne "3 509 Kč").`;
 }
 
-function buildUserMessage(input: VerifyInput): string {
+function equivalentPriceVerifySystem(): string {
+  return `Jsi asistent nákupčího ve veřejných zakázkách. Pomocí web search dohledáváš aktuální tržní ceny komoditního zboží v českých e-shopech.
+
+Zadavatel nepředepisuje značku. Najdi v českých e-shopech konkrétní produkty, které splňují VŠECHNA závazná kritéria. Vrať až 3 nejlevnější reálné nákupní zdroje.
+
+Pravidla:
+- Hledej výhradně v českých e-shopech (ceny v Kč, doména .cz).
+- Každý zdroj označ shoda_typ="ekvivalent", splnuje_specifikaci=true a v shoda_parametru konkrétně vyjmenuj všechna ověřená závazná kritéria.
+- Pokud u produktu nelze doložit splnění všech kritérií, nezařazuj ho.
+- U každého zdroje zjisti skutečný počet kusů v prodávaném balení (baleni_ks) a cenu celého balení s DPH (cena_baleni_s_dph). Nic nepřepočítávej na fiktivní jednotlivý kus. Pokud e-shop jasně prodává po jednom kusu, nastav baleni_ks=1 a prodava_po_kusech=true. Když počet kusů nelze ověřit, nastav baleni_ks=null a prodava_po_kusech=false.
+- Preferuj zboží skladem s jasně uvedenou cenou. Uveď cenu celého balení bez DPH i s DPH. Uveď sazba_dph=21, jen když je známá nebo jde o běžné zboží s typickou sazbou; jinak sazba_dph=null.
+- Vrať přímý HTTPS odkaz na konkrétní produktovou stránku, nikdy na výsledky vyhledávání, a skutečný název z této stránky.
+- Zdroje seřaď od nejlevnějšího podle ceny s DPH a neopakuj stejnou URL.
+
+Odpověz VÝHRADNĚ jedním JSON objektem jako ÚPLNĚ POSLEDNÍ blok textu, bez jakéhokoli komentáře za ním, přesně v tomto tvaru:
+{"nalezeno": true|false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "nazev_produktu": "skutečný název nalezeného produktu", "mena": "CZK", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "cena_baleni_s_dph": číslo|null, "baleni_ks": číslo|null, "prodava_po_kusech": true|false, "sazba_dph": 21|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "splnuje_specifikaci": true, "shoda_parametru": ["ověřený parametr"], "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
+Když žádný produkt nesplňuje všechna kritéria, vrať {"nalezeno": false, "shoda_typ": "ekvivalent", "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
+Ceny uváděj jako čistá čísla bez měny a mezer (např. 3509, ne "3 509 Kč").`;
+}
+
+function buildExactUserMessage(input: VerifyInput): string {
   const lines: string[] = [
     'Najdi aktuální cenu tohoto produktu v českých e-shopech:',
     `Výrobce: ${input.vyrobce}`,
@@ -133,14 +164,28 @@ function buildUserMessage(input: VerifyInput): string {
   ];
   if (input.nazev) lines.push(`Název položky: ${input.nazev}`);
   if (input.specifikace) {
-    lines.push('', 'ZÁVAZNÁ KRITÉRIA ZADAVATELE — ekvivalent musí splnit všechna:', input.specifikace);
+    lines.push('', 'ZÁVAZNÁ KRITÉRIA ZADAVATELE — použij pouze ke kontrole přesného produktu:', input.specifikace);
   } else {
-    lines.push('', 'AUTORITATIVNÍ SPECIFIKACE CHYBÍ — ekvivalentní hledání je zakázáno.');
+    lines.push('', 'AUTORITATIVNÍ SPECIFIKACE CHYBÍ.');
   }
   lines.push(`Množství v zakázce: ${input.mnozstvi ?? 1}`);
   lines.push(`Jednotka položky: ${input.jednotka?.trim() || 'ks'}`);
   lines.push('Vrať cenu celého skutečně prodávaného balení a počet kusů v balení.');
   return lines.join('\n');
+}
+
+/** Druhá fáze vědomě nepřijímá ani nečte AI identitu kandidáta. */
+function buildEquivalentUserMessage(input: Pick<VerifyInput, 'nazev' | 'specifikace' | 'mnozstvi' | 'jednotka'>): string {
+  return [
+    `Název položky ze zadání: ${input.nazev?.trim() || 'Neuveden'}`,
+    '',
+    'ZÁVAZNÁ KRITÉRIA ZADAVATELE — nalezený produkt musí splnit všechna:',
+    input.specifikace?.trim() || '',
+    '',
+    `Množství v zakázce: ${input.mnozstvi ?? 1}`,
+    `Jednotka položky: ${input.jednotka?.trim() || 'ks'}`,
+    'Vrať cenu celého skutečně prodávaného balení a počet kusů v balení.',
+  ].join('\n');
 }
 
 // ----------------------------------------------------------------------------
@@ -355,6 +400,7 @@ export function parseWebPriceResponse(
   text: string,
   input: Pick<VerifyInput, 'cena_max_s_dph' | 'ai_cena_bez_dph' | 'specifikace' | 'mnozstvi'> = {},
   overenoAt = new Date().toISOString(),
+  forcedMatchType?: 'presny' | 'ekvivalent',
 ): OvereniCeny {
   const quantity = input.mnozstvi ?? 1;
   const emptyReality = compareAiVsMarket(input.ai_cena_bez_dph ?? null, [], quantity);
@@ -376,7 +422,9 @@ export function parseWebPriceResponse(
   }
 
   const raw = valid.data;
-  const shodaTyp = raw.shoda_typ ?? 'presny';
+  // Interní dvoufázový běh vynucuje typ podle fáze; veřejný parser zůstává
+  // zpětně kompatibilní a bez parametru respektuje kontrakt odpovědi.
+  const shodaTyp = forcedMatchType ?? raw.shoda_typ ?? 'presny';
   const authoritativeSpecification = cleanStr(input.specifikace);
   if (shodaTyp === 'ekvivalent' && (!authoritativeSpecification || authoritativeSpecification.length < 10)) {
     return {
@@ -471,12 +519,12 @@ interface WebSearchUsage {
   searches: number;
 }
 
-async function createWithRetry(params: unknown): Promise<Anthropic.Message> {
+async function createWithRetry(params: unknown, aiClient: PriceVerifierAiClient): Promise<Anthropic.Message> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= 2; attempt++) {
     try {
       // params castujeme na any: SDK 0.39 typy neznají web_search tool (server-side tool)
-      return (await client.messages.create(params as Anthropic.MessageCreateParamsNonStreaming)) as Anthropic.Message;
+      return (await aiClient.messages.create(params as Anthropic.MessageCreateParamsNonStreaming)) as Anthropic.Message;
     } catch (err) {
       const status = (err as { status?: number })?.status;
       // 400/401 = neretryovatelné (chybný request / klíč)
@@ -496,6 +544,7 @@ async function callWithWebSearch(
   userMsg: string,
   modelId: string,
   maxSearches: number,
+  aiClient: PriceVerifierAiClient,
 ): Promise<{ text: string; usage: WebSearchUsage }> {
   // Pozn.: user_location zde nepoužíváme — API kód země "CZ" nepodporuje;
   // omezení na české e-shopy řeší system prompt (doména .cz, ceny v Kč).
@@ -518,7 +567,7 @@ async function callWithWebSearch(
       system,
       messages,
       tools: [webSearchTool],
-    });
+    }, aiClient);
 
     usage.input += resp.usage.input_tokens;
     usage.output += resp.usage.output_tokens;
@@ -548,6 +597,7 @@ async function callWithWebSearch(
 
 interface RawVerifyResult {
   overeni: OvereniCeny;
+  hitPhase: 1 | 2 | null;
   inputTokens: number;
   outputTokens: number;
   searches: number;
@@ -558,21 +608,79 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
   const modelId = resolveModelId(opts.model ?? 'sonnet');
   const pricing = getModelPricing(modelId);
   const maxSearches = opts.maxSearches ?? 3;
+  const aiClient = opts.aiClient ?? client;
   const now = () => new Date().toISOString();
 
   try {
-    const { text, usage } = await callWithWebSearch(
-      priceVerifySystem((input.specifikace?.trim().length ?? 0) >= 10),
-      buildUserMessage(input),
+    const first = await callWithWebSearch(
+      exactPriceVerifySystem(),
+      buildExactUserMessage(input),
       modelId,
       maxSearches,
+      aiClient,
     );
-    const costCZK =
-      usage.input * pricing.input +
-      usage.output * pricing.output +
-      usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
-    const base = { inputTokens: usage.input, outputTokens: usage.output, searches: usage.searches, costCZK };
-    return { ...base, overeni: parseWebPriceResponse(text, input, now()) };
+    const firstCost =
+      first.usage.input * pricing.input +
+      first.usage.output * pricing.output +
+      first.usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
+    const firstResult = parseWebPriceResponse(first.text, input, now(), 'presny');
+    const firstBase = {
+      inputTokens: first.usage.input,
+      outputTokens: first.usage.output,
+      searches: first.usage.searches,
+      costCZK: firstCost,
+    };
+
+    if (firstResult.stav === 'nalezeno') {
+      return { ...firstBase, overeni: firstResult, hitPhase: 1 };
+    }
+
+    const specification = input.specifikace?.trim();
+    if (firstResult.stav !== 'nenalezeno' || !specification || specification.length < 10) {
+      return { ...firstBase, overeni: firstResult, hitPhase: null };
+    }
+
+    const second = await callWithWebSearch(
+      equivalentPriceVerifySystem(),
+      buildEquivalentUserMessage({
+        nazev: input.nazev,
+        specifikace: specification,
+        mnozstvi: input.mnozstvi,
+        jednotka: input.jednotka,
+      }),
+      modelId,
+      maxSearches,
+      aiClient,
+    );
+    const secondCost =
+      second.usage.input * pricing.input +
+      second.usage.output * pricing.output +
+      second.usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
+    const secondResult = parseWebPriceResponse(second.text, input, now(), 'ekvivalent');
+    const combinedBase = {
+      inputTokens: firstBase.inputTokens + second.usage.input,
+      outputTokens: firstBase.outputTokens + second.usage.output,
+      searches: firstBase.searches + second.usage.searches,
+      costCZK: firstBase.costCZK + secondCost,
+    };
+
+    if (secondResult.stav === 'ekvivalent') {
+      return { ...combinedBase, overeni: secondResult, hitPhase: 2 };
+    }
+
+    return {
+      ...combinedBase,
+      hitPhase: null,
+      overeni: {
+        ...secondResult,
+        stav: 'nenalezeno',
+        shoda_typ: 'ekvivalent',
+        poznamka: [
+          firstResult.poznamka ? `Přesný produkt: ${firstResult.poznamka}` : 'Přesný produkt nebyl nalezen.',
+          `Hledán byl i ekvivalent dle závazné specifikace: ${secondResult.poznamka ?? 'bez použitelného nákupního zdroje'}`,
+        ].join(' '),
+      },
+    };
   } catch (err) {
     // Per-item chyba nesmí shodit celek
     return {
@@ -582,6 +690,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
         overeno_at: now(),
         realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, []),
       },
+      hitPhase: null,
       inputTokens: 0,
       outputTokens: 0,
       searches: 0,
@@ -701,6 +810,7 @@ function buildTargets(matchData: ProductMatch, analysis?: TenderAnalysis): Targe
     const cand = pickCandidate(matchData.kandidati, matchData.vybrany_index);
     if (cand && cand.vyrobce?.trim() && cand.model?.trim()) {
       const selectedIndex = matchData.kandidati.indexOf(cand);
+      const authoritativeName = analysis?.polozky?.[0]?.nazev?.trim() || undefined;
       targets.push({
         polozka_index: -1,
         polozka_nazev: `${cand.vyrobce} ${cand.model}`,
@@ -708,7 +818,8 @@ function buildTargets(matchData: ProductMatch, analysis?: TenderAnalysis): Targe
         input: {
           vyrobce: cand.vyrobce,
           model: cand.model,
-          nazev: `${cand.vyrobce} ${cand.model}`,
+          // Fallback smí dostat jen název ze zadání, nikdy AI identitu kandidáta.
+          nazev: authoritativeName,
           specifikace: authoritativeSpecificationForItem(analysis, 0),
           mnozstvi: 1,
           jednotka: 'ks',
@@ -789,7 +900,11 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
 
   let done = 0;
   const raw = await runWithConcurrency(targets, concurrency, async (t) => {
-    const r = await verifyOneInternal(t.input, { model: opts.model, maxSearches: opts.maxSearches });
+    const r = await verifyOneInternal(t.input, {
+      model: opts.model,
+      maxSearches: opts.maxSearches,
+      aiClient: opts.aiClient,
+    });
     done++;
     opts.onProgress?.(`[${done}/${total}] ${t.polozka_nazev}: ${formatPrice(r.overeni)}`);
     return { target: t, res: r };
@@ -801,12 +916,22 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
     overeni_ceny: { ...res.overeni, kandidat_fingerprint: target.kandidat_fingerprint },
   }));
 
+  const increases = results
+    .map((result) => result.overeni_ceny.realita)
+    .filter((reality) => reality?.pod_trhem === true && typeof reality.rozdil_procent === 'number' && reality.rozdil_procent > 0)
+    .map((reality) => reality!.rozdil_procent as number);
   const summary = {
     total,
     nalezeno: results.filter((r) => r.overeni_ceny.stav === 'nalezeno' || r.overeni_ceny.stav === 'ekvivalent').length,
     nenalezeno: results.filter((r) => r.overeni_ceny.stav === 'nenalezeno').length,
     chyba: results.filter((r) => r.overeni_ceny.stav === 'chyba').length,
     prekracuje_strop: results.filter((r) => r.overeni_ceny.prekracuje_strop === true).length,
+    faze1_nalezeno: raw.filter((r) => r.res.hitPhase === 1).length,
+    faze2_nalezeno: raw.filter((r) => r.res.hitPhase === 2).length,
+    realny_nakup_vyssi_nez_ai: increases.length,
+    prumerny_narust_procent: increases.length > 0
+      ? Math.round((increases.reduce((sum, value) => sum + value, 0) / increases.length) * 10) / 10
+      : null,
     searches: raw.reduce((s, x) => s + x.res.searches, 0),
     inputTokens: raw.reduce((s, x) => s + x.res.inputTokens, 0),
     outputTokens: raw.reduce((s, x) => s + x.res.outputTokens, 0),
