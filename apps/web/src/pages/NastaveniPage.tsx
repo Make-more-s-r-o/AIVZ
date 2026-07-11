@@ -2,9 +2,10 @@ import CompanySettings from '../components/CompanySettings';
 import UserManagement from '../components/UserManagement';
 import ChangePasswordForm from '../components/ChangePasswordForm';
 import TagManager from '../components/TagManager';
+import MonitoringSettings from '../components/MonitoringSettings';
 import { Tabs } from '../components/ui';
 
-export type SettingsSection = 'firmy' | 'uzivatele' | 'heslo' | 'stitky';
+export type SettingsSection = 'firmy' | 'monitoring' | 'uzivatele' | 'heslo' | 'stitky';
 
 export interface NastaveniPageProps {
   section: SettingsSection;
@@ -21,13 +22,14 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
     <div style={{ maxWidth: 1280, margin: '0 auto' }}>
       <h1 style={{ fontSize: 'var(--font-size-xl)', fontWeight: 700, color: 'var(--text-primary)' }}>Nastavení</h1>
       <p style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)', marginTop: 2, marginBottom: 16 }}>
-        Firmy, uživatelé a zabezpečení
+        Firma, monitoring, uživatelé a zabezpečení
       </p>
       <Tabs
         value={section}
         onChange={(v) => onNavSection(v as SettingsSection)}
         tabs={[
           { value: 'firmy', label: 'Firmy' },
+          { value: 'monitoring', label: 'Monitoring' },
           { value: 'uzivatele', label: 'Uživatelé a role' },
           { value: 'heslo', label: 'Heslo' },
           { value: 'stitky', label: 'Štítky' },
@@ -35,6 +37,7 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
         style={{ marginBottom: 20 }}
       />
       {section === 'firmy' && <CompanySettings />}
+      {section === 'monitoring' && <MonitoringSettings />}
       {section === 'uzivatele' && (currentUserId ? (
         <UserManagement currentUserId={currentUserId} />
       ) : (

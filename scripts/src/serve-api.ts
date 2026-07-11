@@ -3,7 +3,7 @@ import cors from 'cors';
 import multer from 'multer';
 import archiver from 'archiver';
 import { readFile, readdir, mkdir, stat, writeFile, rm, rename } from 'fs/promises';
-import { getCostSummary } from './lib/cost-tracker.js';
+import { getCostSummary, getCostsOverview } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
 import { existsSync, createWriteStream, createReadStream } from 'fs';
 import { spawn } from 'child_process';
@@ -24,9 +24,12 @@ import {
   getAllCompanies, getCompany, getTenderCompanyId, createCompany, updateCompany, deleteCompany as deleteCompanyById,
   getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
   copyCompanyDocsToTender,
-  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
+  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots, setDocPlatnost,
 } from './lib/company-store.js';
-import { DOC_SLOTS, type DocSlotType } from './lib/doc-slots.js';
+import {
+  DOC_SLOTS, type DocSlotType, type DocSlotEntry,
+  docExpiryStatus, daysUntilExpiry, isValidIsoDateString, buildChecklistItem,
+} from './lib/doc-slots.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
@@ -83,18 +86,24 @@ import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from 
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
 import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
 import { listFindings } from './lib/web-findings-store.js';
-import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
+import {
+  upsertWinPrices, deleteWinPrice, categorizeCommodity, KOMODITA_KATEGORIE_VALUES,
+} from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
-import { fetchNenTenders } from './lib/monitoring/nen-client.js';
+import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
+import {
+  downloadNenAttachments, incompleteDownloadWarning, shouldAutoStartDownloadedPipeline,
+} from './lib/monitoring/zd-download.js';
 import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
 import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
   type MonitoringStav,
 } from './lib/monitoring/monitoring-store.js';
-import { scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { isFeedItemExcluded, scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
 import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
+import { getMonitoringConfig, saveMonitoringConfig } from './lib/monitoring/monitoring-config.js';
 import {
   RUN_ALL_STEPS,
   ApprovalRequiredError,
@@ -355,6 +364,36 @@ function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, st
   if (startQueue) processQueue();
   console.log(`Job ${jobId} queued: ${step} for ${tenderId}`);
   return job;
+}
+
+/**
+ * Zařadí celý pipeline (extract→…→validate) jako jeden řetězený parent job. Sdílené
+ * endpointem `run/all` i převzetím z monitoringu. Když už pro zakázku běží/čeká pipeline,
+ * vrátí ho beze změny (created=false) — idempotentní, nikdy nespustí druhý souběžný řetězec.
+ */
+function enqueueRunAllPipeline(tenderId: string): { job: Job; created: boolean } {
+  const existing = [...jobs.values()].find((job) =>
+    job.tenderId === tenderId && job.kind === 'pipeline'
+    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
+  if (existing) return { job: existing, created: false };
+
+  let parentId = randomUUID().slice(0, 8);
+  while (jobs.has(parentId)) parentId = randomUUID().slice(0, 8);
+  const parent: Job = {
+    id: parentId,
+    tenderId,
+    step: 'all',
+    status: 'queued',
+    logs: [],
+    startedAt: new Date().toISOString(),
+    kind: 'pipeline',
+    currentStep: RUN_ALL_STEPS[0],
+  };
+  jobs.set(parent.id, parent);
+  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id);
+  scheduleJobsPersist();
+  console.log(`Pipeline job ${parent.id} queued for ${tenderId}`);
+  return { job: parent, created: true };
 }
 
 function appendJobLogs(job: Job, lines: string[]) {
@@ -870,18 +909,48 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 // GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
 app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
 
+// GET/PUT /api/monitoring/config - per-instance nastavení zájmu monitoringu.
+app.get('/api/monitoring/config', requireJwt, async (_req, res) => {
+  try {
+    res.json(await getMonitoringConfig());
+  } catch (err) {
+    res.status(500).json({ error: `Nastavení monitoringu nelze načíst: ${String(err)}` });
+  }
+});
+
+app.put('/api/monitoring/config', requireJwt, async (req, res) => {
+  try {
+    res.json(await saveMonitoringConfig(req.body));
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.issues[0]?.message ?? 'Neplatné nastavení monitoringu.' });
+    }
+    res.status(500).json({ error: `Nastavení monitoringu nelze uložit: ${String(err)}` });
+  }
+});
+
 // POST /api/monitoring/sync - natáhne nové zakázky ze zdroje do tabulky monitoring_zakazky.
 // Idempotentní: opakovaný běh nové jen doplní, stav dřív převzatých/ignorovaných nechá.
 // zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
 app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
   try {
     const zdroj = (typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen') as MonitoringSource;
-    const q = typeof req.body?.q === 'string' ? req.body.q : '';
+    const hasExplicitQuery = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'q');
+    if (hasExplicitQuery && typeof req.body.q !== 'string') {
+      return res.status(400).json({ error: 'Fulltextový dotaz musí být text.' });
+    }
     if (!['nen', 'hlidac', 'both'].includes(zdroj)) {
       return res.status(400).json({ error: 'Neplatný zdroj monitoringu.' });
     }
 
-    const sync = await collectMonitoringInputs(zdroj, q, Boolean(process.env.HLIDAC_TOKEN), {
+    const monitoringConfig = await getMonitoringConfig();
+    const queries = hasExplicitQuery
+      ? [req.body.q as string]
+      : monitoringConfig.klicova_slova.length > 0
+        ? [...new Set(monitoringConfig.klicova_slova)]
+        : [''];
+
+    const sync = await collectMonitoringInputs(zdroj, queries, Boolean(process.env.HLIDAC_TOKEN), {
       fetchNen: fetchNenTenders,
       fetchHlidac: fetchNewTenders,
     });
@@ -893,6 +962,7 @@ app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
       nalezeno: sync.inputs.length,
       novych: inserted,
       zdroje_pouzite: sync.zdroje_pouzite,
+      synchronizovano_at: new Date().toISOString(),
       ...(sync.varovani ? { varovani: sync.varovani } : {}),
     });
   } catch (err) {
@@ -913,15 +983,29 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 
     // NEN drží zakázky po lhůtě dál jako „Neukončen" → prošlé lhůty defaultně skryjeme
     // (nedá se do nich podat; jen zaplevelí feed). ?vse=1 je vrátí (audit/přehled).
-    const includeExpired = req.query.vse === '1';
-    const items = await listFeed(stav, undefined, { includeExpired });
+    const includeAll = req.query.vse === '1';
+    const categoryParam = typeof req.query.kategorie === 'string' ? req.query.kategorie : '';
+    if (categoryParam && !KOMODITA_KATEGORIE_VALUES.includes(categoryParam as any)) {
+      return res.status(400).json({ error: 'Neplatná kategorie monitoringu.' });
+    }
+    // Stav i kategorie se filtrují v SQL před interním limitem. Vyloučená slova a
+    // skóre potřebují širší množinu kandidátů; veřejná odpověď zůstává max. 200 řádků.
+    const items = await listFeed(stav, 1000, {
+      includeExpired: includeAll,
+      category: categoryParam ? categoryParam as (typeof KOMODITA_KATEGORIE_VALUES)[number] : undefined,
+    });
     // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
     const company = await getCompany('default');
+    const monitoringConfig = await getMonitoringConfig();
     const now = new Date();
-    const withScore = items.map((item) => ({
-      ...item,
-      go_no_go: scoreFeedItem(item, company ?? undefined, now),
-    }));
+    const withScore = items
+      .filter((item) => !isFeedItemExcluded(item, monitoringConfig))
+      .map((item) => ({
+        ...item,
+        go_no_go: scoreFeedItem(item, company ?? undefined, now, monitoringConfig),
+      }))
+      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || b.created_at.localeCompare(a.created_at))
+      .slice(0, 200);
     res.json(withScore);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -929,10 +1013,15 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 });
 
 // POST /api/monitoring/:id/prevzit - založí z feed položky zakázku (složka input/ + CRM stav).
-// Dokumenty ZD nahraje operátor ručně (stažení příloh zde neřešíme).
+// Volitelně (opt-in) stáhne přílohy zadávací dokumentace z NEN a spustí celý pipeline:
+//   body { stahnout_zd?: boolean, spustit?: boolean }
+// „spustit" je bezpečné i autonomně — money-gate před generováním PAUZNE řetězec na
+// waiting_approval, dokud operátor nepotvrdí ceny. Bez stažených souborů se „spustit" ignoruje.
 app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
   const actor = (req as any).user?.sub ?? null;
+  const stahnoutZd = req.body?.stahnout_zd === true;
+  const spustit = req.body?.spustit === true;
   try {
     const item = await getFeedItem(id);
     if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
@@ -962,7 +1051,53 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
     await setFeedStav(id, 'prevzata', tenderId);
 
-    res.json({ tender_id: tenderId });
+    // Volitelné stažení příloh ZD + spuštění pipeline. Rezervace zakázky je už hotová,
+    // takže selhání stahování NIKDY neshodí převzetí — jen doplní varování do odpovědi.
+    const varovani: string[] = [];
+    let pocetStazenych = 0;
+    let pocetNalezenych = 0;
+    let spusteno = false;
+    let jobId: string | null = null;
+
+    if (stahnoutZd) {
+      if (item.zdroj !== 'nen' || !item.url) {
+        varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN — nahrajte dokumenty ručně.');
+      } else {
+        const attachments = await fetchNenAttachments(item.url);
+        pocetNalezenych = attachments.length;
+        if (attachments.length === 0) {
+          varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
+        } else {
+          const result = await downloadNenAttachments(attachments, join(INPUT_DIR, tenderId));
+          pocetStazenych = result.pocet_stazenych;
+          varovani.push(...result.varovani);
+          if (pocetStazenych > 0) {
+            await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+          }
+        }
+      }
+    }
+
+    if (spustit) {
+      if (shouldAutoStartDownloadedPipeline(pocetNalezenych, pocetStazenych, varovani)) {
+        const { job, created } = enqueueRunAllPipeline(tenderId);
+        spusteno = true;
+        jobId = job.id;
+        if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
+      } else if (pocetNalezenych > 0) {
+        varovani.push(incompleteDownloadWarning(pocetStazenych, pocetNalezenych));
+      } else {
+        varovani.push('Pipeline nebyl spuštěn — nejsou k dispozici žádné vstupní dokumenty.');
+      }
+    }
+
+    res.json({
+      tender_id: tenderId,
+      pocet_stazenych: pocetStazenych,
+      spusteno,
+      jobId,
+      varovani,
+    });
   } catch (err) {
     if (err instanceof Error && err.message === 'db_unavailable') {
       return res.status(503).json({ error: 'Databáze není dostupná — zakázku nelze převzít.' });
@@ -1400,6 +1535,16 @@ app.get('/api/tenders/:id/cost', async (req, res) => {
   try {
     const summary = await getCostSummary(req.params.id);
     res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/costs/summary - agregovaný přehled AI nákladů napříč VŠEMI zakázkami
+// (cost observabilita — dřív šlo vidět jen per-zakázka, kredit tiše docházel).
+app.get('/api/costs/summary', async (_req, res) => {
+  try {
+    res.json(await getCostsOverview());
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2180,31 +2325,87 @@ const companyDocUpload = multer({
   },
 });
 
-// POST /api/companies/:companyId/documents - upload company docs (with slot)
+/** Doplní k manifest entries vypočtený stav platnosti (status + dny do expirace) pro FE. */
+function entriesWithExpiry(entries: DocSlotEntry[]) {
+  return entries.map(e => ({
+    ...e,
+    platnost_status: docExpiryStatus(e.platnost_do),
+    dny_do_expirace: daysUntilExpiry(e.platnost_do),
+  }));
+}
+
+// POST /api/companies/:companyId/documents - upload company docs (with slot, optional platnost_do)
 app.post('/api/companies/:companyId/documents', companyDocUpload.array('files', 20), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
+    // multer middleware typuje req.params volněji (string | string[]) — sjednotíme na string.
+    const companyId = String(req.params.companyId);
     const slot = (req.body?.slot || 'ostatni') as DocSlotType;
-    let manifest = await getDocManifest(req.params.companyId);
+    // Volitelné datum platnosti z form fieldu (aplikuje se na všechny soubory v requestu).
+    const rawPlatnost = typeof req.body?.platnost_do === 'string' ? req.body.platnost_do.trim() : '';
+    const platnostDo = rawPlatnost && isValidIsoDateString(rawPlatnost) ? rawPlatnost : null;
+    let manifest = await getDocManifest(companyId);
     for (const f of files) {
-      manifest = await addDocToSlot(req.params.companyId, slot, f.filename);
+      manifest = await addDocToSlot(companyId, slot, f.filename);
     }
-    const allFiles = await getCompanyDocuments(req.params.companyId);
-    res.json({ uploaded: files.map(f => f.filename), entries: manifest.entries, files: allFiles });
+    if (platnostDo) {
+      for (const f of files) {
+        const updated = await setDocPlatnost(companyId, slot, f.filename, platnostDo);
+        if (updated) manifest = updated;
+      }
+    }
+    const allFiles = await getCompanyDocuments(companyId);
+    res.json({ uploaded: files.map(f => f.filename), entries: entriesWithExpiry(manifest.entries), files: allFiles });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// GET /api/companies/:companyId/documents - list company docs (with manifest entries)
+// GET /api/companies/:companyId/documents - list company docs (with manifest entries + expiry status)
 app.get('/api/companies/:companyId/documents', async (req, res) => {
   try {
     const manifest = await getDocManifest(req.params.companyId);
     const files = await getCompanyDocuments(req.params.companyId);
-    res.json({ entries: manifest.entries, files });
+    res.json({ entries: entriesWithExpiry(manifest.entries), files });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/companies/:companyId/documents/:filename/platnost - nastaví/zruší platnost dokladu
+const PlatnostUpdateSchema = z.object({
+  platnost_do: z.union([
+    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'platnost_do musí být ve formátu YYYY-MM-DD'),
+    z.null(),
+  ]),
+  slot: z.string().optional(),
+});
+app.put('/api/companies/:companyId/documents/:filename/platnost', async (req, res) => {
+  const parsed = PlatnostUpdateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'invalid_body' });
+  }
+  const { platnost_do, slot: bodySlot } = parsed.data;
+  // Regex projde i neexistující datum (2026-02-30) — ověříme kalendářní platnost.
+  if (platnost_do && !isValidIsoDateString(platnost_do)) {
+    return res.status(400).json({ error: 'platnost_do není platné kalendářní datum' });
+  }
+  try {
+    const { companyId, filename } = req.params;
+    let slot = bodySlot as DocSlotType | undefined;
+    if (!slot) {
+      // Slot neuveden → dohledáme doklad podle názvu souboru.
+      const manifest = await getDocManifest(companyId);
+      const entry = manifest.entries.find(e => e.filename === filename);
+      if (!entry) return res.status(404).json({ error: 'Document not found' });
+      slot = entry.slot;
+    }
+    const manifest = await setDocPlatnost(companyId, slot, filename, platnost_do);
+    if (!manifest) return res.status(404).json({ error: 'Document not found' });
+    res.json({ success: true, entries: entriesWithExpiry(manifest.entries) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2215,7 +2416,7 @@ app.delete('/api/companies/:companyId/documents/:filename', async (req, res) => 
   try {
     const slot = (req.query.slot || 'ostatni') as DocSlotType;
     const manifest = await removeDocFromSlot(req.params.companyId, slot, req.params.filename);
-    res.json({ success: true, entries: manifest.entries });
+    res.json({ success: true, entries: entriesWithExpiry(manifest.entries) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2253,12 +2454,13 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
       const meta = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'tender-meta.json'), 'utf-8'));
       companyId = typeof meta.company_id === 'string' ? meta.company_id : null;
     } catch {}
-    const slotToCompanyFile = new Map<string, string>();
+    // Slot → firemní doklad (celý entry, nese platnost_do pro kontrolu expirace).
+    const slotToCompanyEntry = new Map<string, DocSlotEntry>();
     if (companyId) {
       try {
         const manifest = await getDocManifest(companyId);
         for (const e of manifest.entries) {
-          if (!slotToCompanyFile.has(e.slot)) slotToCompanyFile.set(e.slot, e.filename);
+          if (!slotToCompanyEntry.has(e.slot)) slotToCompanyEntry.set(e.slot, e);
         }
       } catch {}
     }
@@ -2272,13 +2474,13 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
 
     const items = requiredSlots.map((slot) => {
       const label = DOC_SLOTS.find((s) => s.type === slot)?.label ?? slot;
-      const companyFile = slotToCompanyFile.get(slot);
+      const companyEntry = slotToCompanyEntry.get(slot) ?? null;
+      const companyFile = companyEntry?.filename;
       // Příloha zakázky se páruje volně dle názvu slotu/souboru firmy (přílohy nemají sloty).
       const attMatch = attachments.find((f, i) =>
-        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, '')));
-      if (attMatch) return { slot, label, status: 'nahrano' as const, zdroj: 'zakazka' as const, filename: attMatch };
-      if (companyFile) return { slot, label, status: 'nahrano' as const, zdroj: 'firma' as const, filename: companyFile };
-      return { slot, label, status: 'chybi' as const };
+        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, ''))) ?? null;
+      // Expirace se vyhodnocuje z firemního dokladu (viz buildChecklistItem).
+      return buildChecklistItem({ slot, label, companyEntry, attachmentFilename: attMatch });
     });
 
     res.json({ items, company_id: companyId, analyza_hotova: true });
@@ -2316,8 +2518,14 @@ app.put('/api/tenders/:id/company', async (req, res) => {
     } catch {}
 
     // Copy company docs to prilohy (selective if we have kvalifikace info)
-    const { copied, missing } = await copyCompanyDocsToTender(company_id, id, requiredSlots);
-    res.json({ success: true, company_id, copied_documents: copied, missing_documents: missing });
+    const { copied, missing, warnings } = await copyCompanyDocsToTender(company_id, id, requiredSlots);
+    res.json({
+      success: true,
+      company_id,
+      copied_documents: copied,
+      missing_documents: missing,
+      warnings,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2383,30 +2591,10 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
-  const existing = [...jobs.values()].find((job) =>
-    job.tenderId === id && job.kind === 'pipeline'
-    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
-  if (existing) {
-    return res.json({ jobId: existing.id, status: existing.status, message: 'Pipeline already in progress' });
+  const { job: parent, created } = enqueueRunAllPipeline(id);
+  if (!created) {
+    return res.json({ jobId: parent.id, status: parent.status, message: 'Pipeline already in progress' });
   }
-
-  let jobId = randomUUID().slice(0, 8);
-  while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
-  const parent: Job = {
-    id: jobId,
-    tenderId: id,
-    step: 'all',
-    status: 'queued',
-    logs: [],
-    startedAt: new Date().toISOString(),
-    kind: 'pipeline',
-    currentStep: RUN_ALL_STEPS[0],
-  };
-  jobs.set(parent.id, parent);
-  enqueueStepJob(id, RUN_ALL_STEPS[0], parent.id);
-  scheduleJobsPersist();
-
-  console.log(`Pipeline job ${parent.id} queued for ${id}`);
   res.json({ jobId: parent.id, status: parent.status, currentStep: parent.currentStep });
 });
 

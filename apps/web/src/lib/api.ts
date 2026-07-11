@@ -197,12 +197,24 @@ export async function getHlidacTenders(query: string): Promise<HlidacTenderCandi
 // --- Monitoring feed (perzistovaný, s go/no-go skóre) ---
 
 export type MonitoringStav = 'nova' | 'prevzata' | 'ignorovana';
+export type MonitoringKategorie =
+  | 'it_av' | 'naradi_dilna' | 'zdravotnicke' | 'vozidla' | 'stavebni_prace'
+  | 'potraviny' | 'energie' | 'nabytek' | 'kancelar' | 'sluzby' | 'ostatni';
+
+export interface MonitoringConfig {
+  kategorie_zajmu: MonitoringKategorie[];
+  klicova_slova: string[];
+  vyloucena_slova: string[];
+  min_hodnota: number | null;
+  max_hodnota: number | null;
+}
 
 export interface MonitoringFeedItem {
   id: string;
   zdroj: string;
   zdroj_id: string;
   nazev: string;
+  kategorie: MonitoringKategorie;
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null;
@@ -216,7 +228,7 @@ export interface MonitoringFeedItem {
 /** Natáhne nové zakázky ze zdroje do feedu. Vrací počty nalezeno/nových. */
 export async function syncMonitoring(
   opts: { zdroj?: 'nen' | 'hlidac' | 'both'; q?: string } = {},
-): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; varovani?: string }> {
+): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; synchronizovano_at: string; varovani?: string }> {
   const res = await fetch(`${API_BASE}/monitoring/sync`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -230,13 +242,55 @@ export async function syncMonitoring(
   return res.json();
 }
 
-export async function getMonitoringFeed(stav: MonitoringStav = 'nova'): Promise<MonitoringFeedItem[]> {
-  return fetchJson(`/monitoring/feed?stav=${encodeURIComponent(stav)}`);
+export async function getMonitoringFeed(
+  stav: MonitoringStav = 'nova',
+  options: { kategorie?: MonitoringKategorie; vse?: boolean } = {},
+): Promise<MonitoringFeedItem[]> {
+  const params = new URLSearchParams({ stav });
+  if (options.kategorie) params.set('kategorie', options.kategorie);
+  if (options.vse) params.set('vse', '1');
+  return fetchJson(`/monitoring/feed?${params.toString()}`);
 }
 
-export async function prevzitMonitoring(id: string): Promise<{ tender_id: string; alreadyTaken?: boolean }> {
+export async function getMonitoringConfig(): Promise<MonitoringConfig> {
+  return fetchJson('/monitoring/config');
+}
+
+export async function saveMonitoringConfig(config: MonitoringConfig): Promise<MonitoringConfig> {
+  const res = await fetch(`${API_BASE}/monitoring/config`, {
+    method: 'PUT',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Nastavení monitoringu se nepodařilo uložit');
+  }
+  return res.json();
+}
+
+export interface PrevzitResult {
+  tender_id: string;
+  alreadyTaken?: boolean;
+  pocet_stazenych?: number;
+  spusteno?: boolean;
+  jobId?: string | null;
+  varovani?: string[];
+}
+
+/**
+ * Převezme zakázku z monitoringu. `stahnout_zd` navíc stáhne přílohy ZD z NEN do input/,
+ * `spustit` (jen s alespoň 1 staženým souborem) zařadí celý pipeline (s money-gate pauzou).
+ */
+export async function prevzitMonitoring(
+  id: string,
+  options: { stahnout_zd?: boolean; spustit?: boolean } = {},
+): Promise<PrevzitResult> {
   const res = await fetch(`${API_BASE}/monitoring/${id}/prevzit`, {
-    method: 'POST', headers: authHeaders(),
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
   });
   if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
   if (!res.ok) {
@@ -1395,6 +1449,9 @@ export interface PrilohaChecklistItem {
   status: 'nahrano' | 'chybi';
   zdroj?: 'firma' | 'zakazka';
   filename?: string;
+  platnost_do?: string | null;
+  platnost_status?: 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
+  poznamka?: string;  // např. „nahraný doklad je po platnosti" / „doklad brzy expiruje"
 }
 
 export interface PrilohaChecklist {
@@ -1434,6 +1491,31 @@ export interface CostSummary {
 
 export async function getCost(id: string): Promise<CostSummary> {
   return fetchJson(`/tenders/${id}/cost`);
+}
+
+/** Agregovaný přehled AI nákladů napříč všemi zakázkami (karta "AI náklady" v Přehledu). */
+export interface CostsOverview {
+  dnes_czk: number;
+  tyden_czk: number;
+  mesic_czk: number;
+  celkem_czk: number;
+  top_zakazky: Array<{ tender_id: string; nazev: string | null; celkem_czk: number }>;
+  po_dnech: Array<{ den: string; czk: number }>;
+}
+
+const EMPTY_COSTS_OVERVIEW: CostsOverview = {
+  dnes_czk: 0, tyden_czk: 0, mesic_czk: 0, celkem_czk: 0, top_zakazky: [], po_dnech: [],
+};
+
+/** Resilientní GET — chyba/401 vrátí prázdný přehled místo pádu Přehledu. */
+export async function getCostsOverview(): Promise<CostsOverview> {
+  try {
+    const res = await fetch(`${API_BASE}/costs/summary`, { headers: authHeaders() });
+    if (!res.ok) return EMPTY_COSTS_OVERVIEW;
+    return await res.json();
+  } catch {
+    return EMPTY_COSTS_OVERVIEW;
+  }
 }
 
 // --- ZIP downloads ---
@@ -1611,10 +1693,15 @@ export async function deleteCompanyApi(id: string): Promise<{ success: boolean }
 
 // --- Document slot types (mirrored from shared/constants) ---
 
+export type DocExpiryStatus = 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
+
 export interface DocSlotEntry {
   slot: string;
   filename: string;
   uploadedAt: string;
+  platnost_do?: string | null;       // ISO datum (YYYY-MM-DD) platnosti dokladu
+  platnost_status?: DocExpiryStatus; // dopočítáno serverem
+  dny_do_expirace?: number | null;   // dopočítáno serverem (kladné = platí, záporné = po platnosti)
 }
 
 export interface CompanyDocsResponse {
@@ -1653,6 +1740,28 @@ export async function deleteCompanyDoc(
     { method: 'DELETE', headers: authHeaders() },
   );
   if (!res.ok) throw new Error('Delete failed');
+  return res.json();
+}
+
+/** Nastaví/zruší datum platnosti dokladu (platnost_do = null → zrušit). */
+export async function setCompanyDocPlatnost(
+  companyId: string,
+  filename: string,
+  platnostDo: string | null,
+  slot: string = 'ostatni',
+): Promise<{ success: boolean; entries: DocSlotEntry[] }> {
+  const res = await fetch(
+    `${API_BASE}/companies/${companyId}/documents/${encodeURIComponent(filename)}/platnost`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ platnost_do: platnostDo, slot }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to set platnost');
+  }
   return res.json();
 }
 

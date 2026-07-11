@@ -20,6 +20,8 @@ import {
   hasPartsSelectionSnapshot,
   readPartsSelectionSnapshot,
 } from './parts-selection-guard.js';
+import { getDocManifest, mapQualifikaceToSlots } from './company-store.js';
+import { DOC_SLOTS, docExpiryStatus, type DocManifest } from './doc-slots.js';
 
 export interface SubmitGateResult {
   ready: boolean;
@@ -54,10 +56,49 @@ function filterBySelectedParts(items: PolozkaMatch[], selected: Set<string> | nu
   });
 }
 
-export async function computeSubmitGate(outputDir: string): Promise<SubmitGateResult> {
+export interface SubmitGateOptions {
+  now?: Date;
+  getCompanyManifest?: (companyId: string) => Promise<DocManifest>;
+}
+
+export async function computeSubmitGate(
+  outputDir: string,
+  options: SubmitGateOptions = {},
+): Promise<SubmitGateResult> {
   const problems: string[] = [];
   const warnings: string[] = [];
   let pricesUpdatedAt: string | null = null;
+
+  // Požadované kvalifikační sloty jsou součástí submit-gate, nejen informativního
+  // checklistu v UI. Expirovaný firemní doklad proto blokuje finalizaci fail-closed.
+  try {
+    const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+    const kvalifikace = analysis?.kvalifikace ?? analysis?.kvalifikacni_pozadavky;
+    const requiredSlots = Array.isArray(kvalifikace) ? mapQualifikaceToSlots(kvalifikace) : [];
+    if (requiredSlots.length > 0) {
+      const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+      const companyId = typeof meta?.company_id === 'string' ? meta.company_id : null;
+      if (companyId) {
+        const manifest = await (options.getCompanyManifest ?? getDocManifest)(companyId);
+        for (const slot of requiredSlots) {
+          // Checklist používá první doklad daného (nemulti) slotu; gate musí číst
+          // stejný záznam, aby se oba pohledy nerozcházely ani u legacy manifestu.
+          const companyEntry = manifest.entries.find((entry) => entry.slot === slot);
+          if (companyEntry && docExpiryStatus(companyEntry.platnost_do, options.now) === 'expirovany') {
+            const label = DOC_SLOTS.find((item) => item.type === slot)?.label ?? slot;
+            problems.push(`Doklad ${label} („${companyEntry.filename}") je po platnosti.`);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    // Chybějící analýza znamená, že checklist nemá požadované sloty. Pokud ale
+    // soubory existují a jsou nečitelné/poškozené, raději finalizaci zablokujeme.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      problems.push(`Nelze ověřit platnost kvalifikačních dokladů: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   // Cenové kontroly pro multi-item zakázky vždy přepočítáme z aktuálních dat.
   let productMatchRaw: string | null = null;

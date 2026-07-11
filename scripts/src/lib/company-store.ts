@@ -11,7 +11,7 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { DocSlotType, DocSlotEntry, DocManifest } from './doc-slots.js';
-import { DOC_SLOTS } from './doc-slots.js';
+import { DOC_SLOTS, docExpiryStatus } from './doc-slots.js';
 
 const ROOT = new URL('../../../', import.meta.url).pathname;
 const COMPANIES_DIR = join(ROOT, 'config', 'companies');
@@ -236,6 +236,24 @@ export async function addDocToSlot(companyId: string, slot: DocSlotType, filenam
   return manifest;
 }
 
+/**
+ * Nastaví (nebo zruší při null) datum platnosti `platnost_do` u konkrétního dokladu.
+ * Vrací aktualizovaný manifest, nebo null když doklad ve slotu neexistuje.
+ */
+export async function setDocPlatnost(
+  companyId: string,
+  slot: DocSlotType,
+  filename: string,
+  platnostDo: string | null,
+): Promise<DocManifest | null> {
+  const manifest = await getDocManifest(companyId);
+  const entry = manifest.entries.find(e => e.slot === slot && e.filename === filename);
+  if (!entry) return null;
+  entry.platnost_do = platnostDo;
+  await saveDocManifest(companyId, manifest);
+  return manifest;
+}
+
 /** Remove a file from a slot (deletes from disk too) */
 export async function removeDocFromSlot(companyId: string, slot: DocSlotType, filename: string): Promise<DocManifest> {
   const manifest = await getDocManifest(companyId);
@@ -288,33 +306,41 @@ export function mapQualifikaceToSlots(
   return [...slots];
 }
 
+export function selectCompanyDocsToCopy(
+  entries: DocSlotEntry[],
+  requiredSlots?: DocSlotType[],
+  now: Date = new Date(),
+): { entries: DocSlotEntry[]; missing: DocSlotType[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const validEntries = entries.filter((entry) => {
+    if (docExpiryStatus(entry.platnost_do, now) !== 'expirovany') return true;
+    warnings.push(`Doklad „${entry.filename}" je po platnosti — nebyl zkopírován.`);
+    return false;
+  });
+  if (!requiredSlots?.length) return { entries: validEntries, missing: [], warnings };
+
+  const slotsWithOstatni = new Set([...requiredSlots, 'ostatni' as DocSlotType]);
+  const selected = validEntries.filter((entry) => slotsWithOstatni.has(entry.slot));
+  const missing = requiredSlots.filter((slot) => !validEntries.some((entry) => entry.slot === slot));
+  return { entries: selected, missing, warnings };
+}
+
 /** Copy company's default qualification docs to tender's prilohy/ dir */
 export async function copyCompanyDocsToTender(
   companyId: string,
   tenderId: string,
   requiredSlots?: DocSlotType[],
-): Promise<{ copied: string[]; missing: DocSlotType[] }> {
+): Promise<{ copied: string[]; missing: DocSlotType[]; warnings: string[] }> {
   const srcDir = join(COMPANIES_DIR, companyId, 'documents');
   const destDir = join(ROOT, 'output', tenderId, 'prilohy');
   await mkdir(destDir, { recursive: true });
 
   const manifest = await getDocManifest(companyId);
 
-  // Filter entries based on required slots
-  let entriesToCopy = manifest.entries;
-  const missing: DocSlotType[] = [];
-
-  if (requiredSlots && requiredSlots.length > 0) {
-    const slotsWithOstatni = new Set([...requiredSlots, 'ostatni' as DocSlotType]);
-    entriesToCopy = manifest.entries.filter(e => slotsWithOstatni.has(e.slot));
-
-    // Check for missing required slots
-    for (const slot of requiredSlots) {
-      if (!manifest.entries.some(e => e.slot === slot)) {
-        missing.push(slot);
-      }
-    }
-  }
+  // Expirovaný firemní doklad se nesmí dostat ani do příloh zakázky, ani později
+  // do podacího balíku. Legacy doklady bez data zůstávají zpětně kompatibilní.
+  const selection = selectCompanyDocsToCopy(manifest.entries, requiredSlots);
+  const entriesToCopy = selection.entries;
 
   const copied: string[] = [];
   for (const entry of entriesToCopy) {
@@ -324,7 +350,7 @@ export async function copyCompanyDocsToTender(
     } catch {}
   }
 
-  return { copied, missing };
+  return { copied, missing: selection.missing, warnings: selection.warnings };
 }
 
 /** Get company for a tender (from tender-meta.json) */

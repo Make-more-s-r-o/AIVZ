@@ -13,7 +13,49 @@ const NEN_BASE_URL = 'https://nen.nipez.cz';
 const NEN_LIST_PATH = '/verejne-zakazky';
 const NEN_REQUEST_TIMEOUT_MS = 20_000;
 const NEN_PAGE_DELAY_MS = 300;
+const MAX_NEN_REDIRECTS = 3;
 export const DEFAULT_MAX_NEN_PAGES = 5;
+
+/**
+ * SSRF pojistka pro všechny URL, které pocházejí z HTML/DB. NEN smí být osloven
+ * pouze přes HTTPS, přesně na produkčním hostname a bez nestandardního portu.
+ */
+export function isAllowedNenUrl(value: string | URL): boolean {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    return url.protocol === 'https:'
+      && url.hostname === 'nen.nipez.cz'
+      && url.port === ''
+      && url.username === ''
+      && url.password === '';
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch s ručně ověřenými redirecty; automatické následování by obcházelo SSRF allowlist. */
+export async function fetchAllowedNenUrl(
+  initialUrl: string,
+  fetchFn: typeof fetch,
+  init: RequestInit = {},
+): Promise<Response> {
+  let currentUrl = initialUrl;
+  for (let redirects = 0; ; redirects += 1) {
+    if (!isAllowedNenUrl(currentUrl)) {
+      throw new Error(`nepovolená NEN URL: ${currentUrl}`);
+    }
+    const response = await fetchFn(currentUrl, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    // Tělo redirect odpovědi nepotřebujeme; zrušení uvolní spojení před dalším hopem.
+    await response.body?.cancel().catch(() => {});
+    if (redirects >= MAX_NEN_REDIRECTS) {
+      throw new Error(`překročen limit ${MAX_NEN_REDIRECTS} přesměrování`);
+    }
+    const location = response.headers.get('location');
+    if (!location) throw new Error('redirect neobsahuje hlavičku Location');
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+}
 
 function envMaxPages(value: string | undefined): number {
   const parsed = Number(value);
@@ -136,6 +178,87 @@ export function parseNenListing(html: string): NenTenderCandidate[] {
   }
 
   return candidates;
+}
+
+// --- Přílohy zadávací dokumentace (podstránka /zadavaci-dokumentace) ---
+
+export interface NenAttachment {
+  /** Zobrazovaný název souboru z tabulky ZD (např. „Krycí list.docx"). */
+  nazev: string;
+  /** Absolutní odkaz na stažení souboru (NEN `/file?id=…`, 302 → skutečný obsah). */
+  url: string;
+}
+
+/**
+ * Sestaví URL podstránky se zadávací dokumentací z odkazu na detail zakázky.
+ * NEN drží přílohy na `<detail>/zadavaci-dokumentace` (ověřeno reálně 2026-07 na
+ * 3 zakázkách). Ořízne případný trailing slash i existující `/zadavaci-dokumentace`
+ * (idempotentní), aby fungovalo jak nad čistým detailem, tak nad už doplněnou cestou.
+ */
+export function zadavaciDokumentaceUrl(detailUrl: string): string {
+  const trimmed = detailUrl.replace(/\/+$/, '');
+  if (/\/zadavaci-dokumentace$/i.test(trimmed)) return trimmed;
+  return `${trimmed}/zadavaci-dokumentace`;
+}
+
+/**
+ * Čistý parser HTML podstránky se ZD. Oddělený od fetchování kvůli testu nad fixture.
+ * Přílohy jsou kotvy `<a class="file-value__file" href="/file?id=…">Název</a>` v buňce
+ * `data-title="Soubor"`. Deduplikuje podle absolutní URL (stejný soubor bývá odkazovaný
+ * víckrát). Relativní `/file?id=` odkazy zabsolutní na NEN doménu.
+ */
+export function parseNenAttachments(html: string): NenAttachment[] {
+  const attachments: NenAttachment[] = [];
+  const seen = new Set<string>();
+  const anchorRegex = /<a\b[^>]*class="[^"]*file-value__file[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const anchorTag = match[0];
+    const href = firstMatch(anchorTag, /href="([^"]+)"/i);
+    if (!href) continue;
+    const nazev = cleanText(match[1]);
+    if (!nazev) continue;
+    const url = href.startsWith('http') ? href : `${NEN_BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    attachments.push({ nazev, url });
+  }
+
+  return attachments;
+}
+
+/**
+ * Natáhne seznam příloh zadávací dokumentace pro danou zakázku z NEN. `detailUrl` je
+ * odkaz na detail zakázky (z feedu `monitoring_zakazky.url`). Graceful: jakákoli chyba
+ * (nedostupný zdroj, HTTP != 2xx, timeout) vrací prázdné pole — volající to bere jako
+ * „přílohy nejsou k dispozici", ne jako pád.
+ */
+export async function fetchNenAttachments(
+  detailUrl: string,
+  options: { fetchFn?: typeof fetch } = {},
+): Promise<NenAttachment[]> {
+  const fetchFn = options.fetchFn ?? fetch;
+  const url = zadavaciDokumentaceUrl(detailUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetchAllowedNenUrl(url, fetchFn, {
+      headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.warn(`NEN ZD vrátil HTTP ${response.status} pro ${url} — přílohy přeskočeny.`);
+      return [];
+    }
+    return parseNenAttachments(await response.text());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`NEN ZD není dostupná (${message}) pro ${url} — přílohy přeskočeny.`);
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** Vytáhne text buňky podle `data-title` atributu (case/attr-order tolerantní). */

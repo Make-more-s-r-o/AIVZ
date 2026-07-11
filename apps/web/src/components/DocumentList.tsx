@@ -106,35 +106,47 @@ function ValidationChecklist({ result }: { result: FieldValidationResult }) {
  */
 function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
   const nahrano = item.status === 'nahrano';
+  // Doklad po platnosti přijde jako status 'chybi' + poznámka → zvýrazníme jako expiraci.
+  const expirovany = item.status === 'chybi' && item.platnost_status === 'expirovany';
+  const expiruje = nahrano && item.platnost_status === 'expiruje';
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}>
-      <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)' }}>
-        {item.label}
-      </span>
-      {nahrano ? (
-        <>
-          <Badge tone="success" size="sm">
-            Nahráno ({item.zdroj === 'firma' ? 'firma' : 'zakázka'})
-          </Badge>
-          {item.filename && (
-            <span
-              title={item.filename}
-              style={{
-                fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)',
-                maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}
-            >
-              {item.filename}
-            </span>
-          )}
-        </>
-      ) : (
-        <>
-          <Badge tone="warning" size="sm">Chybí</Badge>
-          <a href="#kvalifikacni-doklady" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--info-fg)', whiteSpace: 'nowrap' }}>
-            nahrát níže
-          </a>
-        </>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 0', borderBottom: '1px solid var(--border-subtle)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)' }}>
+          {item.label}
+        </span>
+        {nahrano ? (
+          <>
+            <Badge tone={expiruje ? 'warning' : 'success'} size="sm">
+              Nahráno ({item.zdroj === 'firma' ? 'firma' : 'zakázka'})
+            </Badge>
+            {item.filename && (
+              <span
+                title={item.filename}
+                style={{
+                  fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)',
+                  maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}
+              >
+                {item.filename}
+              </span>
+            )}
+          </>
+        ) : (
+          <>
+            <Badge tone={expirovany ? 'danger' : 'warning'} size="sm">
+              {expirovany ? 'Po platnosti' : 'Chybí'}
+            </Badge>
+            <a href="#kvalifikacni-doklady" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--info-fg)', whiteSpace: 'nowrap' }}>
+              nahrát níže
+            </a>
+          </>
+        )}
+      </div>
+      {item.poznamka && (
+        <span style={{ fontSize: 'var(--font-size-xs)', color: expirovany ? 'var(--danger-fg)' : 'var(--warning-fg)' }}>
+          {item.poznamka}
+        </span>
       )}
     </div>
   );
