@@ -138,6 +138,87 @@ export function parseNenListing(html: string): NenTenderCandidate[] {
   return candidates;
 }
 
+// --- Přílohy zadávací dokumentace (podstránka /zadavaci-dokumentace) ---
+
+export interface NenAttachment {
+  /** Zobrazovaný název souboru z tabulky ZD (např. „Krycí list.docx"). */
+  nazev: string;
+  /** Absolutní odkaz na stažení souboru (NEN `/file?id=…`, 302 → skutečný obsah). */
+  url: string;
+}
+
+/**
+ * Sestaví URL podstránky se zadávací dokumentací z odkazu na detail zakázky.
+ * NEN drží přílohy na `<detail>/zadavaci-dokumentace` (ověřeno reálně 2026-07 na
+ * 3 zakázkách). Ořízne případný trailing slash i existující `/zadavaci-dokumentace`
+ * (idempotentní), aby fungovalo jak nad čistým detailem, tak nad už doplněnou cestou.
+ */
+export function zadavaciDokumentaceUrl(detailUrl: string): string {
+  const trimmed = detailUrl.replace(/\/+$/, '');
+  if (/\/zadavaci-dokumentace$/i.test(trimmed)) return trimmed;
+  return `${trimmed}/zadavaci-dokumentace`;
+}
+
+/**
+ * Čistý parser HTML podstránky se ZD. Oddělený od fetchování kvůli testu nad fixture.
+ * Přílohy jsou kotvy `<a class="file-value__file" href="/file?id=…">Název</a>` v buňce
+ * `data-title="Soubor"`. Deduplikuje podle absolutní URL (stejný soubor bývá odkazovaný
+ * víckrát). Relativní `/file?id=` odkazy zabsolutní na NEN doménu.
+ */
+export function parseNenAttachments(html: string): NenAttachment[] {
+  const attachments: NenAttachment[] = [];
+  const seen = new Set<string>();
+  const anchorRegex = /<a\b[^>]*class="[^"]*file-value__file[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const anchorTag = match[0];
+    const href = firstMatch(anchorTag, /href="([^"]+)"/i);
+    if (!href) continue;
+    const nazev = cleanText(match[1]);
+    if (!nazev) continue;
+    const url = href.startsWith('http') ? href : `${NEN_BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    attachments.push({ nazev, url });
+  }
+
+  return attachments;
+}
+
+/**
+ * Natáhne seznam příloh zadávací dokumentace pro danou zakázku z NEN. `detailUrl` je
+ * odkaz na detail zakázky (z feedu `monitoring_zakazky.url`). Graceful: jakákoli chyba
+ * (nedostupný zdroj, HTTP != 2xx, timeout) vrací prázdné pole — volající to bere jako
+ * „přílohy nejsou k dispozici", ne jako pád.
+ */
+export async function fetchNenAttachments(
+  detailUrl: string,
+  options: { fetchFn?: typeof fetch } = {},
+): Promise<NenAttachment[]> {
+  const fetchFn = options.fetchFn ?? fetch;
+  const url = zadavaciDokumentaceUrl(detailUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetchFn(url, {
+      headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.warn(`NEN ZD vrátil HTTP ${response.status} pro ${url} — přílohy přeskočeny.`);
+      return [];
+    }
+    return parseNenAttachments(await response.text());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`NEN ZD není dostupná (${message}) pro ${url} — přílohy přeskočeny.`);
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /** Vytáhne text buňky podle `data-title` atributu (case/attr-order tolerantní). */
 function cellByTitle(rowHtml: string, title: string): string | null {
   const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

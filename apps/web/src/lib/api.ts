@@ -234,9 +234,27 @@ export async function getMonitoringFeed(stav: MonitoringStav = 'nova'): Promise<
   return fetchJson(`/monitoring/feed?stav=${encodeURIComponent(stav)}`);
 }
 
-export async function prevzitMonitoring(id: string): Promise<{ tender_id: string; alreadyTaken?: boolean }> {
+export interface PrevzitResult {
+  tender_id: string;
+  alreadyTaken?: boolean;
+  pocet_stazenych?: number;
+  spusteno?: boolean;
+  jobId?: string | null;
+  varovani?: string[];
+}
+
+/**
+ * Převezme zakázku z monitoringu. `stahnout_zd` navíc stáhne přílohy ZD z NEN do input/,
+ * `spustit` (jen s alespoň 1 staženým souborem) zařadí celý pipeline (s money-gate pauzou).
+ */
+export async function prevzitMonitoring(
+  id: string,
+  options: { stahnout_zd?: boolean; spustit?: boolean } = {},
+): Promise<PrevzitResult> {
   const res = await fetch(`${API_BASE}/monitoring/${id}/prevzit`, {
-    method: 'POST', headers: authHeaders(),
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
   });
   if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
   if (!res.ok) {

@@ -86,7 +86,8 @@ import { listFindings } from './lib/web-findings-store.js';
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
-import { fetchNenTenders } from './lib/monitoring/nen-client.js';
+import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
+import { downloadNenAttachments } from './lib/monitoring/zd-download.js';
 import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
 import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
@@ -355,6 +356,36 @@ function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, st
   if (startQueue) processQueue();
   console.log(`Job ${jobId} queued: ${step} for ${tenderId}`);
   return job;
+}
+
+/**
+ * Zařadí celý pipeline (extract→…→validate) jako jeden řetězený parent job. Sdílené
+ * endpointem `run/all` i převzetím z monitoringu. Když už pro zakázku běží/čeká pipeline,
+ * vrátí ho beze změny (created=false) — idempotentní, nikdy nespustí druhý souběžný řetězec.
+ */
+function enqueueRunAllPipeline(tenderId: string): { job: Job; created: boolean } {
+  const existing = [...jobs.values()].find((job) =>
+    job.tenderId === tenderId && job.kind === 'pipeline'
+    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
+  if (existing) return { job: existing, created: false };
+
+  let parentId = randomUUID().slice(0, 8);
+  while (jobs.has(parentId)) parentId = randomUUID().slice(0, 8);
+  const parent: Job = {
+    id: parentId,
+    tenderId,
+    step: 'all',
+    status: 'queued',
+    logs: [],
+    startedAt: new Date().toISOString(),
+    kind: 'pipeline',
+    currentStep: RUN_ALL_STEPS[0],
+  };
+  jobs.set(parent.id, parent);
+  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id);
+  scheduleJobsPersist();
+  console.log(`Pipeline job ${parent.id} queued for ${tenderId}`);
+  return { job: parent, created: true };
 }
 
 function appendJobLogs(job: Job, lines: string[]) {
@@ -929,10 +960,15 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 });
 
 // POST /api/monitoring/:id/prevzit - založí z feed položky zakázku (složka input/ + CRM stav).
-// Dokumenty ZD nahraje operátor ručně (stažení příloh zde neřešíme).
+// Volitelně (opt-in) stáhne přílohy zadávací dokumentace z NEN a spustí celý pipeline:
+//   body { stahnout_zd?: boolean, spustit?: boolean }
+// „spustit" je bezpečné i autonomně — money-gate před generováním PAUZNE řetězec na
+// waiting_approval, dokud operátor nepotvrdí ceny. Bez stažených souborů se „spustit" ignoruje.
 app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
   const actor = (req as any).user?.sub ?? null;
+  const stahnoutZd = req.body?.stahnout_zd === true;
+  const spustit = req.body?.spustit === true;
   try {
     const item = await getFeedItem(id);
     if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
@@ -962,7 +998,49 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
     await setFeedStav(id, 'prevzata', tenderId);
 
-    res.json({ tender_id: tenderId });
+    // Volitelné stažení příloh ZD + spuštění pipeline. Rezervace zakázky je už hotová,
+    // takže selhání stahování NIKDY neshodí převzetí — jen doplní varování do odpovědi.
+    const varovani: string[] = [];
+    let pocetStazenych = 0;
+    let spusteno = false;
+    let jobId: string | null = null;
+
+    if (stahnoutZd) {
+      if (item.zdroj !== 'nen' || !item.url) {
+        varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN — nahrajte dokumenty ručně.');
+      } else {
+        const attachments = await fetchNenAttachments(item.url);
+        if (attachments.length === 0) {
+          varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
+        } else {
+          const result = await downloadNenAttachments(attachments, join(INPUT_DIR, tenderId));
+          pocetStazenych = result.pocet_stazenych;
+          varovani.push(...result.varovani);
+          if (pocetStazenych > 0) {
+            await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+          }
+        }
+      }
+    }
+
+    if (spustit) {
+      if (pocetStazenych > 0) {
+        const { job, created } = enqueueRunAllPipeline(tenderId);
+        spusteno = true;
+        jobId = job.id;
+        if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
+      } else {
+        varovani.push('Pipeline nebyl spuštěn — nejsou k dispozici žádné vstupní dokumenty.');
+      }
+    }
+
+    res.json({
+      tender_id: tenderId,
+      pocet_stazenych: pocetStazenych,
+      spusteno,
+      jobId,
+      varovani,
+    });
   } catch (err) {
     if (err instanceof Error && err.message === 'db_unavailable') {
       return res.status(503).json({ error: 'Databáze není dostupná — zakázku nelze převzít.' });
@@ -2383,30 +2461,10 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
-  const existing = [...jobs.values()].find((job) =>
-    job.tenderId === id && job.kind === 'pipeline'
-    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
-  if (existing) {
-    return res.json({ jobId: existing.id, status: existing.status, message: 'Pipeline already in progress' });
+  const { job: parent, created } = enqueueRunAllPipeline(id);
+  if (!created) {
+    return res.json({ jobId: parent.id, status: parent.status, message: 'Pipeline already in progress' });
   }
-
-  let jobId = randomUUID().slice(0, 8);
-  while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
-  const parent: Job = {
-    id: jobId,
-    tenderId: id,
-    step: 'all',
-    status: 'queued',
-    logs: [],
-    startedAt: new Date().toISOString(),
-    kind: 'pipeline',
-    currentStep: RUN_ALL_STEPS[0],
-  };
-  jobs.set(parent.id, parent);
-  enqueueStepJob(id, RUN_ALL_STEPS[0], parent.id);
-  scheduleJobsPersist();
-
-  console.log(`Pipeline job ${parent.id} queued for ${id}`);
   res.json({ jobId: parent.id, status: parent.status, currentStep: parent.currentStep });
 });
 

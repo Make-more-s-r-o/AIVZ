@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Inbox, FileText, ArrowRight, Radar, ExternalLink, RefreshCw, Check, X } from 'lucide-react';
+import { Inbox, FileText, ArrowRight, Radar, ExternalLink, RefreshCw, Check, X, Sparkles } from 'lucide-react';
 import FileUpload from '../components/FileUpload';
 import { Button, Card, useToast } from '../components/ui';
 import { StageBadge } from '../components/crm';
@@ -102,19 +102,33 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     }
   }
 
-  async function handlePrevzit(item: MonitoringFeedItem) {
+  async function handlePrevzit(item: MonitoringFeedItem, zpracovat = false) {
     if (busyId) return;
     setBusyId(item.id);
     try {
-      const r = await prevzitMonitoring(item.id);
+      const r = await prevzitMonitoring(
+        item.id,
+        zpracovat ? { stahnout_zd: true, spustit: true } : {},
+      );
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['monitoring-feed'] }),
         qc.invalidateQueries({ queryKey: ['tenders'] }),
       ]);
-      toast(
-        r.alreadyTaken ? 'Zakázka už byla převzata — otevírám detail' : 'Zakázka založena — otevírám detail, nahrajte zadávací dokumentaci',
-        'success',
-      );
+      if (r.alreadyTaken) {
+        toast('Zakázka už byla převzata — otevírám detail', 'success');
+      } else if (zpracovat) {
+        // Varování (nepovolené typy, limity, „už běží") ukaž zvlášť, ať nejsou přehlédnuta.
+        if (r.varovani && r.varovani.length > 0) toast(r.varovani.join(' '), 'danger');
+        if (r.spusteno) {
+          toast(`Staženo ${r.pocet_stazenych ?? 0} dokumentů ZD — pipeline spuštěn, otevírám detail`, 'success');
+        } else if ((r.pocet_stazenych ?? 0) > 0) {
+          toast(`Staženo ${r.pocet_stazenych} dokumentů ZD — otevírám detail`, 'success');
+        } else {
+          toast('Zakázka založena, ale žádné dokumenty ZD se nepodařilo stáhnout — nahrajte je ručně', 'success');
+        }
+      } else {
+        toast('Zakázka založena — otevírám detail, nahrajte zadávací dokumentaci', 'success');
+      }
       if (r.tender_id && onOpen) onOpen(r.tender_id);
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Převzetí selhalo', 'danger');
@@ -231,7 +245,7 @@ function FeedTable({ items, stav, busyId, onPrevzit, onIgnorovat }: {
   items: MonitoringFeedItem[];
   stav: MonitoringStav;
   busyId: string | null;
-  onPrevzit: (item: MonitoringFeedItem) => void;
+  onPrevzit: (item: MonitoringFeedItem, zpracovat?: boolean) => void;
   onIgnorovat: (item: MonitoringFeedItem) => void;
 }) {
   return (
@@ -277,7 +291,19 @@ function FeedTable({ items, stav, busyId, onPrevzit, onIgnorovat }: {
               <Td align="right">
                 {stav === 'nova' ? (
                   <div style={{ display: 'inline-flex', gap: 6 }}>
-                    <Button size="sm" variant="primary" iconLeft={<Check size={14} />} disabled={busyId === item.id} onClick={() => onPrevzit(item)}>
+                    {item.zdroj === 'nen' && (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        iconLeft={<Sparkles size={14} />}
+                        disabled={busyId === item.id}
+                        onClick={() => onPrevzit(item, true)}
+                        title="Stáhne zadávací dokumentaci z NEN a spustí celý pipeline (zastaví se na potvrzení cen)"
+                      >
+                        Převzít a zpracovat
+                      </Button>
+                    )}
+                    <Button size="sm" variant={item.zdroj === 'nen' ? 'secondary' : 'primary'} iconLeft={<Check size={14} />} disabled={busyId === item.id} onClick={() => onPrevzit(item)}>
                       Převzít
                     </Button>
                     <Button size="sm" variant="ghost" iconLeft={<X size={14} />} disabled={busyId === item.id} onClick={() => onIgnorovat(item)}>
