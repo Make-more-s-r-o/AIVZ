@@ -3,7 +3,7 @@ import cors from 'cors';
 import multer from 'multer';
 import archiver from 'archiver';
 import { readFile, readdir, mkdir, stat, writeFile, rm, rename } from 'fs/promises';
-import { getCostSummary } from './lib/cost-tracker.js';
+import { getCostSummary, getCostsOverview } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
 import { existsSync, createWriteStream, createReadStream } from 'fs';
 import { spawn } from 'child_process';
@@ -1478,6 +1478,16 @@ app.get('/api/tenders/:id/cost', async (req, res) => {
   try {
     const summary = await getCostSummary(req.params.id);
     res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/costs/summary - agregovaný přehled AI nákladů napříč VŠEMI zakázkami
+// (cost observabilita — dřív šlo vidět jen per-zakázka, kredit tiše docházel).
+app.get('/api/costs/summary', async (_req, res) => {
+  try {
+    res.json(await getCostsOverview());
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

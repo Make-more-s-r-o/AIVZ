@@ -1454,6 +1454,31 @@ export async function getCost(id: string): Promise<CostSummary> {
   return fetchJson(`/tenders/${id}/cost`);
 }
 
+/** Agregovaný přehled AI nákladů napříč všemi zakázkami (karta "AI náklady" v Přehledu). */
+export interface CostsOverview {
+  dnes_czk: number;
+  tyden_czk: number;
+  mesic_czk: number;
+  celkem_czk: number;
+  top_zakazky: Array<{ tender_id: string; nazev: string | null; celkem_czk: number }>;
+  po_dnech: Array<{ den: string; czk: number }>;
+}
+
+const EMPTY_COSTS_OVERVIEW: CostsOverview = {
+  dnes_czk: 0, tyden_czk: 0, mesic_czk: 0, celkem_czk: 0, top_zakazky: [], po_dnech: [],
+};
+
+/** Resilientní GET — chyba/401 vrátí prázdný přehled místo pádu Přehledu. */
+export async function getCostsOverview(): Promise<CostsOverview> {
+  try {
+    const res = await fetch(`${API_BASE}/costs/summary`, { headers: authHeaders() });
+    if (!res.ok) return EMPTY_COSTS_OVERVIEW;
+    return await res.json();
+  } catch {
+    return EMPTY_COSTS_OVERVIEW;
+  }
+}
+
 // --- ZIP downloads ---
 
 export function getDocumentsZipUrl(id: string): string {

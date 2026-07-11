@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Target, TrendingUp, Coins, FileText, Sparkles, ListChecks, Bell, GitBranch, UserPlus, History, Award } from 'lucide-react';
 import {
-  getTendersSummary, getRecentActivity, getUsers, getMyTasks, getOutcomeStats,
+  getTendersSummary, getRecentActivity, getUsers, getMyTasks, getOutcomeStats, getCostsOverview,
   type TenderSummary, type TenderAnalysisSummary, type Task,
 } from '../lib/api';
 import { getStoredUser } from '../lib/auth';
@@ -65,6 +65,9 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
   });
   const { data: outcomeStats } = useQuery({
     queryKey: ['outcome-stats'], queryFn: getOutcomeStats, retry: false, staleTime: 60_000,
+  });
+  const { data: costsOverview } = useQuery({
+    queryKey: ['costs-overview'], queryFn: getCostsOverview, retry: false, staleTime: 60_000,
   });
 
   const rows: Row[] = tenders.map((t) => ({
@@ -271,6 +274,56 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
         )}
       </Card>
 
+      {/* AI náklady — agregovaný přehled napříč všemi zakázkami (cost observabilita) */}
+      <Card title="AI náklady">
+        {!costsOverview || costsOverview.celkem_czk === 0 ? (
+          <EmptyState icon={<Sparkles size={20} strokeWidth={2} />}>
+            Zatím žádné zaznamenané AI náklady.
+          </EmptyState>
+        ) : (
+          <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 24 }}>
+              <MoneyStat label="Dnes" czk={costsOverview.dnes_czk} />
+              <MoneyStat label="Týden" czk={costsOverview.tyden_czk} />
+              <MoneyStat label="Měsíc" czk={costsOverview.mesic_czk} />
+              <MoneyStat label="Celkem" czk={costsOverview.celkem_czk} />
+            </div>
+
+            {costsOverview.top_zakazky.length > 0 && (
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <div style={{
+                  fontSize: 'var(--font-size-xs)', fontWeight: 'var(--weight-semibold)', letterSpacing: 'var(--tracking-caps)',
+                  textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: 6,
+                }}>Nejnákladnější zakázky</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {costsOverview.top_zakazky.slice(0, 5).map((z) => (
+                    <div
+                      key={z.tender_id}
+                      onClick={() => onOpen?.(z.tender_id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === 'Enter') onOpen?.(z.tender_id); }}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                        cursor: onOpen ? 'pointer' : 'default', fontSize: 'var(--font-size-sm)',
+                      }}
+                    >
+                      <span style={{
+                        color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{z.nazev ?? tenderName(z.tender_id)}</span>
+                      <span style={{
+                        flexShrink: 0, fontWeight: 'var(--weight-medium)', color: 'var(--text-secondary)',
+                        fontVariantNumeric: 'tabular-nums',
+                      }}>{fmtCZK(z.celkem_czk)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* Úkoly + Aktivita */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
         <Card title="Moje úkoly" padding={myTasks.length ? 0 : 16}>
@@ -379,6 +432,19 @@ function StatBlock({ label, value, tone }: { label: string; value: number; tone:
         fontSize: 'var(--font-size-lg)', fontWeight: 'var(--weight-bold)', lineHeight: 1,
         color: statTone[tone], fontVariantNumeric: 'tabular-nums',
       }}>{value}</span>
+      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{label}</span>
+    </div>
+  );
+}
+
+// Velké peněžní číslo pro kartu "AI náklady" (dnes/týden/měsíc/celkem).
+function MoneyStat({ label, czk }: { label: string; czk: number }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{
+        fontSize: 'var(--font-size-2xl)', fontWeight: 'var(--weight-bold)', lineHeight: 1,
+        color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums',
+      }}>{fmtCZK(czk)}</span>
       <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{label}</span>
     </div>
   );
