@@ -106,17 +106,33 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
   return inserted;
 }
 
-/** Seznam feedu; volitelně filtrovaný stavem. Bez DB → prázdno. */
-export async function listFeed(stav?: MonitoringStav, limit = 200): Promise<FeedItem[]> {
+/**
+ * Seznam feedu; volitelně filtrovaný stavem. Bez DB → prázdno.
+ * Prošlé lhůty se defaultně skrývají (NEN nechává zakázky po lhůtě jako „Neukončen",
+ * ale podat se do nich už nedá) — includeExpired: true je vrátí (audit/přehled).
+ */
+export async function listFeed(
+  stav?: MonitoringStav,
+  limit = 200,
+  options: { includeExpired?: boolean } = {},
+): Promise<FeedItem[]> {
   if (!dbReady()) return [];
   try {
-    const where = stav ? 'WHERE stav = $1' : '';
-    const params = stav ? [stav, limit] : [limit];
-    const limitPlaceholder = stav ? '$2' : '$1';
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (stav) {
+      params.push(stav);
+      conditions.push(`stav = $${params.length}`);
+    }
+    if (!options.includeExpired) {
+      conditions.push('(lhuta_nabidek IS NULL OR lhuta_nabidek >= CURRENT_DATE)');
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit);
     const r = await query<FeedDbRow>(
       `SELECT ${FEED_COLS} FROM monitoring_zakazky ${where}
        ORDER BY (lhuta_nabidek IS NULL), lhuta_nabidek ASC, created_at DESC
-       LIMIT ${limitPlaceholder}`,
+       LIMIT $${params.length}`,
       params,
     );
     return r.rows.map(normalizeFeedRow);
