@@ -1576,6 +1576,35 @@ export async function getCostsOverview(): Promise<CostsOverview> {
   }
 }
 
+export interface Governance {
+  ingest_enabled: boolean;
+  ai_jobs_enabled: boolean;
+  generate_enabled: boolean;
+  finalize_enabled: boolean;
+  submission_enabled: boolean;
+  denni_ai_limit_czk: number | null;
+  poznamka: string | null;
+  zmeneno_at: string | null;
+  zmeneno_kym: string | null;
+}
+
+export async function getGovernance(): Promise<Governance> {
+  return fetchJson('/governance');
+}
+
+export async function saveGovernance(patch: Partial<Governance>): Promise<Governance> {
+  const res = await fetch(`${API_BASE}/governance`, {
+    method: 'PUT',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Governance se nepodařilo uložit.');
+  }
+  return res.json();
+}
+
 // --- ZIP downloads ---
 
 export function getDocumentsZipUrl(id: string): string {

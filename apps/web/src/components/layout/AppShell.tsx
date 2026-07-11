@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronRight, LogOut, Inbox,
 } from 'lucide-react';
 import { Avatar } from '../ui';
-import { getNotifications, markNotificationsRead, type Notification } from '../../lib/api';
+import { getGovernance, getNotifications, markNotificationsRead, type Notification } from '../../lib/api';
 import { getStoredUser } from '../../lib/auth';
 
 export type NavKey = 'prehled' | 'inbox' | 'monitoring' | 'pipeline' | 'zakazky' | 'kalendar' | 'sklad' | 'nastaveni';
@@ -228,6 +228,11 @@ export interface AppShellProps {
  * a live NotificationBell (badge + dropdown + mark-as-read + deep-link).
  */
 export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, children }: AppShellProps) {
+  const { data: governance } = useQuery({ queryKey: ['governance'], queryFn: getGovernance, staleTime: 5_000, retry: false });
+  const restricted = !!governance && [
+    governance.ingest_enabled, governance.ai_jobs_enabled, governance.generate_enabled,
+    governance.finalize_enabled, governance.submission_enabled,
+  ].some((enabled) => !enabled);
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--surface-page)' }}>
       {/* Sidebar */}
@@ -294,6 +299,7 @@ export function AppShell({ active, onNav, breadcrumbs = [], user, onLogout, chil
               </span>
             ))}
           </nav>
+          {restricted && <button onClick={() => { window.location.hash = '/settings/governance'; }} style={{ border: '1px solid var(--danger-fg)', background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)', borderRadius: 999, padding: '5px 10px', fontSize: 'var(--font-size-xs)', fontWeight: 700, cursor: 'pointer' }}>Provoz omezen</button>}
           <button
             onClick={() => onNav('zakazky')}
             title="Hledat zakázky"

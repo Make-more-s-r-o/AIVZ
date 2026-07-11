@@ -3,9 +3,10 @@ import UserManagement from '../components/UserManagement';
 import ChangePasswordForm from '../components/ChangePasswordForm';
 import TagManager from '../components/TagManager';
 import MonitoringSettings from '../components/MonitoringSettings';
+import GovernanceSettings from '../components/GovernanceSettings';
 import { Tabs } from '../components/ui';
 
-export type SettingsSection = 'firmy' | 'monitoring' | 'uzivatele' | 'heslo' | 'stitky';
+export type SettingsSection = 'firmy' | 'monitoring' | 'governance' | 'uzivatele' | 'heslo' | 'stitky';
 
 export interface NastaveniPageProps {
   section: SettingsSection;
@@ -30,6 +31,7 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
         tabs={[
           { value: 'firmy', label: 'Firmy' },
           { value: 'monitoring', label: 'Monitoring' },
+          { value: 'governance', label: 'Governance / Kill-switch' },
           { value: 'uzivatele', label: 'Uživatelé a role' },
           { value: 'heslo', label: 'Heslo' },
           { value: 'stitky', label: 'Štítky' },
@@ -38,6 +40,7 @@ export default function NastaveniPage({ section, currentUserId, onNavSection }: 
       />
       {section === 'firmy' && <CompanySettings />}
       {section === 'monitoring' && <MonitoringSettings />}
+      {section === 'governance' && <GovernanceSettings />}
       {section === 'uzivatele' && (currentUserId ? (
         <UserManagement currentUserId={currentUserId} />
       ) : (
