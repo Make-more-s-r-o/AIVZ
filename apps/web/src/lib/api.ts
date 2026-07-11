@@ -209,6 +209,18 @@ export async function getProductMatch(id: string) {
   return fetchJson<ProductMatch>(`/tenders/${id}/product-match`);
 }
 
+export interface PricingDefaults {
+  default_marze_procent: number;
+}
+
+/**
+ * Výchozí marže (%) pro cenové potvrzení — z nastavení firmy přiřazené zakázce
+ * (fallback default firma → legacy config → 10 %). Backend vrací vždy 200.
+ */
+export async function getPricingDefaults(id: string): Promise<PricingDefaults> {
+  return fetchJson(`/tenders/${id}/pricing-defaults`);
+}
+
 export interface WinPriceSample {
   predmet: string;
   cena_bez_dph: number;

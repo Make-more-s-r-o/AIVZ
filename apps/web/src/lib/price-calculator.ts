@@ -1,5 +1,11 @@
 export const VAT_PERCENT = 21;
 
+/**
+ * Výchozí marže v %, dokud se nenačte firemní default z backendu — zrcadlí
+ * fallback resolveDefaultMarzeProcent v scripts/src/lib/company-store.ts.
+ */
+export const DEFAULT_MARZE_PROCENT = 10;
+
 export interface PriceCalculation {
   nakupni_cena_bez_dph: number;
   nakupni_cena_s_dph: number;

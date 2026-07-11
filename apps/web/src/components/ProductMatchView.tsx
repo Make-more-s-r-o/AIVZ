@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-quer
 import {
   getProductMatch,
   getAnalysis,
+  getPricingDefaults,
   updatePriceOverride,
   updateItemPriceOverride,
   bulkUpdateItemPriceOverride,
@@ -21,7 +22,7 @@ import { useToast } from './ui';
 import { getErrorMessage } from '../types/tender';
 import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
 import { safeHttpUrl } from '../lib/url';
-import { calculateItemPrice, roundCurrency } from '../lib/price-calculator';
+import { calculateItemPrice, roundCurrency, DEFAULT_MARZE_PROCENT } from '../lib/price-calculator';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -39,6 +40,15 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
     queryKey: ['analysis', tenderId],
     queryFn: () => getAnalysis(tenderId),
   });
+
+  // Výchozí marže z nastavení firmy zakázky. staleTime Infinity — mění se jen
+  // v Nastavení firmy; do načtení (nebo při chybě) platí zrcadlený fallback 10 %.
+  const { data: pricingDefaults } = useQuery({
+    queryKey: ['pricing-defaults', tenderId],
+    queryFn: () => getPricingDefaults(tenderId),
+    staleTime: Infinity,
+  });
+  const defaultMarze = pricingDefaults?.default_marze_procent ?? DEFAULT_MARZE_PROCENT;
 
   const match = data as ProductMatch;
   const analysis = analysisData as TenderAnalysis | undefined;
@@ -61,6 +71,7 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
           budget={budget}
           queryClient={queryClient}
           casti={casti}
+          defaultMarze={defaultMarze}
         />
       ) : (
         <SingleItemView
@@ -69,6 +80,7 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
           budget={budget}
           queryClient={queryClient}
           historySubject={analysis?.polozky?.[0]?.nazev ?? analysis?.zakazka?.predmet}
+          defaultMarze={defaultMarze}
         />
       )}
     </div>
@@ -198,19 +210,22 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
 /**
  * Sestaví cenový návrh (PriceOverride) z web ceny pro předvyplnění cenového panelu.
  * potvrzeno=false — potvrzení dělá uživatel ručně jako dnes. Chybí-li bez DPH, dopočítá se
- * z ceny s DPH (a naopak) sazbou 21 %.
+ * z ceny s DPH (a naopak) sazbou 21 %. Web cena je NÁKUPNÍ podklad — nabídková cena se
+ * rovnou počítá s výchozí marží firmy (dřív draft nesl marži 0 a nabídka == nákup,
+ * což po one-click potvrzení znamenalo nulový zisk).
  */
-function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
+function buildDraftFromWeb(overeni: OvereniCeny, defaultMarze: number): PriceOverride {
   const bez = overeni.web_cena_bez_dph
     ?? (overeni.web_cena_s_dph != null ? roundCurrency(overeni.web_cena_s_dph / 1.21) : 0);
   const sdph = overeni.web_cena_s_dph ?? calculateItemPrice(bez, 0).nakupni_cena_s_dph;
+  const nabidka = calculateItemPrice(bez, defaultMarze);
   const safeUrl = safeHttpUrl(overeni.zdroj_url);
   return {
     nakupni_cena_bez_dph: bez,
     nakupni_cena_s_dph: sdph,
-    marze_procent: 0,
-    nabidkova_cena_bez_dph: bez,
-    nabidkova_cena_s_dph: sdph,
+    marze_procent: defaultMarze,
+    nabidkova_cena_bez_dph: nabidka.nabidkova_cena_bez_dph,
+    nabidkova_cena_s_dph: nabidka.nabidkova_cena_s_dph,
     potvrzeno: false,
     poznamka: safeUrl ? `Cena z webu: ${safeUrl}` : 'Cena z webu',
   };
@@ -219,16 +234,37 @@ function buildDraftFromWeb(overeni: OvereniCeny): PriceOverride {
 /**
  * Sestaví data pro potvrzení ceny jedné položky (pro hromadné „Potvrdit"). Zdroj v pořadí priority:
  * web-draft (pokud si operátor „Použít" web cenu) → již existující cenova_uprava → AI odhad
- * (cena_bez_dph vybraného kandidáta). Marže se přebírá z draftu/úpravy, jinak 0. Počítá stejně
- * jako ItemPriceCalculator (jednotný money-path). Vrací null, pokud položku nelze ocenit
- * (chybí kandidát nebo nákupní cena ≤ 0) — takovou hromadné potvrzení přeskočí.
+ * (cena_bez_dph vybraného kandidáta). Počítá stejně jako ItemPriceCalculator (jednotný
+ * money-path). Vrací null, pokud položku nelze ocenit (chybí kandidát nebo nákupní
+ * cena ≤ 0) — takovou hromadné potvrzení přeskočí.
+ *
+ * Marže se resolvuje takto:
+ *  - draft má přednost (draft z webu teď nese výchozí marži firmy, ne 0),
+ *  - potvrzenou existující marži respektuj i když je 0 — tu operátor potvrdil vědomě,
+ *  - NEpotvrzená nula je „otrávený default" (AI-prefill ve starých prod datech),
+ *    ne rozhodnutí operátora → nahraď ji výchozí marží firmy,
+ *  - nepotvrzená kladná marže se respektuje (operátor ji nastavil, jen nepotvrdil),
+ *  - bez existující úpravy → výchozí marže firmy.
  */
-function buildConfirmData(pm: PolozkaMatch, draft?: PriceOverride): PriceOverrideData | null {
+function buildConfirmData(
+  pm: PolozkaMatch,
+  draft: PriceOverride | undefined,
+  defaultMarze: number,
+): PriceOverrideData | null {
   const product = pm.kandidati[pm.vybrany_index] as ProductCandidate | undefined;
   const existing = pm.cenova_uprava;
   const nakupni = draft?.nakupni_cena_bez_dph ?? existing?.nakupni_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
   if (!(nakupni > 0)) return null;
-  const marze = draft?.marze_procent ?? existing?.marze_procent ?? 0;
+  let marze: number;
+  if (draft) {
+    marze = draft.marze_procent;
+  } else if (existing) {
+    marze = !existing.potvrzeno && existing.marze_procent === 0
+      ? defaultMarze
+      : existing.marze_procent;
+  } else {
+    marze = defaultMarze;
+  }
   const calculatedPrice = calculateItemPrice(nakupni, marze);
   return {
     ...calculatedPrice,
@@ -304,9 +340,10 @@ interface SingleItemViewProps {
   budget?: number;
   queryClient: QueryClient;
   historySubject?: string;
+  defaultMarze: number;
 }
 
-function SingleItemView({ match, tenderId, budget, queryClient, historySubject }: SingleItemViewProps) {
+function SingleItemView({ match, tenderId, budget, queryClient, historySubject, defaultMarze }: SingleItemViewProps) {
   const { toast } = useToast();
   const selectedProduct = match?.kandidati?.[match?.vybrany_index ?? 0];
   const existingOverride = match?.cenova_uprava;
@@ -358,7 +395,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject }
       {overeni && (
         <OvereniCenyChip
           overeni={overeni}
-          onUse={() => setWebDraft(buildDraftFromWeb(overeni))}
+          onUse={() => setWebDraft(buildDraftFromWeb(overeni, defaultMarze))}
         />
       )}
 
@@ -371,6 +408,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject }
           label="Cenová kalkulace"
           historySubject={historySubject ?? `${selectedProduct.vyrobce} ${selectedProduct.model}`}
           historyCacheKey={`${tenderId}:single`}
+          defaultMarzeProcent={defaultMarze}
         />
       )}
     </div>
@@ -384,9 +422,10 @@ interface MultiItemViewProps {
   budget?: number;
   queryClient: QueryClient;
   casti?: TenderAnalysis['casti'];
+  defaultMarze: number;
 }
 
-function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiItemViewProps) {
+function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMarze }: MultiItemViewProps) {
   const { toast } = useToast();
   const [expandedItems, setExpandedItems] = useState<Set<number>>(() => new Set([0]));
   // Návrhy cen z webu předvyplněné přes „Použít" — mají přednost před perzistovanou
@@ -428,7 +467,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
   };
 
   const handleUseWebPrice = (itemIndex: number, overeni: OvereniCeny) => {
-    setPriceDrafts(prev => new Map(prev).set(itemIndex, buildDraftFromWeb(overeni)));
+    setPriceDrafts(prev => new Map(prev).set(itemIndex, buildDraftFromWeb(overeni, defaultMarze)));
     setExpandedItems(prev => new Set(prev).add(itemIndex)); // rozbal, ať je panel vidět
   };
 
@@ -524,7 +563,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
         skippedHard++;
         continue;
       }
-      const data = buildConfirmData(pm, priceDrafts.get(idx));
+      const data = buildConfirmData(pm, priceDrafts.get(idx), defaultMarze);
       if (!data) { skippedWithoutPrice++; continue; }
       payload.push({ itemIndex: idx, cenova_uprava: data });
     }
@@ -558,7 +597,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
     } finally {
       setBulkSaving(false);
     }
-  }, [bulkSaving, polozky, priceDrafts, tenderId, queryClient, toast]);
+  }, [bulkSaving, polozky, priceDrafts, defaultMarze, tenderId, queryClient, toast]);
 
   // Group items by part if multi-part
   const hasPartGroups = casti && casti.length > 1 && polozky.some((pm) => pm.cast_id);
@@ -823,6 +862,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti }: MultiIte
                     historySubject={pm.polozka_nazev}
                     historyCacheKey={`${tenderId}:${idx}`}
                     onWinPriceBandLoaded={handleWinPriceBandLoaded}
+                    defaultMarzeProcent={defaultMarze}
                   />
                 )}
               </div>
