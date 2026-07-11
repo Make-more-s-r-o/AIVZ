@@ -135,7 +135,7 @@ export interface PipelineSteps {
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';
 export type StepName = keyof PipelineSteps;
-export type JobStatusValue = 'queued' | 'running' | 'done' | 'error' | 'interrupted';
+export type JobStatusValue = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval';
 
 export interface RunAllStatus {
   jobId: string;
@@ -476,6 +476,27 @@ export async function runAllSteps(id: string): Promise<RunAllStatus> {
   return res.json();
 }
 
+/**
+ * Pokračování pozastaveného run-all řetězce po lidském potvrzení cen (money-gate).
+ * 404 = žádný pozastavený řetězec; 409 = stále nepotvrzené ceny (pendingCount).
+ */
+export async function resumeRunAll(id: string): Promise<RunAllStatus> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/run-all/resume`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) {
+    clearAuth();
+    window.location.reload();
+    throw new Error('Session expired');
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Pokračování pipeline selhalo');
+  }
+  return res.json();
+}
+
 /** Poll job status (with optional log offset for incremental logs) */
 /**
  * Job není v serverovém registru (např. po úklidu starých jobů nebo neúspěšné obnově souboru).
@@ -555,7 +576,7 @@ export async function updateItemPriceOverride(
 export async function bulkUpdateItemPriceOverride(
   id: string,
   items: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }>,
-): Promise<{ success: boolean; updated: number; warnings: PriceSanityFlag[] }> {
+): Promise<{ success: boolean; updated: number; warnings: PriceSanityFlag[]; can_resume_run_all?: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/bulk`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },

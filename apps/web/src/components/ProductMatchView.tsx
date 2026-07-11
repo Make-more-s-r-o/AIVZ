@@ -7,6 +7,7 @@ import {
   updatePriceOverride,
   updateItemPriceOverride,
   bulkUpdateItemPriceOverride,
+  resumeRunAll,
   selectProductCandidate,
   verifyPrices,
   getJobStatus,
@@ -577,7 +578,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
     }
     setBulkSaving(true);
     try {
-      const { updated, warnings } = await bulkUpdateItemPriceOverride(tenderId, payload);
+      const { updated, warnings, can_resume_run_all } = await bulkUpdateItemPriceOverride(tenderId, payload);
       // Web-drafty potvrzených položek zahoď (stejně jako po per-item potvrzení).
       setPriceDrafts((prev) => {
         const next = new Map(prev);
@@ -591,7 +592,25 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
         skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno — bez ceny` : null,
       ].filter(Boolean);
       const warningPart = warnings.length > 0 ? `, ${warnings.length} varování ke kontrole` : '';
-      toast(`Potvrzeno ${updated} položek${skippedParts.length ? ` (${skippedParts.join(', ')})` : ''}${warningPart}`, 'success');
+      // Pozastavený run-all řetězec čeká na potvrzení cen → nabídni pokračování.
+      // Money-gate zůstává lidský: generování spustí až klik na tlačítko, nic automaticky.
+      if (can_resume_run_all) {
+        toast('Ceny potvrzeny — pipeline čeká na generování dokumentů.', 'success', {
+          action: {
+            label: 'Pokračovat v generování',
+            onClick: async () => {
+              try {
+                await resumeRunAll(tenderId);
+                toast('Generování dokumentů spuštěno.', 'success');
+              } catch (err: unknown) {
+                toast(getErrorMessage(err), 'danger');
+              }
+            },
+          },
+        });
+      } else {
+        toast(`Potvrzeno ${updated} položek${skippedParts.length ? ` (${skippedParts.join(', ')})` : ''}${warningPart}`, 'success');
+      }
     } catch (err: unknown) {
       toast(getErrorMessage(err), 'danger');
     } finally {

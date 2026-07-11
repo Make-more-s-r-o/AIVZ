@@ -81,6 +81,7 @@ import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
 import {
   RUN_ALL_STEPS,
+  ApprovalRequiredError,
   advanceRunAllChain,
   loadPipelineJobs,
   savePipelineJobs,
@@ -269,6 +270,29 @@ const STEP_FILES: Record<string, string> = {
   validate: 'validate-bid.ts',
   'verify-prices': 'verify-prices.ts',
 };
+
+/**
+ * Vrátí počet položek s NEPOTVRZENOU cenou pro generate money-gate (a jejich názvy).
+ * `null` = product-match.json chybí nebo je nečitelný → gate se řeší jinde (getStepGateError).
+ * Sdílené run-all řetězcem (pauza na waiting_approval) i resume endpointem (409 kontrola).
+ */
+async function getUnconfirmedPrices(
+  tenderId: string,
+): Promise<{ count: number; names: string[] } | null> {
+  try {
+    const matchRaw = await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8');
+    const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
+    if (matchData.polozky_match) {
+      const unconfirmed = matchData.polozky_match.filter((item) => !item.cenova_uprava?.potvrzeno);
+      return { count: unconfirmed.length, names: unconfirmed.map((item) => item.polozka_nazev) };
+    }
+    return matchData.cenova_uprava?.potvrzeno
+      ? { count: 0, names: [] }
+      : { count: 1, names: ['cenová kalkulace'] };
+  } catch {
+    return null;
+  }
+}
 
 async function getStepGateError(tenderId: string, step: string): Promise<string | null> {
   if (step !== 'generate') return null;
@@ -477,6 +501,18 @@ function startJob(job: Job) {
       return;
     }
     void advanceRunAllChain(parent, job, async (nextStep) => {
+      // Money-gate před generate: nepotvrzené ceny řetězec NEshodí do error, ale PAUZNOU
+      // ho do waiting_approval (ApprovalRequiredError). Lidský checkpoint, ne chyba.
+      if (nextStep === 'generate') {
+        const pending = await getUnconfirmedPrices(job.tenderId);
+        if (pending && pending.count > 0) {
+          throw new ApprovalRequiredError(
+            pending.count,
+            `Čeká na potvrzení cen (${pending.count}) v záložce Ocenění — pipeline pozastavena před generováním dokumentů.`,
+          );
+        }
+      }
+      // Ostatní gate chyby (chybějící soubor apod.) zůstávají tvrdou chybou řetězce.
       const gateError = await getStepGateError(job.tenderId, nextStep);
       if (gateError) throw new Error(gateError);
       enqueueStepJob(job.tenderId, nextStep, parent.id, false);
@@ -1735,7 +1771,20 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     }
     await writeFile(matchPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
-    res.json({ success: true, updated: validated.length, warnings });
+    // Nabídni resume pauznutého run-all řetězce — jen když (a) existuje waiting_approval job
+    // a (b) po tomto potvrzení už žádná cena nechybí (jinak by resume stejně vrátil 409).
+    // Money-gate zůstává lidský: FE jen zobrazí tlačítko, spuštění dělá až klik.
+    let canResumeRunAll = false;
+    const hasWaitingJob = [...jobs.values()].some((job) =>
+      job.tenderId === id && job.kind === 'pipeline' && job.status === 'waiting_approval');
+    if (hasWaitingJob) {
+      const stillPending = productMatch.polozky_match.some(
+        (item: any) => !item?.cenova_uprava?.potvrzeno,
+      );
+      canResumeRunAll = !stillPending;
+    }
+
+    res.json({ success: true, updated: validated.length, warnings, can_resume_run_all: canResumeRunAll });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
@@ -2244,6 +2293,41 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
 
   console.log(`Pipeline job ${parent.id} queued for ${id}`);
   res.json({ jobId: parent.id, status: parent.status, currentStep: parent.currentStep });
+});
+
+// POST /api/tenders/:id/run-all/resume - pokračování run-all řetězce po lidském potvrzení cen.
+// Pauznutý řetězec (waiting_approval na generate) se rozjede až po potvrzení VŠECH cen —
+// money-gate zůstává lidský, žádné automatické spuštění. Idempotentní: bez waiting jobu → 404,
+// stále nepotvrzené ceny → 409 s počtem.
+app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
+  const { id } = req.params;
+
+  const waiting = [...jobs.values()].find((job) =>
+    job.tenderId === id && job.kind === 'pipeline' && job.status === 'waiting_approval');
+  if (!waiting) {
+    return res.status(404).json({ error: 'Žádný pozastavený pipeline řetězec pro tuto zakázku.' });
+  }
+
+  // Ověř, že ceny jsou skutečně potvrzené (nespoléhej na FE) — money-gate se drží na serveru.
+  const pending = await getUnconfirmedPrices(id);
+  if (pending && pending.count > 0) {
+    return res.status(409).json({
+      error: `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`,
+      pendingCount: pending.count,
+    });
+  }
+
+  // Rozjeď řetězec: zařaď generate krok pod původní parent job (chain pokračuje generate→validate).
+  waiting.status = 'running';
+  waiting.currentStep = 'generate';
+  waiting.error = undefined;
+  waiting.failedStep = undefined;
+  waiting.finishedAt = undefined;
+  enqueueStepJob(id, 'generate', waiting.id);
+  scheduleJobsPersist();
+
+  console.log(`Pipeline job ${waiting.id} resumed (generate) for ${id}`);
+  res.json({ jobId: waiting.id, status: 'running', currentStep: 'generate' });
 });
 
 // POST /api/tenders/:id/run/:step - enqueue a pipeline step
