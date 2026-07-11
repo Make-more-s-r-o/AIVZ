@@ -7,6 +7,7 @@ import {
   updatePriceOverride,
   updateItemPriceOverride,
   bulkUpdateItemPriceOverride,
+  applyMarketPrices,
   resumeRunAll,
   selectProductCandidate,
   verifyPrices,
@@ -26,6 +27,7 @@ import { safeHttpUrl } from '../lib/url';
 import { calculateItemPrice, roundCurrency, DEFAULT_MARZE_PROCENT } from '../lib/price-calculator';
 import { invalidatePriceDerivedQueries } from '../lib/product-match-invalidation';
 import { buildDraftFromWeb, webPriceInputFromVerification, withPriceDraft } from '../lib/web-price';
+import { marketPriceImpact } from '../lib/market-price-preview';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -66,7 +68,12 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
 
   return (
     <div className="space-y-4">
-      <VerifyPricesHeader tenderId={tenderId} queryClient={queryClient} />
+      <VerifyPricesHeader
+        tenderId={tenderId}
+        queryClient={queryClient}
+        match={match}
+        defaultMarze={defaultMarze}
+      />
       {isMultiItem ? (
         <MultiItemView
           match={match}
@@ -94,16 +101,19 @@ export default function ProductMatchView({ tenderId }: ProductMatchViewProps) {
 interface VerifyPricesHeaderProps {
   tenderId: string;
   queryClient: QueryClient;
+  match: ProductMatch;
+  defaultMarze: number;
 }
 
 // Kolik po sobě jdoucích síťových výpadků pollingu tolerovat, než spinner vzdáme
 // (2500 ms interval → ~75 s). Stejný princip jako v PipelineStatus.
 const MAX_FAILED_POLLS = 30;
 
-function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) {
+function VerifyPricesHeader({ tenderId, queryClient, match, defaultMarze }: VerifyPricesHeaderProps) {
   const { toast } = useToast();
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
+  const [applyingMarketPrices, setApplyingMarketPrices] = useState(false);
   const logSeenRef = useRef(0);
   // Počítadlo po sobě jdoucích síťových výpadků pollingu (úspěšný poll ho vynuluje),
   // ať spinner netočí donekonečna při delším výpadku spojení.
@@ -164,6 +174,7 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
   }, [jobId, tenderId, queryClient, toast]);
 
   const running = !!jobId;
+  const impact = marketPriceImpact(match, defaultMarze);
 
   const handleVerify = useCallback(async () => {
     if (running) return; // Druhé kliknutí během běhu ignoruj.
@@ -179,6 +190,30 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
     }
   }, [running, tenderId, toast]);
 
+  const handleApplyMarketPrices = useCallback(async () => {
+    if (applyingMarketPrices || impact.eligibleCount === 0) return;
+    const format = (value: number) => value.toLocaleString('cs-CZ', { maximumFractionDigits: 2 });
+    const confirmed = window.confirm(
+      `Nákup podle ověřených zdrojů: ${format(impact.purchaseWithoutVat)} Kč → `
+      + `nabídka s marží ${format(impact.effectiveMarginPercent)} %: ${format(impact.offerWithoutVat)} Kč `
+      + `(dnes: ${format(impact.todayOfferWithoutVat)} Kč). `
+      + 'Ceny se jen předvyplní, potvrzení zůstává na vás.',
+    );
+    if (!confirmed) return;
+
+    setApplyingMarketPrices(true);
+    try {
+      const result = await applyMarketPrices(tenderId);
+      await invalidatePriceDerivedQueries(queryClient, tenderId);
+      const skipped = result.preskoceno > 0 ? `, ${result.preskoceno} přeskočeno` : '';
+      toast(`Reálné ceny předvyplněny u ${result.upraveno} položek${skipped}. Potvrzení zůstává na vás.`, 'success');
+    } catch (err: unknown) {
+      toast(getErrorMessage(err), 'danger');
+    } finally {
+      setApplyingMarketPrices(false);
+    }
+  }, [applyingMarketPrices, impact, queryClient, tenderId, toast]);
+
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="text-xs text-gray-500">
@@ -191,21 +226,33 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
           'Dohledá aktuální tržní ceny položek na webu jako podklad — ceny potvrzujete ručně.'
         )}
       </div>
-      <button
-        onClick={handleVerify}
-        disabled={running}
-        className={cn(
-          'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
-          running
-            ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400'
-            : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+      <div className="flex flex-wrap items-center gap-2">
+        {impact.eligibleCount > 0 && (
+          <button
+            onClick={handleApplyMarketPrices}
+            disabled={applyingMarketPrices}
+            className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {applyingMarketPrices ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
+            Použít reálné ceny ({impact.eligibleCount})
+          </button>
         )}
-      >
-        {running
-          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          : <Globe className="h-3.5 w-3.5" />}
-        {running ? 'Ověřuji ceny…' : 'Ověřit ceny (web)'}
-      </button>
+        <button
+          onClick={handleVerify}
+          disabled={running}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
+            running
+              ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400'
+              : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+          )}
+        >
+          {running
+            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            : <Globe className="h-3.5 w-3.5" />}
+          {running ? 'Ověřuji ceny…' : 'Ověřit ceny (web)'}
+        </button>
+      </div>
     </div>
   );
 }

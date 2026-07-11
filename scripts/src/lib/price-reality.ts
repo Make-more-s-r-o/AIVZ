@@ -63,6 +63,32 @@ function isAvailableForGuard(source: WebPriceSource): boolean {
   return true;
 }
 
+export interface SelectedRealPriceSource {
+  source: WebPriceSource;
+  /** Skutečný nákupní náklad přepočtený na jednu požadovanou jednotku. */
+  unitPriceWithoutVat: number;
+}
+
+/**
+ * Vybere nejlevnější doložený a dostupný zdroj včetně celých balení či minimálního
+ * odběru. Orientační zdroje a zdroje s neznámým balením se nikdy nevracejí.
+ */
+export function selectCheapestRealPriceSource(
+  zdroje: readonly WebPriceSource[],
+  mnozstvi = 1,
+): SelectedRealPriceSource | null {
+  const quantity = positiveNumber(mnozstvi) ?? 1;
+  const usable = zdroje
+    .filter(isAvailableForGuard)
+    .map((source) => {
+      const total = realCostForQuantity(source, quantity);
+      return total === null ? null : { source, unitPriceWithoutVat: total / quantity };
+    })
+    .filter((entry): entry is SelectedRealPriceSource => entry !== null)
+    .sort((a, b) => a.unitPriceWithoutVat - b.unitPriceWithoutVat);
+  return usable[0] ?? null;
+}
+
 /**
  * Porovná AI odhad s nejlevnějším použitelným reálným nákupem. Rozdíl vůči AI
  * zůstává informativní; ztrátový gate později porovnává přímo nabídkovou cenu.
@@ -72,25 +98,15 @@ export function compareAiVsMarket(
   zdroje: WebPriceSource[],
   mnozstvi = 1,
 ): PriceReality {
-  const quantity = positiveNumber(mnozstvi) ?? 1;
-  const usable = zdroje
-    .filter(isAvailableForGuard)
-    .map((source) => {
-      const total = realCostForQuantity(source, quantity);
-      return total === null ? null : { source, unit: total / quantity };
-    })
-    .filter((entry): entry is { source: WebPriceSource; unit: number } => entry !== null)
-    .sort((a, b) => a.unit - b.unit);
-
-  const cheapest = usable[0];
-  const market = cheapest?.unit ?? null;
+  const cheapest = selectCheapestRealPriceSource(zdroje, mnozstvi);
+  const market = cheapest?.unitPriceWithoutVat ?? null;
   const validAi = positiveNumber(aiCenaBezDph);
   const excludedUnavailable = zdroje.some((source) => !isAvailableForGuard(source));
   const excludedOrientational = zdroje.some((source) => source.orientacni === true);
   const excludedPackaging = zdroje.some((source) => source.orientacni !== true && isAvailableForGuard(source) && positiveNumber(source.baleni_ks) === null);
 
   const notes: string[] = [];
-  if (zdroje.length > 0 && usable.length === 0) notes.push('Žádný použitelný zdroj pro ochranu proti ztrátě.');
+  if (zdroje.length > 0 && cheapest === null) notes.push('Žádný použitelný zdroj pro ochranu proti ztrátě.');
   if (excludedUnavailable) notes.push('Nedostupné zdroje a zdroje na dotaz byly z ochrany vyloučeny.');
   if (excludedOrientational) notes.push('Orientační zdroje bez doložené shody parametrů byly z ochrany proti ztrátě vyloučeny.');
   if (excludedPackaging) notes.push('Zdroj s nejasným počtem kusů v balení byl z ochrany vyloučen.');

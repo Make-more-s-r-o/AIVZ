@@ -739,6 +739,36 @@ export async function bulkUpdateItemPriceOverride(
   return res.json();
 }
 
+export interface ApplyMarketPricesResponse {
+  success: boolean;
+  upraveno: number;
+  preskoceno: number;
+  duvody_preskoceni: {
+    orientacni: number;
+    bez_zdroje: number;
+    zmeneny_kandidat: number;
+  };
+  nova_celkova_cena_bez_dph: number;
+  nova_celkova_cena_s_dph: number;
+}
+
+/** Hromadně předvyplní doložené tržní ceny; endpoint je nikdy nepotvrdí. */
+export async function applyMarketPrices(
+  id: string,
+  polozkaIndexy?: number[],
+): Promise<ApplyMarketPricesResponse> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/product-match/apply-market-prices`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(polozkaIndexy ? { polozka_indexy: polozkaIndexy } : {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Reálné ceny se nepodařilo použít');
+  }
+  return res.json();
+}
+
 /**
  * Ruční výběr produktového kandidáta operátorem (AI někdy vybere špatný produkt).
  * itemIndex = `polozka_index` položky (u legacy single-product formátu se ignoruje, pošli -1).

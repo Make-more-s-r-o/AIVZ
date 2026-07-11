@@ -1,4 +1,4 @@
-import type { PolozkaMatch, PriceSanityFlag } from './types.js';
+import type { PolozkaMatch, PriceSanityFlag, ProductMatch } from './types.js';
 import { compareAiVsMarket, informationalCostForQuantity } from './price-reality.js';
 
 // Položka nad 40 % celkové nabídky vyžaduje kontrolu u nabídek s více než třemi položkami.
@@ -36,6 +36,36 @@ export const EXTREME_OUTLIER_MIN_ITEMS = 5;
 export interface PriceSanityOptions {
   /** Omezí vrácené nálezy podle polozka_index; poměry se stále počítají z celého bidu. */
   polozkaIndexes?: readonly number[];
+}
+
+/**
+ * Přepočítá a uloží aktuální cenové nálezy do všech položek product-match objektu.
+ * Legacy single-product formát vrací nálezy volajícímu, ale nemá kam `sanity_flags`
+ * perzistovat bez změny historického schématu.
+ */
+export function refreshProductMatchPriceSanity(productMatch: ProductMatch): PriceSanityFlag[] {
+  const items: PolozkaMatch[] = Array.isArray(productMatch.polozky_match)
+    ? productMatch.polozky_match
+    : Array.isArray(productMatch.kandidati)
+      ? [{
+          polozka_nazev: 'Položka',
+          polozka_index: -1,
+          mnozstvi: 1,
+          typ: 'produkt',
+          kandidati: productMatch.kandidati,
+          vybrany_index: productMatch.vybrany_index ?? 0,
+          oduvodneni_vyberu: productMatch.oduvodneni_vyberu ?? '',
+          cenova_uprava: productMatch.cenova_uprava,
+          overeni_ceny: productMatch.overeni_ceny,
+        }]
+      : [];
+  const findings = checkPriceSanity(items, {});
+  if (Array.isArray(productMatch.polozky_match)) {
+    for (const item of productMatch.polozky_match) {
+      item.sanity_flags = findings.filter((finding) => finding.polozka_index === item.polozka_index);
+    }
+  }
+  return findings;
 }
 
 interface NormalizedPrice {

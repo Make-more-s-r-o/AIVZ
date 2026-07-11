@@ -47,7 +47,7 @@ import {
   persistEvidenceAfterStatus,
   type ManifestFileEntry, type SubmissionManifest,
 } from './lib/podani.js';
-import { checkPriceSanity } from './lib/price-sanity.js';
+import { refreshProductMatchPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
 import { peekZipFileCount } from './lib/input-discovery.js';
 import { isStale } from './lib/stale-check.js';
@@ -82,6 +82,7 @@ import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
+import { createApplyMarketPricesHandler } from './lib/market-price-api.js';
 import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
 import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
@@ -1628,6 +1629,21 @@ app.get('/api/tenders/:id/product-match', async (req, res) => {
   }
 });
 
+// POST /api/tenders/:id/product-match/apply-market-prices — hromadně předvyplní
+// doložené reálné nákupní ceny. Potvrzení vždy zůstává na operátorovi.
+app.post('/api/tenders/:id/product-match/apply-market-prices', createApplyMarketPricesHandler({
+  loadProductMatch: async (tenderId) =>
+    JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8')),
+  saveProductMatch: async (tenderId, productMatch) => {
+    const matchPath = join(OUTPUT_DIR, tenderId, 'product-match.json');
+    const tmpPath = `${matchPath}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+    await rename(tmpPath, matchPath);
+  },
+  resolveDefaultMargin: async (tenderId) =>
+    (await resolvePricingDefaults(tenderId)).default_marze_procent,
+}));
+
 // GET /api/tenders/:id/bid-score — profit-aware bid skóre počítané on-the-fly
 // z aktuálních analysis.json + product-match.json. Používá se po potvrzení ceny,
 // kdy uložený bid_score v product-match.json může být zastaralý. Nezapisuje nic.
@@ -1959,28 +1975,7 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
 
 /** Přepočítá a uloží flagy všech položek v objektu, aniž by měnil jejich ceny nebo potvrzení. */
 function refreshPriceSanityFlags(productMatch: any): PriceSanityFlag[] {
-  const items = Array.isArray(productMatch.polozky_match)
-    ? productMatch.polozky_match
-    : Array.isArray(productMatch.kandidati)
-      ? [{
-          polozka_nazev: 'Položka',
-          polozka_index: -1,
-          mnozstvi: 1,
-          typ: 'produkt',
-          kandidati: productMatch.kandidati,
-          vybrany_index: productMatch.vybrany_index ?? 0,
-          oduvodneni_vyberu: productMatch.oduvodneni_vyberu ?? '',
-          cenova_uprava: productMatch.cenova_uprava,
-          overeni_ceny: productMatch.overeni_ceny,
-        }]
-      : [];
-  const findings = checkPriceSanity(items, {});
-  if (Array.isArray(productMatch.polozky_match)) {
-    for (const item of productMatch.polozky_match) {
-      item.sanity_flags = findings.filter((finding) => finding.polozka_index === item.polozka_index);
-    }
-  }
-  return findings;
+  return refreshProductMatchPriceSanity(productMatch);
 }
 
 /** Vrátí nálezy patřící pozicím položek, které právě potvrzujeme. */
