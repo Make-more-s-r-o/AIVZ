@@ -43,6 +43,7 @@ import {
   getOutcome,
   saveOutcome,
   getProductMatch,
+  getParts,
   type VysledekPodani,
   type PipelineSteps,
   type ActivityEntry,
@@ -187,6 +188,18 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
     enabled: steps.validate === 'done',
   });
 
+  // Části zakázky — jen pro chip „Části: X/Y" v hlavičce, když se podává jen podmnožina
+  // (výběr se edituje v záložce Analýza). Stejný queryKey jako PartsSelector, ať se cache sdílí.
+  const { data: partsData } = useQuery({
+    queryKey: ['parts', tenderId],
+    queryFn: () => getParts(tenderId),
+    retry: false,
+    enabled: steps.analyze === 'done',
+  });
+  const partialParts = partsData && partsData.casti.length > 1 && partsData.selected_parts.length < partsData.casti.length
+    ? { selected: partsData.selected_parts.length, total: partsData.casti.length }
+    : null;
+
   const decision = normalizeDecision(analysis?.go_no_go?.doporuceni ?? analysis?.doporuceni?.rozhodnuti);
   const nazev = analysis?.zakazka?.nazev || summary?.name || tenderId;
   const evidence = analysis?.zakazka?.evidencni_cislo || tenderId;
@@ -229,6 +242,13 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', color: 'var(--text-tertiary)' }}>
               {evidence}
             </span>
+            {partialParts && (
+              <span title={`Podává se jen ${partialParts.selected} z ${partialParts.total} částí zakázky — výběr upravíte v záložce Analýza.`}>
+                <Badge tone="warning" size="sm">
+                  Části: {partialParts.selected}/{partialParts.total}
+                </Badge>
+              </span>
+            )}
           </div>
           <h1 style={{ margin: '8px 0 0', fontSize: 'var(--font-size-2xl)', fontWeight: 'var(--weight-bold)', color: 'var(--text-primary)', lineHeight: 1.25 }}>
             {nazev}
