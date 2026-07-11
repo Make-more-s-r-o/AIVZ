@@ -48,9 +48,23 @@ function dbReady(): boolean {
 // lhuta_nabidek přes to_char, jinak node-pg parsuje DATE na JS Date v lokální půlnoci
 // a JSON.stringify ji posune o TZ offset → off-by-one (viz TASK_COLS v crm-store).
 const FEED_COLS = `id::text, zdroj, zdroj_id, nazev, zadavatel,
-  predpokladana_hodnota,
+  predpokladana_hodnota::float8 AS predpokladana_hodnota,
   to_char(lhuta_nabidek, 'YYYY-MM-DD') AS lhuta_nabidek,
   url, raw, stav, tender_id, created_at`;
+
+type FeedDbRow = Omit<FeedItem, 'predpokladana_hodnota'> & {
+  predpokladana_hodnota: number | string | null;
+};
+
+/** Dodatečná ochrana pro mocky/starší ovladače, které NUMERIC vracejí jako string. */
+export function normalizeFeedRow(row: FeedDbRow): FeedItem {
+  const value = row.predpokladana_hodnota;
+  const numeric = value == null ? null : Number(value);
+  return {
+    ...row,
+    predpokladana_hodnota: numeric == null || Number.isFinite(numeric) ? numeric : null,
+  };
+}
 
 /**
  * Idempotentní upsert feedu. Nové položky vloží, existující (dle zdroj+zdroj_id)
@@ -99,13 +113,13 @@ export async function listFeed(stav?: MonitoringStav, limit = 200): Promise<Feed
     const where = stav ? 'WHERE stav = $1' : '';
     const params = stav ? [stav, limit] : [limit];
     const limitPlaceholder = stav ? '$2' : '$1';
-    const r = await query<FeedItem>(
+    const r = await query<FeedDbRow>(
       `SELECT ${FEED_COLS} FROM monitoring_zakazky ${where}
        ORDER BY (lhuta_nabidek IS NULL), lhuta_nabidek ASC, created_at DESC
        LIMIT ${limitPlaceholder}`,
       params,
     );
-    return r.rows;
+    return r.rows.map(normalizeFeedRow);
   } catch {
     return [];
   }
@@ -114,10 +128,11 @@ export async function listFeed(stav?: MonitoringStav, limit = 200): Promise<Feed
 export async function getFeedItem(id: string): Promise<FeedItem | null> {
   if (!dbReady()) return null;
   try {
-    return await queryOne<FeedItem>(
+    const row = await queryOne<FeedDbRow>(
       `SELECT ${FEED_COLS} FROM monitoring_zakazky WHERE id = $1::bigint`,
       [id],
     );
+    return row ? normalizeFeedRow(row) : null;
   } catch {
     return null;
   }
@@ -130,13 +145,14 @@ export async function setFeedStav(
   tenderId: string | null = null,
 ): Promise<FeedItem | null> {
   if (!dbReady()) throw new Error('db_unavailable');
-  return await queryOne<FeedItem>(
+  const row = await queryOne<FeedDbRow>(
     `UPDATE monitoring_zakazky
        SET stav = $2, tender_id = COALESCE($3, tender_id)
      WHERE id = $1::bigint
      RETURNING ${FEED_COLS}`,
     [id, stav, tenderId],
   );
+  return row ? normalizeFeedRow(row) : null;
 }
 
 // --- Čisté normalizace záznamů zdroje (testovatelné bez DB) ---

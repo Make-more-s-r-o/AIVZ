@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { parseNenListing, parseCzechDate, fetchNenTenders, type NenTenderCandidate } from '../src/lib/monitoring/nen-client.js';
 import {
   toNenFeedInput, toHlidacFeedInput, toIsoDate,
-  listFeed, getFeedItem, upsertFeed, setFeedStav,
+  listFeed, getFeedItem, upsertFeed, setFeedStav, normalizeFeedRow,
 } from '../src/lib/monitoring/monitoring-store.js';
+import { collectMonitoringInputs } from '../src/lib/monitoring/monitoring-sync.js';
 import { closePool } from '../src/lib/db.js';
 import { scoreFeedItem, slugifyTender } from '../src/lib/monitoring/monitoring-score.js';
 import type { HlidacTenderCandidate } from '../src/lib/monitoring/hlidac-client.js';
@@ -53,24 +54,52 @@ test('parseCzechDate převádí český formát a odmítá nesmysl', () => {
 
 // --- Sync s nedostupným zdrojem → prázdno, žádný pád ---
 
-test('fetchNenTenders při selhání fetch vrací prázdno (žádný pád)', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch;
-  try {
-    assert.deepEqual(await fetchNenTenders('cokoliv'), []);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+test('fetchNenTenders při selhání fetch vrací ok=false (žádný pád)', async () => {
+  const result = await fetchNenTenders('cokoliv', {
+    fetchFn: (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch,
+  });
+  assert.deepEqual(result, { items: [], ok: false });
 });
 
-test('fetchNenTenders při HTTP chybě zdroje vrací prázdno', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response('nope', { status: 503 })) as typeof fetch;
-  try {
-    assert.deepEqual(await fetchNenTenders(''), []);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+test('fetchNenTenders při HTTP chybě zdroje vrací ok=false', async () => {
+  const result = await fetchNenTenders('', {
+    fetchFn: (async () => new Response('nope', { status: 503 })) as typeof fetch,
+  });
+  assert.deepEqual(result, { items: [], ok: false });
+});
+
+test('fetchNenTenders stránkuje přes ověřené p:vz:page=N, deduplikuje a skončí na maximu', async () => {
+  const urls: string[] = [];
+  const waits: number[] = [];
+  const result = await fetchNenTenders('', {
+    maxPages: 2,
+    fetchFn: (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return new Response(FIXTURE, { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { waits.push(ms); },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.items.length, 1, 'stejné zdroj_id z druhé stránky se neduplikuje');
+  assert.equal(urls.length, 2);
+  assert.ok(urls[1].endsWith('/verejne-zakazky/p:vz:page=2'));
+  assert.deepEqual(waits, [300]);
+});
+
+test('fetchNenTenders skončí bez další pauzy, když stránka nevrátí řádky', async () => {
+  let calls = 0;
+  let sleeps = 0;
+  const result = await fetchNenTenders('', {
+    maxPages: 5,
+    fetchFn: (async () => {
+      calls += 1;
+      return new Response('<html><body>bez řádků</body></html>', { status: 200 });
+    }) as typeof fetch,
+    sleep: async () => { sleeps += 1; },
+  });
+  assert.deepEqual(result, { items: [], ok: true });
+  assert.equal(calls, 1);
+  assert.equal(sleeps, 0);
 });
 
 // --- Normalizace záznamů zdroje (čisté funkce) ---
@@ -128,6 +157,35 @@ test('toIsoDate zvládá ISO, datetime i nevalidní vstup', () => {
   assert.equal(toIsoDate('2026-07-21T09:00:00Z'), '2026-07-21');
   assert.equal(toIsoDate(null), null);
   assert.equal(toIsoDate('nesmysl'), null);
+});
+
+test('collectMonitoringInputs: selhání NEN s tokenem zavolá Hlídač jako fallback', async () => {
+  let hlidacCalls = 0;
+  const result = await collectMonitoringInputs('nen', 'server', true, {
+    fetchNen: async () => ({ items: [], ok: false }),
+    fetchHlidac: async () => {
+      hlidacCalls += 1;
+      return [{
+        id: 'fallback-1', nazev: 'Dodávka serverů', zadavatel: 'Město', budget: 1000,
+        lhuta: null, stavVZ: 'zadavani', url: 'https://h/fallback-1', dokumenty: [], cpv: [],
+      }];
+    },
+  });
+  assert.equal(hlidacCalls, 1);
+  assert.deepEqual(result.zdroje_pouzite, ['nen', 'hlidac']);
+  assert.equal(result.inputs.length, 1);
+  assert.equal(result.inputs[0].zdroj, 'hlidac');
+  assert.ok(result.varovani?.includes('NEN se nepodařilo'));
+});
+
+test('normalizeFeedRow převádí NUMERIC string na number', () => {
+  const row = normalizeFeedRow({
+    id: '1', zdroj: 'nen', zdroj_id: 'N1', nazev: 'Zakázka', zadavatel: null,
+    predpokladana_hodnota: '12345.67', lhuta_nabidek: null, url: null, raw: null,
+    stav: 'nova', tender_id: null, created_at: '2026-07-11T00:00:00Z',
+  });
+  assert.equal(row.predpokladana_hodnota, 12345.67);
+  assert.equal(typeof row.predpokladana_hodnota, 'number');
 });
 
 // --- Quick go/no-go skóre feed položky ---

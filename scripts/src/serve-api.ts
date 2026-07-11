@@ -11,7 +11,7 @@ import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
-import { buildInbox, type InboxTenderInput } from './lib/inbox.js';
+import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
@@ -69,9 +69,11 @@ import { fetchNenTenders } from './lib/monitoring/nen-client.js';
 import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
 import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
-  toNenFeedInput, toHlidacFeedInput, type MonitoringStav,
+  type MonitoringStav,
 } from './lib/monitoring/monitoring-store.js';
 import { scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
+import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
 import {
   RUN_ALL_STEPS,
   advanceRunAllChain,
@@ -788,22 +790,26 @@ app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHl
 // zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
 app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
   try {
-    const zdroj = typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen';
+    const zdroj = (typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen') as MonitoringSource;
     const q = typeof req.body?.q === 'string' ? req.body.q : '';
+    if (!['nen', 'hlidac', 'both'].includes(zdroj)) {
+      return res.status(400).json({ error: 'Neplatný zdroj monitoringu.' });
+    }
 
-    const inputs = [];
-    if (zdroj === 'nen' || zdroj === 'both') {
-      const nen = await fetchNenTenders(q);
-      inputs.push(...nen.map(toNenFeedInput));
-    }
-    if (zdroj === 'hlidac' || zdroj === 'both') {
-      const hlidac = await fetchNewTenders(q);
-      inputs.push(...hlidac.map(toHlidacFeedInput));
-    }
+    const sync = await collectMonitoringInputs(zdroj, q, Boolean(process.env.HLIDAC_TOKEN), {
+      fetchNen: fetchNenTenders,
+      fetchHlidac: fetchNewTenders,
+    });
 
     // Bez DB nelze feed perzistovat → 503 (ne pád). S DB uloží a vrátí počty.
-    const inserted = await upsertFeed(inputs);
-    res.json({ zdroj, nalezeno: inputs.length, novych: inserted });
+    const inserted = await upsertFeed(sync.inputs);
+    res.json({
+      zdroj,
+      nalezeno: sync.inputs.length,
+      novych: inserted,
+      zdroje_pouzite: sync.zdroje_pouzite,
+      ...(sync.varovani ? { varovani: sync.varovani } : {}),
+    });
   } catch (err) {
     if (err instanceof Error && err.message === 'db_unavailable') {
       return res.status(503).json({ error: 'Databáze není dostupná — feed nelze uložit.' });
@@ -846,32 +852,22 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
       return res.json({ tender_id: item.tender_id, alreadyTaken: true });
     }
 
-    // Bezpečný unikátní název složky (isSafePath kompatibilní).
-    let tenderId = slugifyTender(item.nazev, `zakazka-${id}`);
-    if (!isSafePath(tenderId)) tenderId = `zakazka-${id}`;
-    try {
-      await stat(join(INPUT_DIR, tenderId));
-      tenderId = `${tenderId}-${id}`; // kolize názvu → přípona z feed id
-    } catch {}
-
-    await mkdir(join(INPUT_DIR, tenderId), { recursive: true });
-    await mkdir(join(OUTPUT_DIR, tenderId), { recursive: true });
-    await writeFile(
-      join(OUTPUT_DIR, tenderId, 'tender-meta.json'),
-      JSON.stringify({
-        name: item.nazev,
-        created_at: new Date().toISOString(),
-        source: {
-          zdroj: item.zdroj,
-          zdroj_id: item.zdroj_id,
-          url: item.url,
-          zadavatel: item.zadavatel,
-          predpokladana_hodnota: item.predpokladana_hodnota,
-          lhuta_nabidek: item.lhuta_nabidek,
-        },
-      }, null, 2),
-      'utf-8',
-    );
+    // Atomická rezervace input složky; cizí output metadata se nikdy nepřepisují.
+    let baseSlug = slugifyTender(item.nazev, `zakazka-${id}`);
+    if (!isSafePath(baseSlug)) baseSlug = `zakazka-${id}`;
+    await mkdir(INPUT_DIR, { recursive: true });
+    const tenderId = await reserveMonitoringTender(INPUT_DIR, OUTPUT_DIR, baseSlug, id, {
+      name: item.nazev,
+      created_at: new Date().toISOString(),
+      source: {
+        zdroj: item.zdroj,
+        zdroj_id: item.zdroj_id,
+        url: item.url,
+        zadavatel: item.zadavatel,
+        predpokladana_hodnota: item.predpokladana_hodnota,
+        lhuta_nabidek: item.lhuta_nabidek,
+      },
+    });
 
     // CRM stav 'nova' + zápis do feedu (stav 'prevzata', vazba tender_id). Bez DB → 503.
     await setStatus(tenderId, 'nova');
@@ -1053,34 +1049,28 @@ app.get('/api/tenders', async (req, res) => {
 // GET /api/inbox - schvalovací inbox napříč zakázkami.
 // Agreguje "co ode mě čeká akci": nepotvrzené ceny, HARD sanity flagy, počet fail
 // checků z validace a CRM stav. Vrací jen zakázky, kde je akce potřeba (řazeno
-// nejnaléhavější první). Čte soubory per zakázka defenzivně (try/catch, vadný JSON
-// zakázku nezhodí, jen se z ní stane prázdný vstup).
+// nejnaléhavější první). Chybějící soubor je legitimní prázdný vstup, poškozený JSON
+// ale zůstane viditelný jako blokující chyba dat.
 app.get('/api/inbox', async (req, res) => {
   try {
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = (await readdir(INPUT_DIR)).filter((d) => !d.startsWith('.'));
     const crmStatuses = await getAllStatuses();
 
-    const readJson = async (tenderId: string, file: string): Promise<unknown | null> => {
-      try {
-        return JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, file), 'utf-8'));
-      } catch {
-        return null; // chybějící soubor i syntakticky vadný JSON => prázdný vstup
-      }
-    };
-
     const inputs: InboxTenderInput[] = await Promise.all(
       dirs.map(async (tenderId) => {
         const [analysis, productMatch, validation] = await Promise.all([
-          readJson(tenderId, 'analysis.json'),
-          readJson(tenderId, 'product-match.json'),
-          readJson(tenderId, 'validation-report.json'),
+          readInboxJson(OUTPUT_DIR, tenderId, 'analysis.json'),
+          readInboxJson(OUTPUT_DIR, tenderId, 'product-match.json'),
+          readInboxJson(OUTPUT_DIR, tenderId, 'validation-report.json'),
         ]);
+        const reads = [analysis, productMatch, validation];
         return {
           tenderId,
-          analysis,
-          productMatch,
-          validation,
+          analysis: analysis.state === 'ok' ? analysis.data : null,
+          productMatch: productMatch.state === 'ok' ? productMatch.data : null,
+          validation: validation.state === 'ok' ? validation.data : null,
+          dataErrors: reads.filter((read) => read.state === 'corrupt').map((read) => read.filename),
           crmStav: crmStatuses.get(tenderId)?.status ?? null,
         };
       }),

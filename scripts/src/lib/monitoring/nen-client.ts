@@ -6,12 +6,21 @@
  * (gov design system) se sémantickými `data-title` kotvami u buněk — ty jsou stabilní
  * parsovací cíl (nezávislý na pořadí sloupců). Ověřeno reálným voláním 2026-07.
  *
- * Fetch vždy bezpečně degraduje na prázdné pole (žádný pád).
+ * Fetch vždy bezpečně vrací výsledek s příznakem dostupnosti zdroje (žádný pád).
  */
 
 const NEN_BASE_URL = 'https://nen.nipez.cz';
 const NEN_LIST_PATH = '/verejne-zakazky';
 const NEN_REQUEST_TIMEOUT_MS = 20_000;
+const NEN_PAGE_DELAY_MS = 300;
+export const DEFAULT_MAX_NEN_PAGES = 5;
+
+function envMaxPages(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_NEN_PAGES;
+}
+
+export const MAX_NEN_PAGES = envMaxPages(process.env.NEN_MAX_PAGES);
 
 // Jen zakázky, které ještě přijímají nabídky (mají smysl pro feed „nové k převzetí").
 const OPEN_STATE = 'Neukončen';
@@ -28,36 +37,68 @@ export interface NenTenderCandidate {
   url: string;
 }
 
+export interface NenFetchResult {
+  items: NenTenderCandidate[];
+  ok: boolean;
+}
+
+export interface NenFetchOptions {
+  fetchFn?: typeof fetch;
+  maxPages?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function listingPath(query: string, page: number): string {
+  const querySegment = query ? `/p:vz:query=${encodeURIComponent(query)}` : '';
+  // Ověřeno proti odkazu „Stránka 2“ na NEN 2026-07-11.
+  const pageSegment = page > 1 ? `/p:vz:page=${page}` : '';
+  return `${NEN_LIST_PATH}${querySegment}${pageSegment}`;
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /**
  * Natáhne aktuální veřejné zakázky z NEN. `query` je volitelný fulltext filtr
- * (mapuje se na NEN `p:vz:query=…`). Při jakékoli chybě vrací prázdné pole.
+ * (mapuje se na NEN `p:vz:query=…`). Stránkuje přes ověřené `p:vz:page=N`,
+ * zastaví se na prázdné stránce nebo na konfigurovaném maximu a deduplikuje ID.
  */
-export async function fetchNenTenders(query = ''): Promise<NenTenderCandidate[]> {
+export async function fetchNenTenders(query = '', options: NenFetchOptions = {}): Promise<NenFetchResult> {
   const trimmed = query.trim();
-  const path = trimmed
-    ? `${NEN_LIST_PATH}/p:vz:query=${encodeURIComponent(trimmed)}`
-    : NEN_LIST_PATH;
+  const fetchFn = options.fetchFn ?? fetch;
+  const maxPages = options.maxPages ?? MAX_NEN_PAGES;
+  const sleep = options.sleep ?? delay;
+  const byId = new Map<string, NenTenderCandidate>();
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${NEN_BASE_URL}${path}`, {
-      headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      console.warn(`NEN vrátil HTTP ${response.status} — monitoring vrací prázdný seznam.`);
-      return [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetchFn(`${NEN_BASE_URL}${listingPath(trimmed, page)}`, {
+        headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        console.warn(`NEN vrátil HTTP ${response.status} — monitoring použije dostupná data.`);
+        return { items: [...byId.values()], ok: false };
+      }
+      const rows = parseNenListing(await response.text());
+      if (rows.length === 0) break;
+      for (const candidate of rows) {
+        if (candidate.stav === OPEN_STATE && !byId.has(candidate.zdroj_id)) {
+          byId.set(candidate.zdroj_id, candidate);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`NEN není dostupný (${message}) — monitoring použije dostupná data.`);
+      return { items: [...byId.values()], ok: false };
+    } finally {
+      clearTimeout(timeout);
     }
-    const html = await response.text();
-    return parseNenListing(html).filter((candidate) => candidate.stav === OPEN_STATE);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`NEN není dostupný (${message}) — monitoring vrací prázdný seznam.`);
-    return [];
-  } finally {
-    clearTimeout(timeout);
+    if (page < maxPages) await sleep(NEN_PAGE_DELAY_MS);
   }
+
+  return { items: [...byId.values()], ok: true };
 }
 
 /**

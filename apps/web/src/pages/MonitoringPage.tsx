@@ -81,9 +81,13 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     if (syncing) return;
     setSyncing(true);
     try {
-      const r = await syncMonitoring({ zdroj: 'nen' });
+      const r = await syncMonitoring();
       await qc.invalidateQueries({ queryKey: ['monitoring-feed'] });
-      toast(r.novych > 0 ? `Načteno ${r.novych} nových zakázek (${r.nalezeno} celkem)` : `Žádné nové zakázky (${r.nalezeno} zkontrolováno)`, 'success');
+      if (r.varovani) {
+        toast(r.varovani, 'danger');
+      } else {
+        toast(r.novych > 0 ? `Načteno ${r.novych} nových zakázek (${r.nalezeno} celkem)` : `Žádné nové zakázky (${r.nalezeno} zkontrolováno)`, 'success');
+      }
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Synchronizace selhala', 'danger');
     } finally {

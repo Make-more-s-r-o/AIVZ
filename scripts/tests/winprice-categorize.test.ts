@@ -14,6 +14,8 @@ const CASES: Array<[string, string]> = [
   ['Server s diskovým polem a UPS', 'it_av'],
   ['Laserová tiskárna barevná A4', 'it_av'],
   ['Wi-Fi přístupové body pro školu', 'it_av'],
+  ['LCD monitor 27"', 'it_av'],
+  ['Dodávka serverů pro nemocnici', 'it_av'],
   // naradi_dilna
   ['Elektrická vrtačka příklepová', 'naradi_dilna'],
   ['Svářečka CO2 pro dílnu', 'naradi_dilna'],
@@ -27,6 +29,8 @@ const CASES: Array<[string, string]> = [
   ['CT přístroj pro nemocnici', 'zdravotnicke'],
   ['Sanitní vozidlo typu C', 'zdravotnicke'], // priorita před vozidla (dřívější v pořadí)
   ['Stomatologická souprava pro zubní ordinaci', 'zdravotnicke'],
+  ['Monitor pacientských funkcí', 'zdravotnicke'],
+  ['Sanitní vozidlo s defibrilátorem', 'zdravotnicke'],
   // vozidla
   ['Osobní automobil kategorie M1', 'vozidla'],
   ['Nákladní automobil s hydraulickou rukou', 'vozidla'],

@@ -1,7 +1,13 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
+import { mkdtemp, mkdir, rm, copyFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { computeInboxEntry, needsAction, buildInbox, type InboxTenderInput } from '../src/lib/inbox.js';
+import { computeInboxEntry, needsAction, buildInbox, readInboxJson, type InboxTenderInput } from '../src/lib/inbox.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Pomocník: položka product-match s volitelnými poli.
 function item(overrides: Record<string, any> = {}) {
@@ -127,6 +133,29 @@ test('computeInboxEntry: chybějící/vadná data nevyhazují a dávají fallbac
   assert.equal(e.ready_to_submit, false);
   assert.equal(e.celkova_cena_s_dph, null);
   assert.equal(needsAction(e), false);
+});
+
+test('corrupt product-match.json zůstane v inboxu jako Vadná data', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vz-inbox-corrupt-'));
+  const tenderId = 'corrupt-tender';
+  await mkdir(join(root, tenderId));
+  await copyFile(
+    join(__dirname, 'fixtures', 'corrupt-product-match.json'),
+    join(root, tenderId, 'product-match.json'),
+  );
+  try {
+    const read = await readInboxJson(root, tenderId, 'product-match.json');
+    assert.equal(read.state, 'corrupt');
+    if (read.state !== 'corrupt') assert.fail('fixture měla být poškozená');
+    assert.equal(read.filename, 'product-match.json');
+    const out = buildInbox([{ tenderId, productMatch: null, dataErrors: [read.filename] }]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].data_error, true);
+    assert.deepEqual(out[0].data_error_files, ['product-match.json']);
+    assert.equal(needsAction(out[0]), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('buildInbox: filtruje čisté a řadí nejnaléhavější první', () => {

@@ -207,7 +207,7 @@ export interface MonitoringFeedItem {
 /** Natáhne nové zakázky ze zdroje do feedu. Vrací počty nalezeno/nových. */
 export async function syncMonitoring(
   opts: { zdroj?: 'nen' | 'hlidac' | 'both'; q?: string } = {},
-): Promise<{ zdroj: string; nalezeno: number; novych: number }> {
+): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; varovani?: string }> {
   const res = await fetch(`${API_BASE}/monitoring/sync`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -258,6 +258,8 @@ export interface InboxEntry {
   validation_fails: number;
   ready_to_submit: boolean;
   celkova_cena_s_dph: number | null;
+  data_error: boolean;
+  data_error_files: string[];
 }
 
 export async function getInbox(): Promise<InboxEntry[]> {

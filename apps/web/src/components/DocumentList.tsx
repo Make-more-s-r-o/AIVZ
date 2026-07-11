@@ -20,6 +20,7 @@ import {
 } from '../lib/api';
 import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, Send } from 'lucide-react';
 import { Button, Card, Badge, useToast } from './ui';
+import { FINALIZED_DOWNLOAD_ERROR, finalizeWithInvalidation } from '../lib/finalize-flow';
 
 interface DocumentListProps {
   tenderId: string;
@@ -225,16 +226,23 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
   const handleFinalize = useCallback(async () => {
     setFinalizing(true);
     try {
-      await finalizeTender(tenderId);
-      toast('Nabídka označena jako odeslaná', 'success');
-      // Stažení kompletního balíku (fetch + blob, viz downloadWithAuth) — stránka se
-      // neodnaviguje, takže invalidace stavu proběhne.
-      await downloadWithAuth(getBundleZipUrl(tenderId), `kompletni_nabidka_${tenderId}.zip`);
-      queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
-    } catch (err) {
-      // Zpráva z API už obsahuje výčet problémů brány (cenový strop, placeholdery, chybějící ceny)
-      // NEBO chybu stažení balíku (finalizace mohla uspět, jen se ZIP nepodařilo stáhnout).
-      toast((err as Error).message, 'danger');
+      try {
+        await finalizeWithInvalidation({
+          finalize: () => finalizeTender(tenderId),
+          invalidate: () => { void queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] }); },
+        });
+      } catch (err) {
+        // Zpráva z API obsahuje výčet problémů brány (cenový strop, placeholdery, ceny).
+        toast((err as Error).message, 'danger');
+        return;
+      }
+
+      try {
+        await downloadWithAuth(getBundleZipUrl(tenderId), `kompletni_nabidka_${tenderId}.zip`);
+        toast('Nabídka označena jako odeslaná', 'success');
+      } catch {
+        toast(FINALIZED_DOWNLOAD_ERROR, 'danger');
+      }
     } finally {
       setFinalizing(false);
     }

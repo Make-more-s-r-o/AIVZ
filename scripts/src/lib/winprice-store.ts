@@ -90,6 +90,13 @@ function normalizeForMatch(text: string): string {
  */
 const PRIORITY_OVERRIDES: Array<{ kat: KomoditaKategorie; slova: string[] }> = [
   { kat: 'naradi_dilna', slova: ['3d tisk'] },
+  {
+    kat: 'zdravotnicke',
+    slova: [
+      'monitor pacient', 'operacni stul', 'operacni sal', 'nemocnicni luzko',
+      'sanitni vozidl', 'sanitk', 'ambulantni vozidl',
+    ],
+  },
 ];
 
 // Pořadí = priorita mezi kategoriemi. Jakmile předmět matchne kategorii, končíme —

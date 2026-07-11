@@ -129,6 +129,11 @@ function InboxRow({ entry, onOpen }: { entry: InboxEntry; onOpen?: (id: string) 
           {entry.nazev}
         </span>
         <span style={{ fontSize: 'var(--font-size-2xs)', color: 'var(--text-tertiary)' }}>{entry.tender_id}</span>
+        {entry.data_error && (
+          <span title={`Vadné soubory: ${entry.data_error_files.join(', ')}`}>
+            <Badge tone="danger" size="sm">Vadná data</Badge>
+          </span>
+        )}
       </span>
 
       <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{stavLabel}</span>

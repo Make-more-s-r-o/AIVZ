@@ -137,6 +137,43 @@ async function run(): Promise<void> {
     assert.equal(res.ready, true, `problems: ${res.problems.join(' | ')}`);
   });
 
+  await test('změněný výběr částí od nacenění blokuje submit-gate', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        selected_parts_snapshot: ['A'],
+        polozky_match: [partItem(0, 'A', true), partItem(1, 'B', true)],
+      },
+      partsSelection: { selected_parts: ['A', 'B'] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.includes('Výběr částí se změnil od posledního nacenění — spusťte znovu krok Produkty.'));
+  });
+
+  await test('shodný snapshot výběru částí submit-gate propustí', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        selected_parts_snapshot: ['A'],
+        polozky_match: [partItem(0, 'A', true), partItem(1, 'B', true)],
+      },
+      partsSelection: { selected_parts: ['A'] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, true, `problems: ${res.problems.join(' | ')}`);
+  });
+
+  await test('starý product-match bez snapshotu zůstává kompatibilní', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [partItem(0, 'A', true), partItem(1, 'B', true)] },
+      partsSelection: { selected_parts: ['B'] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, true, `problems: ${res.problems.join(' | ')}`);
+  });
+
   // 2) Překročený cenový strop → ready=false + problém zmiňuje "strop".
   await test('over cap → ready=false, problém zmiňuje "strop"', async () => {
     const dir = await makeCase({
