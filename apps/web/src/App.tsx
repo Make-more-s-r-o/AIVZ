@@ -4,6 +4,7 @@ import WarehouseDashboard from './components/warehouse/WarehouseDashboard';
 import ProductDetailPage from './components/warehouse/ProductDetailPage';
 import { AppShell, type NavKey } from './components/layout/AppShell';
 import PrehledPage from './pages/PrehledPage';
+import InboxPage from './pages/InboxPage';
 import MonitoringPage from './pages/MonitoringPage';
 import PipelinePage from './pages/PipelinePage';
 import ZakazkyPage from './pages/ZakazkyPage';
@@ -18,6 +19,7 @@ type WarehouseTab = 'dashboard' | 'products' | 'import' | 'scraping' | 'sources'
 
 type Route =
   | { view: 'prehled' }
+  | { view: 'inbox' }
   | { view: 'monitoring' }
   | { view: 'pipeline' }
   | { view: 'zakazky' }
@@ -67,6 +69,7 @@ function parseHash(): Route {
   if (path === '/settings/password') return { view: 'settings', section: 'heslo' };
   if (path === '/settings/tags') return { view: 'settings', section: 'stitky' };
   if (path === '/registrace') return { view: 'registrace' };
+  if (path === '/inbox') return { view: 'inbox' };
   if (path === '/monitoring') return { view: 'monitoring' };
   if (path === '/pipeline') return { view: 'pipeline' };
   if (path === '/zakazky') return { view: 'zakazky' };
@@ -82,6 +85,7 @@ function navigate(path: string) {
 function navKeyForRoute(route: Route): NavKey {
   switch (route.view) {
     case 'prehled': return 'prehled';
+    case 'inbox': return 'inbox';
     case 'monitoring': return 'monitoring';
     case 'pipeline': return 'pipeline';
     case 'zakazky':
@@ -97,6 +101,7 @@ function navKeyForRoute(route: Route): NavKey {
 function breadcrumbsForRoute(route: Route): string[] {
   switch (route.view) {
     case 'prehled': return ['Přehled'];
+    case 'inbox': return ['Ke schválení'];
     case 'monitoring': return ['Monitoring'];
     case 'pipeline': return ['Pipeline'];
     case 'zakazky': return ['Zakázky'];
@@ -110,7 +115,7 @@ function breadcrumbsForRoute(route: Route): string[] {
 }
 
 const NAV_HASH: Record<NavKey, string> = {
-  prehled: '/', monitoring: '/monitoring', pipeline: '/pipeline', zakazky: '/zakazky',
+  prehled: '/', inbox: '/inbox', monitoring: '/monitoring', pipeline: '/pipeline', zakazky: '/zakazky',
   kalendar: '/kalendar', sklad: '/warehouse', nastaveni: '/settings/companies',
 };
 
@@ -149,6 +154,10 @@ export default function App() {
   switch (route.view) {
     case 'prehled':
       content = <PrehledPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} currentUserId={user?.id} />;
+      break;
+    case 'inbox':
+      // Klik na řádku otevře detail rovnou na záložce Ocenění, kde se ceny potvrzují.
+      content = <InboxPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id) + '?tab=oceneni')} />;
       break;
     case 'monitoring':
       content = <MonitoringPage onOpen={(id) => navigate('/tender/' + encodeURIComponent(id))} />;

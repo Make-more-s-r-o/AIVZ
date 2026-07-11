@@ -2,13 +2,13 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   LayoutDashboard, Radar, KanbanSquare, Table2, Calendar, Warehouse, Settings,
-  Search, Bell, ChevronRight, LogOut,
+  Search, Bell, ChevronRight, LogOut, Inbox,
 } from 'lucide-react';
 import { Avatar } from '../ui';
 import { getNotifications, markNotificationsRead, type Notification } from '../../lib/api';
 import { getStoredUser } from '../../lib/auth';
 
-export type NavKey = 'prehled' | 'monitoring' | 'pipeline' | 'zakazky' | 'kalendar' | 'sklad' | 'nastaveni';
+export type NavKey = 'prehled' | 'inbox' | 'monitoring' | 'pipeline' | 'zakazky' | 'kalendar' | 'sklad' | 'nastaveni';
 
 interface NavDef {
   key: NavKey;
@@ -18,6 +18,7 @@ interface NavDef {
 
 const NAV: NavDef[] = [
   { key: 'prehled', label: 'Přehled', icon: LayoutDashboard },
+  { key: 'inbox', label: 'Ke schválení', icon: Inbox },
   { key: 'monitoring', label: 'Monitoring', icon: Radar },
   { key: 'pipeline', label: 'Pipeline', icon: KanbanSquare },
   { key: 'zakazky', label: 'Zakázky', icon: Table2 },
