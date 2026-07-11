@@ -10,7 +10,8 @@
     "match": "tsx src/match-product.ts",
     "generate": "tsx src/generate-bid.ts",
     "validate": "tsx src/validate-bid.ts",
-    "full-flow": "tsx src/full-flow.ts"
+    "full-flow": "tsx src/full-flow.ts",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
