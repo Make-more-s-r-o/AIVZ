@@ -7,10 +7,188 @@ import {
   candidateFingerprint,
   mergePriceVerifications,
   parseWebPriceResponse,
+  verifyAllPrices,
+  verifyItemPrice,
+  type PriceVerifierAiClient,
 } from '../src/lib/price-verifier.js';
 import type { ProductMatch, TenderAnalysis } from '../src/lib/types.js';
 
 const FIXTURES = new URL('./fixtures/', import.meta.url);
+
+function fakeAiClient(responses: string[], calls: Array<{ system: string; user: string }>): PriceVerifierAiClient {
+  let index = 0;
+  return {
+    messages: {
+      async create(params) {
+        const user = params.messages[0]?.content;
+        calls.push({
+          system: typeof params.system === 'string' ? params.system : '',
+          user: typeof user === 'string' ? user : JSON.stringify(user),
+        });
+        const text = responses[index++];
+        assert.notEqual(text, undefined, 'Mock AI klient dostal více volání, než test očekával');
+        return {
+          id: `msg_test_${index}`,
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-sonnet-4-6',
+          content: [{ type: 'text', text: text!, citations: null }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+      },
+    },
+  };
+}
+
+const NOT_FOUND = JSON.stringify({
+  nalezeno: false,
+  shoda_typ: 'presny',
+  mena: 'CZK',
+  zdroje: [],
+  poznamka: 'Přesný produkt nebyl nalezen.',
+});
+
+function sourceResponse(options: {
+  matchType?: 'presny' | 'ekvivalent';
+  net?: number;
+  productName?: string;
+} = {}): string {
+  const matchType = options.matchType ?? 'presny';
+  const net = options.net ?? 100;
+  return JSON.stringify({
+    nalezeno: true,
+    shoda_typ: matchType,
+    mena: 'CZK',
+    zdroje: [{
+      url: `https://shop.cz/${matchType}-${net}`,
+      dodavatel: 'Shop',
+      nazev_produktu: options.productName ?? 'Skutečný produkt',
+      mena: 'CZK',
+      cena_bez_dph: net,
+      cena_s_dph: net * 1.21,
+      cena_baleni_s_dph: net * 1.21,
+      baleni_ks: 1,
+      prodava_po_kusech: true,
+      sazba_dph: 21,
+      dostupnost: 'skladem',
+      splnuje_specifikaci: matchType === 'ekvivalent',
+      shoda_parametru: matchType === 'ekvivalent' ? ['průměr 150 mm', 'zrnitost P80'] : [],
+      poznamka: null,
+    }],
+  });
+}
+
+test('dvoufázové ověření spustí fallback jen po nenalezení a bez AI výrobce a modelu', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const input = {
+    vyrobce: 'Mirka',
+    model: 'Gold 150 mm P80 plný disk',
+    nazev: 'Brusný disk na suchý zip 150 mm, zrnitost P80',
+    specifikace: 'Průměr 150 mm, zrnitost P80, plný disk na suchý zip',
+    mnozstvi: 10,
+    jednotka: 'ks',
+    ai_cena_bez_dph: 18,
+  };
+
+  const result = await verifyItemPrice(input, {
+    aiClient: fakeAiClient([NOT_FOUND, sourceResponse({ matchType: 'ekvivalent', net: 65 })], calls),
+  });
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0]!.system, /NEZÁVAZNÝ ODHAD AI/);
+  const fallbackPrompt = `${calls[1]!.system}\n${calls[1]!.user}`;
+  assert.doesNotMatch(fallbackPrompt, /Mirka/i);
+  assert.doesNotMatch(fallbackPrompt, /Gold 150 mm P80 plný disk/i);
+  assert.equal(result.stav, 'ekvivalent');
+  assert.equal(result.shoda_typ, 'ekvivalent');
+  assert.equal(result.web_cena_bez_dph, 65);
+});
+
+test('dvoufázové ověření fallback nespustí, když přesná fáze našla použitelný zdroj', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const result = await verifyItemPrice({
+    vyrobce: 'Bosch',
+    model: 'X1',
+    nazev: 'Nářadí',
+    specifikace: 'Dostatečně dlouhá závazná specifikace zadavatele',
+  }, { aiClient: fakeAiClient([sourceResponse()], calls) });
+
+  assert.equal(calls.length, 1);
+  assert.equal(result.stav, 'nalezeno');
+  assert.equal(result.shoda_typ, 'presny');
+});
+
+test('dvoufázové ověření fallback nespustí bez autoritativní specifikace', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const result = await verifyItemPrice({
+    vyrobce: 'Hedson',
+    model: 'DPC-770',
+    nazev: 'Míchací kelímek s víčkem',
+  }, { aiClient: fakeAiClient([NOT_FOUND], calls) });
+
+  assert.equal(calls.length, 1);
+  assert.equal(result.stav, 'nenalezeno');
+});
+
+test('souhrn spočítá položky s reálným nákupem nad AI odhadem a průměrné procento', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const kandidat = (model: string, aiCena: number) => ({
+    vyrobce: 'Test',
+    model,
+    cena_bez_dph: aiCena,
+  });
+  const match = {
+    tenderId: 'T-summary',
+    matchedAt: '2026-07-11T10:00:00.000Z',
+    polozky_match: [
+      { polozka_index: 0, polozka_nazev: 'A', typ: 'produkt', kandidati: [kandidat('A', 100)], vybrany_index: 0 },
+      { polozka_index: 1, polozka_nazev: 'B', typ: 'produkt', kandidati: [kandidat('B', 100)], vybrany_index: 0 },
+      { polozka_index: 2, polozka_nazev: 'C', typ: 'produkt', kandidati: [kandidat('C', 100)], vybrany_index: 0 },
+    ],
+  } as ProductMatch;
+
+  const { summary } = await verifyAllPrices(match, {
+    tenderId: 'T-summary',
+    concurrency: 1,
+    aiClient: fakeAiClient([
+      sourceResponse({ net: 200 }),
+      sourceResponse({ net: 150 }),
+      sourceResponse({ net: 90 }),
+    ], calls),
+  });
+
+  assert.equal(summary.faze1_nalezeno, 3);
+  assert.equal(summary.faze2_nalezeno, 0);
+  assert.equal(summary.realny_nakup_vyssi_nez_ai, 2);
+  assert.equal(summary.prumerny_narust_procent, 75);
+});
+
+test('legacy single-product fallback používá název ze zadání, ne AI identitu kandidáta', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const match = {
+    tenderId: 'T-single',
+    matchedAt: '2026-07-11T10:00:00.000Z',
+    kandidati: [{ vyrobce: 'VymyšlenýVýrobce', model: 'VymyšlenýModel', cena_bez_dph: 20 }],
+    vybrany_index: 0,
+  } as ProductMatch;
+  const analysis = {
+    polozky: [{ nazev: 'Brusný disk', specifikace: 'Průměr 150 mm, zrnitost P80, plný disk' }],
+    technicke_pozadavky: [],
+  } as TenderAnalysis;
+
+  await verifyAllPrices(match, {
+    tenderId: 'T-single',
+    analysis,
+    concurrency: 1,
+    aiClient: fakeAiClient([NOT_FOUND, sourceResponse({ matchType: 'ekvivalent' })], calls),
+  });
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[1]!.user, /Název položky ze zadání: Brusný disk/);
+  assert.doesNotMatch(calls[1]!.user, /VymyšlenýVýrobce|VymyšlenýModel/);
+});
 
 test('parser seřadí, sanitizuje a omezí multi-source odpověď a naplní legacy pole', async () => {
   const response = await readFile(new URL('price-verifier-multi-response.txt', FIXTURES), 'utf-8');

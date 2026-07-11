@@ -160,6 +160,11 @@ async function main(): Promise<void> {
   console.log('\n--- Souhrn ---');
   console.log(`  Ověřeno položek: ${summary.total}`);
   console.log(`  Nalezeno: ${summary.nalezeno}  |  Nenalezeno: ${summary.nenalezeno}  |  Chyba: ${summary.chyba}`);
+  console.log(`  Fáze 1 hit: ${summary.faze1_nalezeno}  |  Fáze 2 hit: ${summary.faze2_nalezeno}  |  Nenalezeno: ${summary.nenalezeno}`);
+  console.log(
+    `  Reálný nákup vyšší než AI odhad: ${summary.realny_nakup_vyssi_nez_ai}` +
+    `  |  Průměrně o: ${summary.prumerny_narust_procent !== null ? `${summary.prumerny_narust_procent.toFixed(1)} %` : 'nelze spočítat'}`,
+  );
   if (summary.prekracuje_strop > 0) console.log(`  Překračuje cenový strop: ${summary.prekracuje_strop}`);
   console.log(`  Web searchů: ${summary.searches}`);
   console.log(
