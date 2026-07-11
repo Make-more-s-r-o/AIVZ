@@ -77,6 +77,8 @@ const auditedOverride = PriceOverrideSchema.safeParse({
   nabidkova_cena_bez_dph: 900,
   nabidkova_cena_s_dph: 1_089,
   potvrzeno: true,
+  zkontrolovano_at: '2026-07-11T10:00:00.000Z',
+  zkontrolovano_kym: 'Jan Novák',
   override_pod_nakupem: {
     potvrzeno: true,
     duvod: 'Mám lepší nákup u vlastního dodavatele',

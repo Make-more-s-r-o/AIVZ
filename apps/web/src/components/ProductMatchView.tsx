@@ -482,7 +482,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   // Návrhy cen z webu předvyplněné přes „Použít" — mají přednost před perzistovanou
   // cenova_uprava v panelu, dokud je uživatel nepotvrdí (pak se draft zahodí).
   const [priceDrafts, setPriceDrafts] = useState<Map<number, PriceOverride>>(() => new Map());
-  // Hromadné potvrzení cen: výběr řádků (checkboxy) + probíhající uložení.
+  // Explicitní attestace řádků, které operátor předtím rozbalil a viděl jejich detail.
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [bulkSaving, setBulkSaving] = useState(false);
   // Právě ukládaný výběr kandidáta — klíč = polozka_index (backend klíčuje stejně).
@@ -500,6 +500,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   }, []);
 
   const toggleSelect = (index: number) => {
+    if (!expandedItems.has(index) || match.polozky_match?.[index]?.cenova_uprava?.potvrzeno) return;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(index)) next.delete(index);
@@ -518,6 +519,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   };
 
   const handleUseWebPrice = (itemIndex: number, overeni: OvereniCeny) => {
+    setSelected((previous) => { const next = new Set(previous); next.delete(itemIndex); return next; });
     setPriceDrafts(prev => withPriceDraft(
       prev,
       itemIndex,
@@ -545,6 +547,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   const handleSelectCandidate = useCallback(async (polozkaIndex: number, candidateIndex: number) => {
     if (selectingItem !== null) return;
     setSelectingItem(polozkaIndex);
+    const position = match.polozky_match?.findIndex((item) => item.polozka_index === polozkaIndex) ?? -1;
+    if (position >= 0) setSelected((previous) => { const next = new Set(previous); next.delete(position); return next; });
     try {
       const { priceCleared } = await selectProductCandidate(tenderId, polozkaIndex, candidateIndex);
       await invalidatePriceDerivedQueries(queryClient, tenderId);
@@ -554,7 +558,21 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
     } finally {
       setSelectingItem(null);
     }
-  }, [selectingItem, tenderId, queryClient, toast]);
+  }, [selectingItem, tenderId, queryClient, toast, match.polozky_match]);
+
+  const handleDraftChange = useCallback((itemIndex: number, draft: PriceOverride) => {
+    setPriceDrafts((previous) => {
+      const current = previous.get(itemIndex);
+      if (current && JSON.stringify(current) === JSON.stringify(draft)) return previous;
+      return new Map(previous).set(itemIndex, draft);
+    });
+    setSelected((previous) => {
+      if (!previous.has(itemIndex)) return previous;
+      const next = new Set(previous);
+      next.delete(itemIndex);
+      return next;
+    });
+  }, []);
 
   const polozky = match.polozky_match!;
 
@@ -614,7 +632,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   // sanity nálezem přeskočí; backend stejnou podmínku znovu autoritativně ověří.
   const confirmBulk = useCallback(async (indices: number[]) => {
     if (bulkSaving) return;
-    const payload: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }> = [];
+    const payload: Array<{ itemIndex: number; attestace: true; cenova_uprava: PriceOverrideData }> = [];
     let skippedWithoutPrice = 0;
     let skippedHard = 0;
     for (const idx of indices) {
@@ -626,7 +644,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
       }
       const data = buildConfirmData(pm, priceDrafts.get(idx), defaultMarze);
       if (!data) { skippedWithoutPrice++; continue; }
-      payload.push({ itemIndex: idx, cenova_uprava: data });
+      payload.push({ itemIndex: idx, attestace: true, cenova_uprava: data });
     }
     if (payload.length === 0) {
       const reasons = [
@@ -720,7 +738,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
               {polozky.length} {polozky.length === 1 ? 'položka' : polozky.length < 5 ? 'položky' : 'položek'}
             </div>
             <div className="text-xs text-gray-500">
-              Potvrzeno: {confirmedCount}/{polozky.length}
+              Zkontrolováno {confirmedCount} / {polozky.length} položek
+              {!allConfirmed && <span className="ml-2 font-semibold text-amber-700">Zbývá {polozky.length - confirmedCount}</span>}
             </div>
           </div>
         </div>
@@ -765,9 +784,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
       {!allConfirmed && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
           <span className="text-xs font-medium text-gray-700">
-            {selected.size > 0
-              ? `Vybráno ${selected.size} z ${polozky.length}`
-              : `Nepotvrzeno ${unconfirmedIndices.length} položek`}
+            Zkontrolováno {confirmedCount} / {polozky.length} položek · zbývá {unconfirmedIndices.length}
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {selected.size > 0 && (
@@ -785,15 +802,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
               className="inline-flex items-center gap-1.5 rounded-md border border-blue-300 bg-white px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {bulkSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              Potvrdit vybrané ({selected.size})
-            </button>
-            <button
-              onClick={() => confirmBulk(unconfirmedIndices)}
-              disabled={bulkSaving || unconfirmedIndices.length === 0}
-              className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {bulkSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />}
-              Potvrdit vše ({unconfirmedIndices.length})
+              Potvrdit zkontrolované ({selected.size})
             </button>
           </div>
         </div>
@@ -815,7 +824,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
       {group.items.map(({ pm, globalIdx: idx }) => {
         const isExpanded = expandedItems.has(idx);
         const selectedProduct = pm.kandidati[pm.vybrany_index];
-        const isItemConfirmed = pm.cenova_uprava?.potvrzeno;
+        const isItemConfirmed = pm.cenova_uprava?.potvrzeno && !priceDrafts.has(idx);
         const itemType = pm.typ || 'produkt';
         const TypeIcon = itemType === 'sluzba' ? Wrench : itemType === 'prislusenstvi' ? Mouse : Package;
         const typeBadge = itemType === 'sluzba' ? 'Služba' : itemType === 'prislusenstvi' ? 'Příslušenství' : null;
@@ -826,16 +835,21 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
             'rounded-lg border',
             isItemConfirmed ? 'border-green-200' : 'border-gray-200'
           )}>
-            {/* Accordion header + checkbox pro hromadné potvrzení (mimo <button>, aby klik
-                na checkbox nerozbaloval řádek) */}
+            {/* Checkbox attestace je mimo tlačítko, aby klik nerozbaloval řádek. Aktivuje se
+                až po zobrazení detailu položky. */}
             <div className="flex items-center">
-            <input
-              type="checkbox"
-              checked={selected.has(idx)}
-              onChange={() => toggleSelect(idx)}
-              aria-label={`Vybrat položku ${pm.polozka_nazev}`}
-              className="ml-4 h-4 w-4 shrink-0 cursor-pointer accent-blue-600"
-            />
+            <label className="ml-4 flex shrink-0 items-center gap-1.5 text-[10px] text-gray-600" title={!isExpanded ? 'Nejdřív si položku zobrazte' : undefined}>
+              <input
+                type="checkbox"
+                checked={Boolean(isItemConfirmed) || selected.has(idx)}
+                onChange={() => toggleSelect(idx)}
+                disabled={!isExpanded || Boolean(isItemConfirmed)}
+                aria-label={`Zkontroloval jsem specifikaci, produkt a cenu: ${pm.polozka_nazev}`}
+                className="h-4 w-4 shrink-0 cursor-pointer accent-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+              />
+              <span className="sr-only">Zkontroloval jsem specifikaci, produkt a cenu</span>
+              <span className="hidden xl:inline">Zkontrolováno</span>
+            </label>
             <button
               onClick={() => toggleItem(idx)}
               className="flex-1 flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors rounded-lg"
@@ -958,6 +972,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
                     defaultMarzeProcent={defaultMarze}
                     overeniCeny={pm.overeni_ceny}
                     onSourceApplied={(draft) => setPriceDrafts((previous) => withPriceDraft(previous, idx, draft))}
+                    onDraftChange={(draft) => handleDraftChange(idx, draft)}
+                    showConfirmButton={false}
                   />
                 )}
               </div>

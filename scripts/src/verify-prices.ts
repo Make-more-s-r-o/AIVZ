@@ -21,6 +21,7 @@ import {
 import { persistPriceVerifications } from './lib/price-verification-store.js';
 import { upsertFindings, type WebFindingInput } from './lib/web-findings-store.js';
 import type { ProductMatch, ProductCandidate, TenderAnalysis } from './lib/types.js';
+import { logActivity } from './lib/crm-store.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -138,7 +139,12 @@ async function main(): Promise<void> {
   // tato potvrzení (money-path!) by tiše zmizela. Proto těsně před zápisem soubor znovu
   // načteme (čerstvá kopie) a mergujeme overeni_ceny jen do ní. Okno mezi tímto re-readem
   // a rename je milisekundy (místo minut), takže souběžná potvrzení zůstanou zachována.
-  const fresh = await persistPriceVerifications(matchPath, results);
+  const fresh = await persistPriceVerifications(matchPath, results, async (indexes) => {
+    await logActivity(tenderId, 'cena_potvrzeni_zruseno', null, {
+      duvod: 'verify-prices zjistil reálnou cenu nad potvrzenou nabídkovou cenou',
+      polozka_indexy: indexes,
+    });
+  });
 
   // Nákupní znalost ukládáme odděleně od matchingu. Bez DB jde o no-op; skutečná
   // chyba skladu je pouze warning a nesmí zneplatnit úspěšné webové ověření.

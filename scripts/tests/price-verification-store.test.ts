@@ -26,6 +26,11 @@ test('verify uloží čerstvý HARD cena_pod_nakupem do product-match.json', asy
     polozky_match: [{
       polozka_nazev: 'Míchací kelímek', polozka_index: 0, mnozstvi: 1, typ: 'produkt',
       kandidati: [selected], vybrany_index: 0, oduvodneni_vyberu: 'pilot', sanity_flags: [],
+      cenova_uprava: {
+        nakupni_cena_bez_dph: 15, nakupni_cena_s_dph: 18.15, marze_procent: 0,
+        nabidkova_cena_bez_dph: 20, nabidkova_cena_s_dph: 24.2, potvrzeno: true,
+        zkontrolovano_at: '2026-07-11T10:00:00.000Z', zkontrolovano_kym: 'tester',
+      },
     }],
   };
   const result: ItemVerification = {
@@ -45,13 +50,17 @@ test('verify uloží čerstvý HARD cena_pod_nakupem do product-match.json', asy
 
   try {
     await writeFile(matchPath, JSON.stringify(match), 'utf-8');
-    await persistPriceVerifications(matchPath, [result]);
+    let invalidated: number[] = [];
+    await persistPriceVerifications(matchPath, [result], async (indexes) => { invalidated = indexes; });
     const stored = JSON.parse(await readFile(matchPath, 'utf-8')) as ProductMatch;
     const hard = stored.polozky_match?.[0]?.sanity_flags?.find(
       (flag) => flag.level === 'hard' && flag.code === 'cena_pod_nakupem',
     );
     assert.ok(hard);
     assert.match(hard.message, /40,5/);
+    assert.equal(stored.polozky_match?.[0]?.cenova_uprava?.potvrzeno, false);
+    assert.equal(stored.polozky_match?.[0]?.cenova_uprava?.zkontrolovano_at, undefined);
+    assert.deepEqual(invalidated, [0]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -14,6 +14,7 @@ export interface MarketPriceApiDeps {
   saveProductMatch: (tenderId: string, productMatch: ProductMatch) => Promise<void>;
   resolveDefaultMargin: (tenderId: string) => Promise<number>;
   now?: () => string;
+  onReviewsInvalidated?: (tenderId: string, indexes: number[], request: Request) => Promise<void>;
 }
 
 /** Handler je oddělený kvůli testu endpointového kontraktu bez startování API serveru. */
@@ -30,6 +31,9 @@ export function createApplyMarketPricesHandler(deps: MarketPriceApiDeps): Reques
       (productMatch as ProductMatch & { prices_updated_at?: string }).prices_updated_at =
         deps.now?.() ?? new Date().toISOString();
       await deps.saveProductMatch(tenderId, productMatch);
+      if (result.zrusena_potvrzeni.length > 0) {
+        await deps.onReviewsInvalidated?.(tenderId, result.zrusena_potvrzeni, request);
+      }
       response.json({ success: true, ...result });
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {

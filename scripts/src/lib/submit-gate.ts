@@ -155,6 +155,24 @@ export async function computeSubmitGate(
         `${unconfirmed.length > 5 ? ` (mj. ${preview}, …)` : ` (${preview})`}.`,
       );
     }
+    const confirmed = items.filter((i) => i.cenova_uprava?.potvrzeno);
+    const legacyConfirmed = confirmed.filter((i) => !i.cenova_uprava?.zkontrolovano_at || !i.cenova_uprava?.zkontrolovano_kym);
+    if (legacyConfirmed.length > 0) {
+      // Starý soubor poznáme jen tehdy, když auditní stopa chybí u všech potvrzených
+      // položek. Smí doběhnout, ale operátor dostane viditelné varování.
+      if (confirmed.length > 0 && legacyConfirmed.length === confirmed.length) {
+        warnings.push(`Legacy potvrzení: ${legacyConfirmed.length} položek nemá novou auditní stopu lidské kontroly.`);
+      } else {
+        problems.push(`${legacyConfirmed.length} potvrzených položek nemá úplnou auditní stopu lidské kontroly.`);
+      }
+    }
+    if (!pm.polozky_match) {
+      if (!pm.cenova_uprava?.potvrzeno) {
+        problems.push('Položka nemá potvrzenou cenu.');
+      } else if (!pm.cenova_uprava.zkontrolovano_at || !pm.cenova_uprava.zkontrolovano_kym) {
+        warnings.push('Legacy potvrzení: položka nemá novou auditní stopu lidské kontroly.');
+      }
+    }
   }
 
   // Stejný freshness princip jako GET status: poslední změna ceny nesmí být novější
