@@ -10,6 +10,7 @@ import { scoreGoNoGo } from './lib/go-no-go.js';
 import { getCompany, getTenderCompanyId } from './lib/company-store.js';
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { closePool } from './lib/db.js';
+import { enrichPolozkySpecifikace } from './lib/polozka-desc-enricher.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -126,6 +127,12 @@ async function main() {
       console.log(`  Multi-part tender detected: ${casti.length} parts (${casti.map(c => c.id).join(', ')})`);
     }
   }
+
+  const enrichedItemCount = enrichPolozkySpecifikace(
+    analysis.polozky,
+    extracted.documents.map((document) => document.text || ''),
+  );
+  console.log(`  Desc enrichment: ${enrichedItemCount} item(s) enriched from 'Položka č.' blocks`);
 
   // Scorer zůstává čistý: firemní profil, čas extrakce a historie cen se načtou zde
   // a předají se mu jako vstup. Nedostupná DB pouze vynechá win-price signál.
