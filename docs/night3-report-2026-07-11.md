@@ -108,3 +108,30 @@ Smazal jsem pnpm cache (~1 GB) a junk duplikáty `@types/* 2` + `scripts/package
    backend — běží přes tsx; chyby jsou na main i před nocí 3).
 5. Čeká na Danovo rozhodnutí: reálná default marže (%), JWT v query stringu, win-price
    kategorizace (95 % „ostatni") + PDF backfill.
+
+---
+
+## Dodatek — noc 3b (pokračování 2026-07-11 dopoledne)
+
+**Cíl (nastaven autonomně):** kvalita nacenění + shoda se zadáním. Nasazeno PR #48 (integrace #45+#46+#47), deploy zelený, prod ověřen.
+
+### Headline: extraction gap fix ověřen živě — cena položky 1000× přesnější
+
+Položka 42 „Rázová redukce 3/4×1/2" (n-485400) napříč běhy:
+| Běh | Kandidát | Cena bez DPH | Obrana |
+|---|---|---|---|
+| před fixy | „Kompletní sada dílenského nářadí" | 280 000 Kč | extreme_outlier HARD → 409 |
+| po #39 (root-cause) | „dílenský vozík s nářadím" | 23 884 Kč | scale-mismatch WARN + nízká spolehlivost |
+| po #45 (enricher) | **Gedore R68003012 (skutečná redukce)** | **280 Kč** | žádný flag potřeba — cena je správně |
+
+Enricher (#45, Codex gpt-5.6-sol + Fable review): deterministicky připojuje popisové bloky „Položka č. N" k položkám se specifikací „viz popis níže" — s money-path guardem (shoda čísla A názvu, jinak neobohatit). Na produ obohatil 57/57 položek; specifikace položky 42 = přesně 3 odrážky ze zadání. Celková nabídka nyní 762 923 Kč s DPH, jediný HARD nález = korektní overcap na zvedáku (nad strop 39 999). Náklad ověřovacích běhů: ~169 Kč (2× analyze+match navíc oproti plánu, v limitu).
+
+### Dále nasazeno
+- **#47 spec-compliance (Opus + Fable review):** deterministická kontrola „vybraný kandidát plní povinné požadavky" ve validation-reportu — fail/warning pro operátora, ZÁMĚRNĚ neblokuje (splneno = noisy AI sebe-hodnocení; ověřeno, že gaty validation-report nečtou). Zavírá audit finding night2 §4.4.
+- **#46 win-rate widget (Sonnet):** karta „Výsledky podání" v Přehledu (win-rate %, výhry/prohry/zrušené, odchylka od vítěze, empty stav).
+
+### Skóre po noci 3b: ~47 → **~48**
+Kvalita 62→65 (extraction fix s 1000× ověřením), UX 50→51 (widget), business 35→36 (spec-compliance viditelnost). Ostatní beze změny.
+
+### Proces (naprava chyby z noci 3)
+Delegace tentokrát dle pravidel: bulk implementace Codex gpt-5.6-sol (ChatGPT limit), spec-compliance Opus, widget Sonnet, Fable jen orchestrace + adversariální review. Codex bez git příkazů (commit po ověření gates dělá Claude — nulový konflikt).
