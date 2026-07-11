@@ -973,6 +973,14 @@ app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
   }
 });
 
+/** Čas vzniku feed položky v ms; snese Date (node-pg timestamptz) i ISO string. */
+function feedCreatedAtMs(item: { created_at?: unknown }): number {
+  const value = item.created_at;
+  if (value instanceof Date) return value.getTime();
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 // GET /api/monitoring/feed?stav=nova - feed s dopočítaným quick go/no-go skóre.
 app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
   try {
@@ -1004,7 +1012,9 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
         ...item,
         go_no_go: scoreFeedItem(item, company ?? undefined, now, monitoringConfig),
       }))
-      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || b.created_at.localeCompare(a.created_at))
+      // Sekundární řazení dle stáří: node-pg vrací timestamptz jako Date (ne string),
+      // proto porovnáváme přes čas, ne localeCompare (jinak TypeError → 500 na feedu).
+      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || feedCreatedAtMs(b) - feedCreatedAtMs(a))
       .slice(0, 200);
     res.json(withScore);
   } catch (err) {
