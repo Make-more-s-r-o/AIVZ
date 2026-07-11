@@ -33,9 +33,19 @@ function dbReady(): boolean {
   return getPool() !== null;
 }
 
+/** Pole řízená seedem; operátorský stav objednání, čas a poznámka v seznamu záměrně nejsou. */
+export const NAKUP_SEED_OWNED_FIELDS = [
+  'polozka_nazev',
+  'mnozstvi',
+  'jednotka',
+  'nakupni_cena_bez_dph',
+  'dodavatel',
+  'url',
+] as const satisfies ReadonlyArray<keyof NakupItemInput>;
+
 /**
- * Vloží pouze dosud chybějící položky. ON CONFLICT záměrně nic neaktualizuje,
- * aby opakovaný seed nepřepsal objednáno, čas objednání ani ruční poznámku.
+ * Vloží nové a opraví změněná pole vlastněná seedem. `objednano`, `objednano_at`
+ * ani ruční `poznamka` nejsou v UPDATE větvi, takže zůstávají vždy zachované.
  */
 export async function upsertNakupy(tenderId: string, items: NakupItemInput[]): Promise<number> {
   if (!dbReady()) throw new Error('db_unavailable');
@@ -58,12 +68,20 @@ export async function upsertNakupy(tenderId: string, items: NakupItemInput[]): P
     );
   }
 
+  const updateAssignments = NAKUP_SEED_OWNED_FIELDS
+    .map((field) => `${field} = EXCLUDED.${field}`)
+    .join(', ');
+  const currentTuple = NAKUP_SEED_OWNED_FIELDS.map((field) => `crm_nakupy.${field}`).join(', ');
+  const incomingTuple = NAKUP_SEED_OWNED_FIELDS.map((field) => `EXCLUDED.${field}`).join(', ');
+
   const result = await query(
     `INSERT INTO crm_nakupy
        (tender_id, polozka_index, polozka_nazev, mnozstvi, jednotka,
         nakupni_cena_bez_dph, dodavatel, url)
      VALUES ${values.join(', ')}
-     ON CONFLICT (tender_id, polozka_index) DO NOTHING`,
+     ON CONFLICT (tender_id, polozka_index) DO UPDATE SET
+       ${updateAssignments}, updated_at = NOW()
+     WHERE (${currentTuple}) IS DISTINCT FROM (${incomingTuple})`,
     params,
   );
   return result.rowCount ?? 0;

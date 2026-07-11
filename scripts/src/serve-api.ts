@@ -10,7 +10,7 @@ import { spawn } from 'child_process';
 import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
-import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { PriceOverrideSchema, ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
 import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
@@ -81,7 +81,7 @@ import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
-import { buildNakupySeedItems } from './lib/nakupy-seed.js';
+import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
 import { listFindings } from './lib/web-findings-store.js';
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
 import { z } from 'zod';
@@ -3553,16 +3553,32 @@ app.post('/api/tenders/:id/nakupy/seed', async (req, res) => {
       });
     }
 
-    const [existing, findings] = await Promise.all([listNakupy(id), listFindings(id)]);
-    const missingItems = buildNakupySeedItems(parsedMatch.data, findings, existing);
-    const seeded = await upsertNakupy(id, missingItems);
+    const [findings, rawAnalysis] = await Promise.all([
+      listFindings(id),
+      readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8').catch(() => null),
+    ]);
+    let parsedAnalysis: ReturnType<typeof TenderAnalysisSchema.safeParse> | null = null;
+    if (rawAnalysis) {
+      try {
+        parsedAnalysis = TenderAnalysisSchema.safeParse(JSON.parse(rawAnalysis));
+      } catch {
+        // Nákupní seed umí pro legacy řádek použít kandidáta; poškozená analýza jej nesmí zablokovat.
+      }
+    }
+    const plan = buildNakupySeedPlan(
+      parsedMatch.data,
+      findings,
+      parsedAnalysis?.success ? parsedAnalysis.data : undefined,
+    );
+    const seeded = await upsertNakupy(id, plan.items);
     const nakupy = await listNakupy(id);
     await logActivity(id, 'nakupni_seznam_sestaven', (req as any).user?.sub ?? null, {
       seeded,
       celkem: nakupy.length,
+      vynechane_nepotvrzene: plan.vynechane_nepotvrzene,
       actor_name: (req as any).user?.name ?? null,
     });
-    res.json({ nakupy, seeded });
+    res.json({ nakupy, seeded, vynechane_nepotvrzene: plan.vynechane_nepotvrzene });
   } catch (err: any) {
     if (err?.code === 'ENOENT') {
       return res.status(404).json({ error: 'product_match_not_found' });

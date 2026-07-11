@@ -7,7 +7,7 @@ import { getErrorMessage } from '../types/tender';
 import { Input } from './ui';
 import { calculateItemPrice, roundCurrency } from '../lib/price-calculator';
 import { safeHttpUrl } from '../lib/url';
-import { buildDraftFromWeb, webPriceGross } from '../lib/web-price';
+import { applyWebSource, webPriceGross } from '../lib/web-price';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; bg: string; fg: string }> = {
   vysoka: { label: 'Vysoká', bg: 'var(--success-bg)', fg: 'var(--success-fg)' },
@@ -30,6 +30,8 @@ interface ItemPriceCalculatorProps {
   defaultMarzeProcent: number;
   /** Aktuální nákupní nálezy z webového ověření ceny. */
   overeniCeny?: OvereniCeny;
+  /** Předá zvolený webový zdroj rodiči jako autoritativní draft pro jednotlivé i hromadné potvrzení. */
+  onSourceApplied?: (draft: PriceOverride) => void;
 }
 
 export default function ItemPriceCalculator({
@@ -45,10 +47,12 @@ export default function ItemPriceCalculator({
   onWinPriceBandLoaded,
   defaultMarzeProcent,
   overeniCeny,
+  onSourceApplied,
 }: ItemPriceCalculatorProps) {
   const [nakupniCena, setNakupniCena] = useState<number>(0);
   const [marzeProcent, setMarzeProcent] = useState<number>(0);
   const [poznamka, setPoznamka] = useState<string>('');
+  const [zdrojNakupu, setZdrojNakupu] = useState<PriceOverride['zdroj_nakupu']>();
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -76,10 +80,12 @@ export default function ItemPriceCalculator({
           : existingOverride.marze_procent,
       );
       setPoznamka(existingOverride.poznamka || '');
+      setZdrojNakupu(existingOverride.zdroj_nakupu);
       setIsConfirmed(existingOverride.potvrzeno);
     } else if (selectedProduct) {
       setNakupniCena(selectedProduct.cena_bez_dph);
       setMarzeProcent(defaultMarzeProcent);
+      setZdrojNakupu(undefined);
     }
   }, [existingOverride, selectedProduct, defaultMarzeProcent]);
 
@@ -107,6 +113,7 @@ export default function ItemPriceCalculator({
         nabidkova_cena_s_dph: nabidkovaCenaSdph,
         potvrzeno: true,
         poznamka: poznamka || undefined,
+        zdroj_nakupu: zdrojNakupu,
       });
       setIsConfirmed(true);
     } catch (err: unknown) {
@@ -114,7 +121,7 @@ export default function ItemPriceCalculator({
     } finally {
       setIsSaving(false);
     }
-  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, onConfirm]);
+  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, zdrojNakupu, onConfirm]);
 
   const handleHistoryToggle = useCallback(() => {
     const nextOpen = !historyOpen;
@@ -126,11 +133,12 @@ export default function ItemPriceCalculator({
 
   const handleUseWebSource = useCallback((source: WebPriceSource) => {
     // Sdílený převod s legacy chipem, ale s právě nastavenou marží operátora.
-    const draft = buildDraftFromWeb(source, marzeProcent);
+    const draft = applyWebSource(source, marzeProcent, onSourceApplied);
     setNakupniCena(draft.nakupni_cena_bez_dph);
     setPoznamka(draft.poznamka ?? '');
+    setZdrojNakupu(draft.zdroj_nakupu);
     setIsConfirmed(false);
-  }, [marzeProcent]);
+  }, [marzeProcent, onSourceApplied]);
 
   return (
     <div

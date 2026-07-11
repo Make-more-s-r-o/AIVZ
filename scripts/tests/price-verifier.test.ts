@@ -33,6 +33,31 @@ test('parser zachová kompatibilitu se starou single-source odpovědí', async (
   assert.equal(parsed.dodavatel, 'Legacy Shop');
 });
 
+test('M5: top-level legacy pole pocházejí výhradně z nejlevnějšího validního zdroje', () => {
+  const parsed = parseWebPriceResponse(JSON.stringify({
+    nalezeno: true,
+    cena_bez_dph: 9_999,
+    cena_s_dph: 12_098.79,
+    zdroj_url: 'https://legacy.cz/jiny-produkt',
+    dodavatel: 'Legacy obchod',
+    dostupnost: 'na dotaz',
+    zdroje: [{
+      url: 'https://nejlevnejsi.cz/model',
+      dodavatel: 'Nejlevnější obchod',
+      cena_bez_dph: null,
+      cena_s_dph: 1_210,
+      dostupnost: 'skladem',
+      poznamka: null,
+    }],
+  }), {}, '2026-07-11T10:00:00.000Z');
+
+  assert.equal(parsed.web_cena_s_dph, 1_210);
+  assert.equal(parsed.web_cena_bez_dph, 1_000);
+  assert.equal(parsed.zdroj_url, 'https://nejlevnejsi.cz/model');
+  assert.equal(parsed.dodavatel, 'Nejlevnější obchod');
+  assert.equal(parsed.dostupnost, 'skladem');
+});
+
 test('merge multi-source výsledku mění pouze overeni_ceny správné položky', () => {
   const match = {
     tenderId: 'T-1',
@@ -69,4 +94,3 @@ test('merge multi-source výsledku mění pouze overeni_ceny správné položky'
   assert.strictEqual(match.polozky_match?.[0]?.cenova_uprava, originalOverride);
   assert.equal(match.polozky_match?.[0]?.cenova_uprava?.potvrzeno, true);
 });
-

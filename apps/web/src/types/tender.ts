@@ -56,6 +56,10 @@ export interface PriceOverride {
   nabidkova_cena_s_dph: number;
   potvrzeno: boolean;
   poznamka?: string;
+  zdroj_nakupu?: {
+    url: string;
+    dodavatel: string | null;
+  };
 }
 
 export interface PriceSanityFlag {

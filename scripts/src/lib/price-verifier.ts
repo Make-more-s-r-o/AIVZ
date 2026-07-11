@@ -306,8 +306,10 @@ export function parseWebPriceResponse(
   const cheapest = zdroje[0];
   const legacyBez = coerceNumber(raw.cena_bez_dph);
   const legacySdph = coerceNumber(raw.cena_s_dph);
-  let bez = cheapest?.cena_bez_dph ?? legacyBez;
-  let sdph = cheapest?.cena_s_dph ?? legacySdph;
+  // Jakmile máme validní řádkový zdroj, nesmí se jeho chybějící cena doplnit
+  // top-level hodnotou jiného obchodu. Legacy hodnoty platí pouze bez zdrojů.
+  let bez = cheapest ? cheapest.cena_bez_dph : legacyBez;
+  let sdph = cheapest ? cheapest.cena_s_dph : legacySdph;
   if (bez === null) bez = undefined;
   if (sdph === null) sdph = undefined;
 
@@ -333,7 +335,7 @@ export function parseWebPriceResponse(
     };
   }
 
-  const poznamka = [cheapest?.poznamka ?? cleanStr(raw.poznamka), dopocetPoznamka]
+  const poznamka = [cheapest ? cheapest.poznamka ?? undefined : cleanStr(raw.poznamka), dopocetPoznamka]
     .filter(Boolean)
     .join(' | ') || undefined;
   const strop = input.cena_max_s_dph;
@@ -346,9 +348,9 @@ export function parseWebPriceResponse(
     web_cena_bez_dph: bez,
     web_cena_s_dph: sdph,
     mena: cleanStr(raw.mena) ?? 'CZK',
-    zdroj_url: cheapest?.url ?? cleanUrl(raw.zdroj_url),
-    dodavatel: cheapest?.dodavatel ?? cleanStr(raw.dodavatel),
-    dostupnost: cheapest?.dostupnost ?? cleanStr(raw.dostupnost),
+    zdroj_url: cheapest ? cheapest.url : cleanUrl(raw.zdroj_url),
+    dodavatel: cheapest ? cheapest.dodavatel ?? undefined : cleanStr(raw.dodavatel),
+    dostupnost: cheapest ? cheapest.dostupnost ?? undefined : cleanStr(raw.dostupnost),
     poznamka,
     overeno_at: overenoAt,
     prekracuje_strop: prekracujeStrop,

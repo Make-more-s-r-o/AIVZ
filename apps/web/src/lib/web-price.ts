@@ -6,6 +6,7 @@ export interface WebPriceDraftInput {
   cena_bez_dph?: number | null;
   cena_s_dph?: number | null;
   url?: string | null;
+  dodavatel?: string | null;
 }
 
 /** Legacy top-level ověření převede na stejný vstup jako nový řádkový zdroj. */
@@ -14,6 +15,7 @@ export function webPriceInputFromVerification(overeni: OvereniCeny): WebPriceDra
     cena_bez_dph: overeni.web_cena_bez_dph,
     cena_s_dph: overeni.web_cena_s_dph,
     url: overeni.zdroj_url,
+    dodavatel: overeni.dodavatel,
   };
 }
 
@@ -43,5 +45,31 @@ export function buildDraftFromWeb(source: WebPriceDraftInput | WebPriceSource, m
     nabidkova_cena_s_dph: nabidka.nabidkova_cena_s_dph,
     potvrzeno: false,
     poznamka: safeUrl ? `Cena z webu: ${safeUrl}` : 'Cena z webu',
+    ...(safeUrl ? {
+      zdroj_nakupu: {
+        url: safeUrl,
+        dodavatel: source.dodavatel?.trim() || null,
+      },
+    } : {}),
   };
+}
+
+/** Zapíše řádkový draft do nové mapy, aby jej individuální i hromadné potvrzení četlo stejně. */
+export function withPriceDraft(
+  drafts: ReadonlyMap<number, PriceOverride>,
+  itemIndex: number,
+  draft: PriceOverride,
+): Map<number, PriceOverride> {
+  return new Map(drafts).set(itemIndex, draft);
+}
+
+/** Vytvoří jediný webový draft a stejnou instanci předá rodiči kalkulátoru. */
+export function applyWebSource(
+  source: WebPriceDraftInput | WebPriceSource,
+  marzeProcent: number,
+  onApplied?: (draft: PriceOverride) => void,
+): PriceOverride {
+  const draft = buildDraftFromWeb(source, marzeProcent);
+  onApplied?.(draft);
+  return draft;
 }

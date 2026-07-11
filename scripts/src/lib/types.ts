@@ -156,6 +156,10 @@ export const PriceOverrideSchema = z.object({
   nabidkova_cena_s_dph: z.number(),
   potvrzeno: z.boolean().default(false),
   poznamka: z.string().optional(),
+  zdroj_nakupu: z.object({
+    url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
+    dodavatel: z.string().nullable(),
+  }).optional(),
 });
 
 export const PriceSanityFlagSchema = z.object({

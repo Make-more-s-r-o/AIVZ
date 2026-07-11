@@ -486,7 +486,11 @@ export async function getNakupy(id: string): Promise<NakupItem[]> {
   return response.nakupy;
 }
 
-export async function seedNakupy(id: string): Promise<{ nakupy: NakupItem[]; seeded: number }> {
+export async function seedNakupy(id: string): Promise<{
+  nakupy: NakupItem[];
+  seeded: number;
+  vynechane_nepotvrzene: number;
+}> {
   const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/nakupy/seed`, {
     method: 'POST',
     headers: authHeaders(),
@@ -622,6 +626,10 @@ export interface PriceOverrideData {
   nabidkova_cena_s_dph: number;
   potvrzeno: boolean;
   poznamka?: string;
+  zdroj_nakupu?: {
+    url: string;
+    dodavatel: string | null;
+  };
 }
 
 export async function updatePriceOverride(id: string, data: PriceOverrideData): Promise<{ success: boolean }> {

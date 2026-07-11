@@ -63,6 +63,7 @@ import {
   type Comment,
   type NakupItem,
 } from '../lib/api';
+import { nakupySeedAction } from '../lib/nakupy-ui';
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
 import { allowedNextStages } from '../lib/stage-machine';
@@ -870,6 +871,7 @@ function NakupTab({ tenderId, crmVyhrano }: { tenderId: string; crmVyhrano: bool
   const total = nakupy.reduce((sum, item) => sum + nakupRowTotal(item), 0);
   const orderedTotal = nakupy.reduce((sum, item) => sum + (item.objednano ? nakupRowTotal(item) : 0), 0);
   const vyhrano = crmVyhrano || outcome?.vysledek === 'vyhra';
+  const seedAction = nakupySeedAction(nakupy.length);
 
   async function handleSeed() {
     if (seeding) return;
@@ -877,12 +879,13 @@ function NakupTab({ tenderId, crmVyhrano }: { tenderId: string; crmVyhrano: bool
     try {
       const result = await seedNakupy(tenderId);
       qc.setQueryData(queryKey, result.nakupy);
-      toast(
-        result.seeded > 0
-          ? `Nákupní seznam sestaven (${result.seeded} položek)`
-          : 'Nákupní seznam je aktuální',
-        'success',
-      );
+      const skipped = result.vynechane_nepotvrzene > 0
+        ? `, ${result.vynechane_nepotvrzene} nepotvrzených vynecháno`
+        : '';
+      toast(result.seeded > 0
+        ? `Nákupní seznam aktualizován (${result.seeded} položek${skipped})`
+        : `Nákupní seznam je aktuální${skipped}`,
+      'success');
     } catch (e) {
       toast(statusErrorMessage(e), 'danger');
     } finally {
@@ -939,14 +942,15 @@ function NakupTab({ tenderId, crmVyhrano }: { tenderId: string; crmVyhrano: bool
       <Card
         title="Nákupní seznam"
         padding={nakupy.length > 0 ? 0 : 16}
-        action={nakupy.length === 0 && !isLoading ? (
+        action={!isLoading ? (
           <Button
             size="sm"
+            variant={seedAction.variant}
             iconLeft={<ShoppingCart size={15} />}
             onClick={() => void handleSeed()}
             disabled={seeding}
           >
-            {seeding ? 'Sestavuji…' : 'Sestavit nákupní seznam'}
+            {seeding ? 'Sestavuji…' : seedAction.label}
           </Button>
         ) : undefined}
       >

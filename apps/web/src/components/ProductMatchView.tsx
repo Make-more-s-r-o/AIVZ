@@ -25,7 +25,7 @@ import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, Over
 import { safeHttpUrl } from '../lib/url';
 import { calculateItemPrice, roundCurrency, DEFAULT_MARZE_PROCENT } from '../lib/price-calculator';
 import { invalidatePriceDerivedQueries } from '../lib/product-match-invalidation';
-import { buildDraftFromWeb, webPriceInputFromVerification } from '../lib/web-price';
+import { buildDraftFromWeb, webPriceInputFromVerification, withPriceDraft } from '../lib/web-price';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -249,6 +249,7 @@ function buildConfirmData(
     ...calculatedPrice,
     potvrzeno: true,
     poznamka: draft?.poznamka ?? existing?.poznamka ?? undefined,
+    zdroj_nakupu: draft?.zdroj_nakupu ?? existing?.zdroj_nakupu,
   };
 }
 
@@ -391,6 +392,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
           historyCacheKey={`${tenderId}:single`}
           defaultMarzeProcent={defaultMarze}
           overeniCeny={overeni}
+          onSourceApplied={setWebDraft}
         />
       )}
     </div>
@@ -449,7 +451,8 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   };
 
   const handleUseWebPrice = (itemIndex: number, overeni: OvereniCeny) => {
-    setPriceDrafts(prev => new Map(prev).set(
+    setPriceDrafts(prev => withPriceDraft(
+      prev,
       itemIndex,
       buildDraftFromWeb(webPriceInputFromVerification(overeni), defaultMarze),
     ));
@@ -868,6 +871,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
                     onWinPriceBandLoaded={handleWinPriceBandLoaded}
                     defaultMarzeProcent={defaultMarze}
                     overeniCeny={pm.overeni_ceny}
+                    onSourceApplied={(draft) => setPriceDrafts((previous) => withPriceDraft(previous, idx, draft))}
                   />
                 )}
               </div>
