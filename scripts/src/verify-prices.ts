@@ -15,7 +15,7 @@ import { join } from 'path';
 import { config } from 'dotenv';
 import { mergePriceVerifications, verifyAllPrices, type ItemVerification } from './lib/price-verifier.js';
 import { upsertFindings, type WebFindingInput } from './lib/web-findings-store.js';
-import type { ProductMatch, ProductCandidate } from './lib/types.js';
+import type { ProductMatch, ProductCandidate, TenderAnalysis } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -48,7 +48,7 @@ function findingsFromResults(
   results: ItemVerification[],
 ): WebFindingInput[] {
   return results.flatMap((result) => {
-    if (result.overeni_ceny.stav !== 'nalezeno') return [];
+    if (result.overeni_ceny.stav !== 'nalezeno' && result.overeni_ceny.stav !== 'ekvivalent') return [];
     const candidate = selectedCandidate(matchData, result.polozka_index);
     const produkt = candidate ? `${candidate.vyrobce} ${candidate.model}`.trim() : null;
     const sources = result.overeni_ceny.zdroje?.length
@@ -98,12 +98,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  let analysis: TenderAnalysis | undefined;
+  try {
+    analysis = JSON.parse(await readFile(join(ROOT, 'output', tenderId, 'analysis.json'), 'utf-8')) as TenderAnalysis;
+  } catch {
+    console.warn('  analysis.json chybí nebo je nečitelný — přesné modely se ověří, ekvivalenty budou zakázány.');
+  }
+
   console.log(`\nOvěřování cen web-searchem — zakázka ${tenderId}`);
   if (limit !== undefined) console.log(`  limit: ${limit}`);
   if (onlyIndex !== undefined) console.log(`  jen položka index: ${onlyIndex}`);
 
   const { results, summary } = await verifyAllPrices(matchData, {
     tenderId,
+    analysis,
     limit,
     onlyIndex,
     onProgress: (m) => console.log('  ' + m),
@@ -120,10 +128,10 @@ async function main(): Promise<void> {
   let fresh: ProductMatch;
   try {
     fresh = JSON.parse(await readFile(matchPath, 'utf-8')) as ProductMatch;
-  } catch {
-    // Kdyby čerstvé načtení selhalo, radši nepřepisuj soubor stale snapshotem —
-    // overeni_ceny se dá klidně dohledat znovu, ale ztracená cenova_uprava ne.
-    fresh = matchData;
+  } catch (error) {
+    // Fail-closed: při chybě čerstvého čtení nesmíme zapsat starý snapshot a
+    // riskovat ztrátu potvrzené ceny ani přilepení výsledku k jinému kandidátovi.
+    throw new Error(`Čerstvé načtení product-match.json před merge selhalo; ověření nezapisuji: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   mergePriceVerifications(fresh, results);
@@ -135,7 +143,13 @@ async function main(): Promise<void> {
 
   // Nákupní znalost ukládáme odděleně od matchingu. Bez DB jde o no-op; skutečná
   // chyba skladu je pouze warning a nesmí zneplatnit úspěšné webové ověření.
-  const findings = findingsFromResults(tenderId, matchData, results);
+  const acceptedResults = results.filter((result) => {
+    const stored = result.polozka_index === -1
+      ? fresh.overeni_ceny
+      : fresh.polozky_match?.find((item) => item.polozka_index === result.polozka_index)?.overeni_ceny;
+    return stored?.kandidat_fingerprint === result.overeni_ceny.kandidat_fingerprint;
+  });
+  const findings = findingsFromResults(tenderId, fresh, acceptedResults);
   try {
     await upsertFindings(findings);
   } catch (err) {

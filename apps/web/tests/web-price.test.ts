@@ -27,6 +27,38 @@ test('zobrazená cena s DPH se dopočítá z ceny bez DPH', () => {
   assert.equal(webPriceGross({ cena_bez_dph: 2_000, cena_s_dph: null }), 2_420);
 });
 
+test('C2: webový draft počítá celé balení pro požadované množství', () => {
+  const draft = buildDraftFromWeb({
+    url: 'https://shop.cz/baleni',
+    dodavatel: 'Shop',
+    cena_bez_dph: 1_000,
+    cena_s_dph: 1_210,
+    cena_baleni_s_dph: 1_210,
+    baleni_ks: 10,
+    mena: 'CZK',
+    sazba_dph: 21,
+    dostupnost: 'skladem',
+    poznamka: null,
+  }, 0, 11);
+  assert.equal(draft.nakupni_cena_bez_dph, 181.82);
+});
+
+test('M1: webový draft s nejasnou DPH použije hrubou cenu konzervativně', () => {
+  const draft = buildDraftFromWeb({
+    url: 'https://shop.cz/nejasna-dph',
+    dodavatel: 'Shop',
+    cena_bez_dph: null,
+    cena_s_dph: 121,
+    cena_baleni_s_dph: 121,
+    baleni_ks: 1,
+    mena: 'CZK',
+    sazba_dph: null,
+    dostupnost: 'skladem',
+    poznamka: null,
+  }, 0);
+  assert.equal(draft.nakupni_cena_bez_dph, 121);
+});
+
 test('H1: aplikovaný řádkový zdroj se propíše do rodičovské mapy pro hromadné potvrzení', () => {
   const original = new Map();
   let parentDrafts = original;

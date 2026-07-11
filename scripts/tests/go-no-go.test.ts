@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-import { scoreGoNoGo, scoreBid } from '../src/lib/go-no-go.js';
+import { BID_BELOW_MARKET_PENALTY, scoreGoNoGo, scoreBid } from '../src/lib/go-no-go.js';
 import { TenderAnalysisSchema, type ProductMatch, type TenderAnalysis } from '../src/lib/types.js';
 import type { PriceBand } from '../src/lib/winprice-query.js';
 
@@ -125,6 +125,8 @@ function pricedItem(overrides: {
   potvrzeno?: boolean;
   spolehlivost?: 'vysoka' | 'stredni' | 'nizka';
   hardFlag?: boolean;
+  staleHardFlag?: boolean;
+  belowMarketFlag?: boolean;
 } = {}) {
   const nakupni = overrides.nakupni ?? 100_000;
   const nabidkova = overrides.nabidkova ?? 130_000;
@@ -132,6 +134,7 @@ function pricedItem(overrides: {
     polozka_nazev: `Položka ${(overrides.index ?? 0) + 1}`,
     polozka_index: overrides.index ?? 0,
     mnozstvi: overrides.mnozstvi ?? 1,
+    cena_max_s_dph: overrides.hardFlag ? 1 : undefined,
     typ: 'produkt' as const,
     kandidati: [{
       vyrobce: 'Test',
@@ -155,9 +158,23 @@ function pricedItem(overrides: {
       nabidkova_cena_s_dph: nabidkova * 1.21,
       potvrzeno: overrides.potvrzeno ?? true,
     },
-    sanity_flags: overrides.hardFlag
-      ? [{ polozka_index: overrides.index ?? 0, level: 'hard' as const, code: 'zero_price' as const, message: 'Nulová cena' }]
-      : [],
+    sanity_flags: [
+      ...(overrides.staleHardFlag
+        ? [{ polozka_index: overrides.index ?? 0, level: 'hard' as const, code: 'zero_price' as const, message: 'Nulová cena' }]
+        : []),
+    ],
+    ...(overrides.belowMarketFlag ? {
+      overeni_ceny: {
+        stav: 'nalezeno' as const,
+        overeno_at: '2026-07-11T10:00:00.000Z',
+        zdroje: [{
+          url: 'https://shop.cz/produkt', dodavatel: 'Shop',
+          cena_bez_dph: nabidkova + 10_000, cena_s_dph: (nabidkova + 10_000) * 1.21,
+          cena_baleni_s_dph: (nabidkova + 10_000) * 1.21, baleni_ks: 1,
+          mena: 'CZK' as const, sazba_dph: 21, dostupnost: 'skladem' as const, poznamka: null,
+        }],
+      },
+    } : {}),
   };
 }
 
@@ -203,7 +220,7 @@ test('scoreBid: nulová marže → srážka + důvod', () => {
   assert.ok(result.duvody.some((d) => /přirážku/i.test(d)), result.duvody.join(' | '));
 });
 
-test('scoreBid: HARD sanity flag → NOGO strop i při dobré ekonomice', () => {
+test('M2: scoreBid přepočítá aktuální HARD nález → NOGO i při dobré ekonomice', () => {
   const match = bidMatch([
     pricedItem({ index: 0 }),
     pricedItem({ index: 1, hardFlag: true }),
@@ -213,6 +230,36 @@ test('scoreBid: HARD sanity flag → NOGO strop i při dobré ekonomice', () => 
   assert.equal(result.doporuceni, 'NOGO');
   assert.ok(result.score < 45, `score ${result.score}`);
   assert.ok(result.duvody.some((d) => /HARD/.test(d)), result.duvody.join(' | '));
+});
+
+test('M2: scoreBid přepočítá aktuální ceny pod nákupem a nečte uložený flag', () => {
+  const safe = bidMatch([
+    pricedItem({ index: 0 }),
+    pricedItem({ index: 1 }),
+    pricedItem({ index: 2 }),
+  ]);
+  const risky = bidMatch([
+    pricedItem({ index: 0, belowMarketFlag: true }),
+    pricedItem({ index: 1, belowMarketFlag: true }),
+    pricedItem({ index: 2 }),
+  ]);
+
+  const safeResult = scoreBid(analysis(), safe, { default_marze_procent: 10 }, undefined);
+  const riskyResult = scoreBid(analysis(), risky, { default_marze_procent: 10 }, undefined);
+  assert.ok(riskyResult.score <= safeResult.score - BID_BELOW_MARKET_PENALTY);
+  assert.ok(riskyResult.duvody.some((reason) => /2 položek by se prodávalo pod reálnou nákupní cenou/.test(reason)));
+  assert.equal(riskyResult.doporuceni, 'NOGO');
+});
+
+test('M2: zastaralý uložený HARD flag bez aktuálního nálezu skóre neotráví', () => {
+  const match = bidMatch([
+    pricedItem({ index: 0, staleHardFlag: true }),
+    pricedItem({ index: 1 }),
+    pricedItem({ index: 2 }),
+  ]);
+  const result = scoreBid(analysis(), match, { default_marze_procent: 10 }, winBand(2_000_000));
+  assert.equal(result.doporuceni, 'GO');
+  assert.equal(result.duvody.some((reason) => /HARD/.test(reason)), false);
 });
 
 test('scoreBid: naše cena nad P75 → srážka za win-price', () => {

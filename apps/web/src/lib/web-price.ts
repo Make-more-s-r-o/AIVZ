@@ -26,14 +26,34 @@ export function webPriceGross(source: WebPriceDraftInput): number | undefined {
   return undefined;
 }
 
+/** Jednotkový náklad respektující nutnost koupit celé balení. */
+export function webUnitCostForQuantity(
+  source: WebPriceDraftInput | WebPriceSource,
+  mnozstvi = 1,
+): number {
+  const quantity = Number.isFinite(mnozstvi) && mnozstvi > 0 ? mnozstvi : 1;
+  const packageSize = 'baleni_ks' in source && source.baleni_ks != null && source.baleni_ks > 0
+    ? source.baleni_ks
+    : 1;
+  const taxRate = 'sazba_dph' in source ? source.sazba_dph : undefined;
+  const packageNet = source.cena_bez_dph
+    ?? (source.cena_s_dph != null
+      ? taxRate === null ? source.cena_s_dph : roundCurrency(source.cena_s_dph / (1 + (taxRate ?? 21) / 100))
+      : 0);
+  return roundCurrency((Math.ceil(quantity / packageSize) * packageNet) / quantity);
+}
+
 /**
  * Jednotný převod webového nálezu na cenový draft. Předaná marže se zachová;
  * volající tak může použít firemní default i právě rozepsanou marži operátora.
  */
-export function buildDraftFromWeb(source: WebPriceDraftInput | WebPriceSource, marzeProcent: number): PriceOverride {
-  const bezDph = source.cena_bez_dph
-    ?? (source.cena_s_dph != null ? roundCurrency(source.cena_s_dph / 1.21) : 0);
-  const sDph = source.cena_s_dph ?? calculateItemPrice(bezDph, 0).nakupni_cena_s_dph;
+export function buildDraftFromWeb(
+  source: WebPriceDraftInput | WebPriceSource,
+  marzeProcent: number,
+  mnozstvi = 1,
+): PriceOverride {
+  const bezDph = webUnitCostForQuantity(source, mnozstvi);
+  const sDph = calculateItemPrice(bezDph, 0).nakupni_cena_s_dph;
   const nabidka = calculateItemPrice(bezDph, marzeProcent);
   const safeUrl = safeHttpUrl(source.url);
 
@@ -68,8 +88,9 @@ export function applyWebSource(
   source: WebPriceDraftInput | WebPriceSource,
   marzeProcent: number,
   onApplied?: (draft: PriceOverride) => void,
+  mnozstvi = 1,
 ): PriceOverride {
-  const draft = buildDraftFromWeb(source, marzeProcent);
+  const draft = buildDraftFromWeb(source, marzeProcent, mnozstvi);
   onApplied?.(draft);
   return draft;
 }

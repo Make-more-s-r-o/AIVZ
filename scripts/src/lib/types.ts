@@ -160,6 +160,11 @@ export const PriceOverrideSchema = z.object({
     url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
     dodavatel: z.string().nullable(),
   }).optional(),
+  override_pod_nakupem: z.object({
+    potvrzeno: z.literal(true),
+    duvod: z.string().trim().min(10, 'Důvod výjimky musí mít alespoň 10 znaků'),
+    schvalil: z.string().trim().min(1).optional(),
+  }).optional(),
 });
 
 export const PriceSanityFlagSchema = z.object({
@@ -173,7 +178,10 @@ export const PriceSanityFlagSchema = z.object({
     'low_confidence_big',
     'outlier_vs_batch',
     'extreme_outlier',
-  ]),
+    'cena_pod_nakupem',
+    // Historické soubory zůstanou čitelné; při parse se starý název přepíše.
+    'ai_cena_pod_trhem',
+  ]).transform((code) => code === 'ai_cena_pod_trhem' ? 'cena_pod_nakupem' as const : code),
   message: z.string(),
 });
 
@@ -181,16 +189,29 @@ export const PriceSanityFlagSchema = z.object({
 // `overeni_ceny` volitelné, aby dál prošly i starší product-match.json soubory,
 // které obsahují pouze jeden zdroj v top-level polích.
 export const WebPriceSourceSchema = z.object({
-  url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
+  url: z.string().refine((value) => /^https:\/\//i.test(value), 'URL musí používat HTTPS'),
   dodavatel: z.string().nullable(),
+  // Volitelné kvůli starším product-match.json; nové webové ověření ho vždy vyžaduje v promptu.
+  nazev_produktu: z.string().optional(),
   cena_bez_dph: z.number().nullable(),
   cena_s_dph: z.number().nullable(),
-  dostupnost: z.string().nullable(),
+  cena_baleni_s_dph: z.number().nullable().optional().default(null),
+  baleni_ks: z.number().positive().nullable().optional().default(null),
+  mena: z.literal('CZK').optional().default('CZK'),
+  sazba_dph: z.number().positive().nullable().optional(),
+  dostupnost: z.preprocess(
+    (value) => value == null ? 'neznámá' : value,
+    z.enum(['skladem', 'na dotaz', 'není skladem', 'neznámá']),
+  ),
   poznamka: z.string().nullable(),
+  splnuje_specifikaci: z.boolean().optional(),
+  shoda_parametru: z.array(z.string()).optional(),
 });
 
 export const OvereniCenySchema = z.object({
-  stav: z.enum(['nalezeno', 'nenalezeno', 'chyba']),
+  stav: z.enum(['nalezeno', 'ekvivalent', 'nenalezeno', 'chyba']),
+  // Nová pole jsou volitelná, aby zůstaly čitelné historické soubory se stavem `nalezeno`.
+  shoda_typ: z.enum(['presny', 'ekvivalent']).optional(),
   web_cena_bez_dph: z.number().optional(),
   web_cena_s_dph: z.number().optional(),
   mena: z.string().optional(),
@@ -199,8 +220,17 @@ export const OvereniCenySchema = z.object({
   dostupnost: z.string().optional(),
   poznamka: z.string().optional(),
   overeno_at: z.string().datetime(),
+  kandidat_fingerprint: z.string().optional(),
   prekracuje_strop: z.boolean().optional(),
   zdroje: z.array(WebPriceSourceSchema).max(3).optional(),
+  realita: z.object({
+    nejlevnejsi_bez_dph: z.number().nullable(),
+    rozdil_procent: z.number().nullable(),
+    pod_trhem: z.boolean(),
+    nejlevnejsi_dodavatel: z.string().nullable().optional(),
+    nejlevnejsi_zdroj_url: z.string().nullable().optional(),
+    poznamka: z.string().nullable().optional(),
+  }).optional(),
 });
 
 export const PolozkaMatchSchema = z.object({

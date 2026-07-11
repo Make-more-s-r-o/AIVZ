@@ -60,12 +60,17 @@ export interface PriceOverride {
     url: string;
     dodavatel: string | null;
   };
+  override_pod_nakupem?: {
+    potvrzeno: true;
+    duvod: string;
+    schvalil?: string;
+  };
 }
 
 export interface PriceSanityFlag {
   polozka_index: number;
   level: 'hard' | 'warn';
-  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch' | 'extreme_outlier';
+  code: 'overcap' | 'zero_price' | 'below_cost' | 'bid_share' | 'low_confidence_big' | 'outlier_vs_batch' | 'extreme_outlier' | 'cena_pod_nakupem';
   message: string;
 }
 
@@ -76,14 +81,22 @@ export interface PriceSanityFlag {
 export interface WebPriceSource {
   url: string;
   dodavatel: string | null;
+  nazev_produktu?: string;
   cena_bez_dph: number | null;
   cena_s_dph: number | null;
-  dostupnost: string | null;
+  cena_baleni_s_dph: number | null;
+  baleni_ks: number | null;
+  mena: 'CZK';
+  sazba_dph?: number | null;
+  dostupnost: 'skladem' | 'na dotaz' | 'není skladem' | 'neznámá';
   poznamka: string | null;
+  splnuje_specifikaci?: boolean;
+  shoda_parametru?: string[];
 }
 
 export interface OvereniCeny {
-  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
+  stav: 'nalezeno' | 'ekvivalent' | 'nenalezeno' | 'chyba';
+  shoda_typ?: 'presny' | 'ekvivalent';
   web_cena_bez_dph?: number;
   web_cena_s_dph?: number;
   mena?: string;
@@ -92,8 +105,17 @@ export interface OvereniCeny {
   dostupnost?: string;
   poznamka?: string;
   overeno_at: string;
+  kandidat_fingerprint?: string;
   prekracuje_strop?: boolean;
   zdroje?: WebPriceSource[];
+  realita?: {
+    nejlevnejsi_bez_dph: number | null;
+    rozdil_procent: number | null;
+    pod_trhem: boolean;
+    nejlevnejsi_dodavatel?: string | null;
+    nejlevnejsi_zdroj_url?: string | null;
+    poznamka?: string | null;
+  };
 }
 
 export interface PolozkaMatch {

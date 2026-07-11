@@ -70,9 +70,35 @@ assert.equal(schemaResult.marze_procent, 10);
 assert.equal(schemaResult.nabidkova_cena_bez_dph, 1100);
 console.log('✓ cenový návrh projde PriceOverrideSchema se zachovanou marží');
 
+const auditedOverride = PriceOverrideSchema.safeParse({
+  nakupni_cena_bez_dph: 1_000,
+  nakupni_cena_s_dph: 1_210,
+  marze_procent: -10,
+  nabidkova_cena_bez_dph: 900,
+  nabidkova_cena_s_dph: 1_089,
+  potvrzeno: true,
+  override_pod_nakupem: {
+    potvrzeno: true,
+    duvod: 'Mám lepší nákup u vlastního dodavatele',
+    schvalil: 'Jan Novák',
+  },
+});
+assert.equal(auditedOverride.success, true);
+const shortReason = PriceOverrideSchema.safeParse({
+  nakupni_cena_bez_dph: 1_000,
+  nakupni_cena_s_dph: 1_210,
+  marze_procent: -10,
+  nabidkova_cena_bez_dph: 900,
+  nabidkova_cena_s_dph: 1_089,
+  potvrzeno: true,
+  override_pod_nakupem: { potvrzeno: true, duvod: 'krátké' },
+});
+assert.equal(shortReason.success, false);
+console.log('✓ H1 auditovaný override vyžaduje potvrzení a důvod alespoň 10 znaků');
+
 assert.equal(resolveDefaultMarzeProcent(undefined), 10);
 assert.equal(resolveDefaultMarzeProcent(0), 0);
 assert.equal(resolveDefaultMarzeProcent(25), 25);
 console.log('✓ chybějící firemní marže má fallback 10 %, explicitní 0 % zůstává platné');
 
-console.log(`\n${cases.length + 2} passed, 0 failed`);
+console.log(`\n${cases.length + 3} passed, 0 failed`);

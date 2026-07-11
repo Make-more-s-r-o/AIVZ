@@ -1933,6 +1933,16 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
 
     // Merge into product-match.json
     productMatch.cenova_uprava = parsed;
+    if (parsed.potvrzeno) {
+      const findings = refreshPriceSanityFlags(productMatch);
+      const hardFindings = findings.filter((finding) => finding.level === 'hard');
+      if (hardFindings.length > 0) {
+        return res.status(409).json({
+          error: `Cenu nelze potvrdit: ${formatSanityBlockingMessage(productMatch, hardFindings)}`,
+          sanity_flags: hardFindings,
+        });
+      }
+    }
     // Zastaralost dokumentů (viz lib/stale-check.ts + GET /api/tenders/:id/status): timestamp
     // poslední změny ceny, aby šlo poznat, že vygenerované dokumenty už neodpovídají.
     productMatch.prices_updated_at = new Date().toISOString();
@@ -1949,10 +1959,26 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
 
 /** Přepočítá a uloží flagy všech položek v objektu, aniž by měnil jejich ceny nebo potvrzení. */
 function refreshPriceSanityFlags(productMatch: any): PriceSanityFlag[] {
-  if (!Array.isArray(productMatch.polozky_match)) return [];
-  const findings = checkPriceSanity(productMatch.polozky_match, {});
-  for (const item of productMatch.polozky_match) {
-    item.sanity_flags = findings.filter((finding) => finding.polozka_index === item.polozka_index);
+  const items = Array.isArray(productMatch.polozky_match)
+    ? productMatch.polozky_match
+    : Array.isArray(productMatch.kandidati)
+      ? [{
+          polozka_nazev: 'Položka',
+          polozka_index: -1,
+          mnozstvi: 1,
+          typ: 'produkt',
+          kandidati: productMatch.kandidati,
+          vybrany_index: productMatch.vybrany_index ?? 0,
+          oduvodneni_vyberu: productMatch.oduvodneni_vyberu ?? '',
+          cenova_uprava: productMatch.cenova_uprava,
+          overeni_ceny: productMatch.overeni_ceny,
+        }]
+      : [];
+  const findings = checkPriceSanity(items, {});
+  if (Array.isArray(productMatch.polozky_match)) {
+    for (const item of productMatch.polozky_match) {
+      item.sanity_flags = findings.filter((finding) => finding.polozka_index === item.polozka_index);
+    }
   }
   return findings;
 }
@@ -1971,7 +1997,8 @@ function findingsForItemPositions(
 
 function formatSanityBlockingMessage(productMatch: any, findings: PriceSanityFlag[]): string {
   const names = new Map(
-    productMatch.polozky_match.map((item: any) => [item.polozka_index, item.polozka_nazev]),
+    (Array.isArray(productMatch.polozky_match) ? productMatch.polozky_match : [])
+      .map((item: any) => [item.polozka_index, item.polozka_nazev]),
   );
   return findings
     .map((finding) => `„${names.get(finding.polozka_index) ?? `položka #${finding.polozka_index + 1}`}“: ${finding.message}`)
@@ -2126,7 +2153,7 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     const productMatch = JSON.parse(await readFile(matchPath, 'utf-8'));
 
     // Vyber cílovou položku: multi-item dle polozka_index, jinak legacy kořen.
-    let target: { kandidati?: unknown[]; vybrany_index?: number; cenova_uprava?: unknown };
+    let target: { kandidati?: unknown[]; vybrany_index?: number; cenova_uprava?: unknown; overeni_ceny?: unknown };
     if (Array.isArray(productMatch.polozky_match)) {
       const itemIdx = Number(itemIndex);
       if (!Number.isInteger(itemIdx)) {
@@ -2154,6 +2181,11 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
       delete target.cenova_uprava;
       priceCleared = true;
     }
+    let verificationCleared = false;
+    if (target.overeni_ceny !== undefined) {
+      delete target.overeni_ceny;
+      verificationCleared = true;
+    }
     target.vybrany_index = candIdx;
     // Zastaralost dokumentů (viz lib/stale-check.ts): jiný kandidát = jiný produkt/cena,
     // i když se cena zrovna zrušila (priceCleared) — vygenerované dokumenty už neplatí.
@@ -2163,7 +2195,7 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');
     await rename(tmpPath, matchPath);
 
-    res.json({ success: true, itemIndex: Number(itemIndex), candidateIndex: candIdx, priceCleared });
+    res.json({ success: true, itemIndex: Number(itemIndex), candidateIndex: candIdx, priceCleared, verificationCleared });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });

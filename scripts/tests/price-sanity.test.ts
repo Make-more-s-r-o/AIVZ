@@ -22,6 +22,9 @@ function item(
     purchaseWithoutVat?: number;
     offerWithoutVat?: number;
     withOverride?: boolean;
+    marketWithoutVat?: number;
+    aiBelowMarket?: boolean;
+    lossOverride?: boolean;
   } = {},
 ): PolozkaMatch {
   const priceWithoutVat = options.offerWithoutVat ?? priceWithVat / 1.21;
@@ -39,7 +42,7 @@ function item(
     dostupnost: 'skladem',
   };
 
-  return {
+  const result: PolozkaMatch = {
     polozka_nazev: `Položka ${polozkaIndex}`,
     polozka_index: polozkaIndex,
     mnozstvi: options.quantity ?? 1,
@@ -55,8 +58,40 @@ function item(
       nabidkova_cena_bez_dph: priceWithoutVat,
       nabidkova_cena_s_dph: priceWithVat,
       potvrzeno: false,
+      ...(options.lossOverride ? {
+        override_pod_nakupem: {
+          potvrzeno: true as const,
+          duvod: 'Mám lepší cenu u vlastního dodavatele',
+        },
+      } : {}),
     },
   };
+  if (options.marketWithoutVat !== undefined) {
+    result.overeni_ceny = {
+      stav: 'nalezeno',
+      shoda_typ: 'presny',
+      dodavatel: 'Reálný dodavatel',
+      overeno_at: '2026-07-11T10:00:00.000Z',
+      zdroje: [{
+        url: 'https://realny-dodavatel.cz/produkt',
+        dodavatel: 'Reálný dodavatel',
+        cena_bez_dph: options.marketWithoutVat,
+        cena_s_dph: options.marketWithoutVat * 1.21,
+        cena_baleni_s_dph: options.marketWithoutVat * 1.21,
+        baleni_ks: 1,
+        mena: 'CZK',
+        sazba_dph: 21,
+        dostupnost: 'skladem',
+        poznamka: null,
+      }],
+      realita: {
+        nejlevnejsi_bez_dph: options.marketWithoutVat,
+        rozdil_procent: 25,
+        pod_trhem: options.aiBelowMarket ?? true,
+      },
+    };
+  }
+  return result;
 }
 
 function codes(items: PolozkaMatch[]): string[] {
@@ -91,6 +126,42 @@ test('below_cost: prodej pod nákupní cenou je HARD', () => {
     item(0, 968, { purchaseWithoutVat: 1_000, offerWithoutVat: 800 }),
   ], {});
   assert.equal(findings.some((finding) => finding.level === 'hard' && finding.code === 'below_cost'), true);
+});
+
+test('H1: cena_pod_nakupem je HARD a obsahuje přímá čísla i zdroj', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120 }),
+  ]);
+  const finding = findings.find((candidate) => candidate.code === 'cena_pod_nakupem');
+  assert.ok(finding);
+  assert.equal(finding.level, 'hard');
+  assert.match(finding.message, /Nabídková cena 100 Kč.*nákupní náklad 120 Kč.*Reálný dodavatel.*nelze cenu potvrdit ani nabídku podat/);
+});
+
+test('H2: guard nestaví na uloženém reality flagu ani na AI odhadu', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, {
+      offerWithoutVat: 100,
+      purchaseWithoutVat: 80,
+      marketWithoutVat: 120,
+      aiBelowMarket: false,
+    }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem' && candidate.level === 'hard'), true);
+});
+
+test('cena_pod_nakupem: nevznikne, když je potvrzovaná nabídka alespoň na reálném nákupu', () => {
+  const findings = checkPriceSanity([
+    item(4, 145.2, { offerWithoutVat: 120, purchaseWithoutVat: 100, marketWithoutVat: 120 }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem'), false);
+});
+
+test('H1: auditovaný override s dostatečným důvodem ztrátový gate propustí', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120, lossOverride: true }),
+  ]);
+  assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem'), false);
 });
 
 test('bid_share: přes 40 % se varuje jen u více než tří položek', () => {
