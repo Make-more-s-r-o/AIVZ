@@ -247,6 +247,29 @@ async function run(): Promise<void> {
     assert.ok(res.problems.some((p) => p.includes('potvrzenou cenu')));
   });
 
+  await test('legacy potvrzení bez auditní stopy pouze varuje', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, true);
+    assert.ok(res.warnings.some((warning) => warning.includes('Legacy potvrzení')));
+  });
+
+  await test('smíšené nové a legacy potvrzení bez stopy blokuje', async () => {
+    const audited = item(0, null, 1000);
+    audited.cenova_uprava.zkontrolovano_at = '2026-07-11T10:00:00.000Z';
+    audited.cenova_uprava.zkontrolovano_kym = 'tester';
+    const dir = await makeCase({
+      productMatch: { polozky_match: [audited, item(1, null, 1000)] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.some((problem) => problem.includes('auditní stopu')));
+  });
+
   // 1c) Vícečástová zakázka: nepotvrzené položky NEVYBRANÉ části nesmí blokovat gate
   // (podává se jen část A; položky části B zůstanou nepotvrzené a musí se ignorovat).
   await test('multi-part → nepotvrzené položky nevybrané části neblokují', async () => {

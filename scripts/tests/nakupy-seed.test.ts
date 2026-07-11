@@ -27,6 +27,8 @@ function matchWith(overeni_ceny?: NonNullable<ProductMatch['polozky_match']>[num
         nabidkova_cena_bez_dph: 11_000,
         nabidkova_cena_s_dph: 13_310,
         potvrzeno: true,
+        zkontrolovano_at: '2026-07-11T10:00:00.000Z',
+        zkontrolovano_kym: 'tester',
       },
       overeni_ceny,
     }],

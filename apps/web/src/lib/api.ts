@@ -721,12 +721,12 @@ export async function updateItemPriceOverride(
 
 /**
  * Hromadné potvrzení cen více položek jedním requestem (transakčně nad product-match.json).
- * Používá „Potvrdit vše" / „Potvrdit vybrané" v Ocenění — místo N samostatných PUT volání.
+ * Uloží pouze řádky, které operátor jednotlivě zobrazil a explicitně attestoval.
  */
 export async function bulkUpdateItemPriceOverride(
   id: string,
-  items: Array<{ itemIndex: number; cenova_uprava: PriceOverrideData }>,
-): Promise<{ success: boolean; updated: number; warnings: PriceSanityFlag[]; can_resume_run_all?: boolean }> {
+  items: Array<{ itemIndex: number; attestace: true; cenova_uprava: PriceOverrideData }>,
+): Promise<{ success: boolean; updated: number; preskoceno_bez_kontroly: number[]; warnings: PriceSanityFlag[]; can_resume_run_all?: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/product-match/price/bulk`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },

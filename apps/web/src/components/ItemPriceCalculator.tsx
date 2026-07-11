@@ -32,6 +32,9 @@ interface ItemPriceCalculatorProps {
   overeniCeny?: OvereniCeny;
   /** Předá zvolený webový zdroj rodiči jako autoritativní draft pro jednotlivé i hromadné potvrzení. */
   onSourceApplied?: (draft: PriceOverride) => void;
+  /** Průběžný draft pro řádkovou attestaci; změna ceny ruší předchozí zaškrtnutí. */
+  onDraftChange?: (draft: PriceOverride) => void;
+  showConfirmButton?: boolean;
 }
 
 export default function ItemPriceCalculator({
@@ -48,6 +51,8 @@ export default function ItemPriceCalculator({
   defaultMarzeProcent,
   overeniCeny,
   onSourceApplied,
+  onDraftChange,
+  showConfirmButton = true,
 }: ItemPriceCalculatorProps) {
   const [nakupniCena, setNakupniCena] = useState<number>(0);
   const [marzeProcent, setMarzeProcent] = useState<number>(0);
@@ -110,6 +115,32 @@ export default function ItemPriceCalculator({
   const realUnitCost = onlyOrientationalSources ? null : overeniCeny?.realita?.nejlevnejsi_bez_dph ?? null;
   const needsLossOverride = realUnitCost != null && realUnitCost > 0 && nabidkovaCenaBezDph < realUnitCost;
   const lossOverrideValid = !needsLossOverride || (overrideLoss && overrideReason.trim().length >= 10);
+
+  useEffect(() => {
+    if (!onDraftChange || nakupniCena <= 0) return;
+    const draft: PriceOverride = {
+      nakupni_cena_bez_dph: nakupniCena,
+      nakupni_cena_s_dph: nakupniCenaSdph,
+      marze_procent: marzeProcent,
+      nabidkova_cena_bez_dph: nabidkovaCenaBezDph,
+      nabidkova_cena_s_dph: nabidkovaCenaSdph,
+      potvrzeno: false,
+      poznamka: poznamka || undefined,
+      zdroj_nakupu: zdrojNakupu,
+      ...(needsLossOverride && overrideLoss && overrideReason.trim().length >= 10 ? {
+        override_pod_nakupem: { potvrzeno: true as const, duvod: overrideReason.trim() },
+      } : {}),
+    };
+    const sameAsExisting = existingOverride
+      && existingOverride.nakupni_cena_bez_dph === draft.nakupni_cena_bez_dph
+      && existingOverride.marze_procent === draft.marze_procent
+      && existingOverride.nabidkova_cena_bez_dph === draft.nabidkova_cena_bez_dph
+      && (existingOverride.poznamka ?? '') === (draft.poznamka ?? '')
+      && JSON.stringify(existingOverride.zdroj_nakupu) === JSON.stringify(draft.zdroj_nakupu)
+      && JSON.stringify(existingOverride.override_pod_nakupem) === JSON.stringify(draft.override_pod_nakupem);
+    if (!sameAsExisting) onDraftChange(draft);
+  }, [onDraftChange, nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph,
+    nabidkovaCenaSdph, poznamka, zdrojNakupu, needsLossOverride, overrideLoss, overrideReason, existingOverride]);
 
   const handleConfirm = useCallback(async () => {
     setIsSaving(true);
@@ -510,7 +541,7 @@ export default function ItemPriceCalculator({
         </div>
       )}
 
-      <button
+      {showConfirmButton && <button
         onClick={handleConfirm}
         disabled={isSaving || nakupniCena <= 0 || !lossOverrideValid}
         onMouseEnter={() => setConfirmHover(true)}
@@ -526,8 +557,8 @@ export default function ItemPriceCalculator({
         }}
       >
         {isSaving ? 'Ukládám...' : isConfirmed ? 'Aktualizovat' : 'Potvrdit ceny'}
-      </button>
-      {!isConfirmed && (
+      </button>}
+      {showConfirmButton && !isConfirmed && (
         <p className="mt-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
           Ceny musí být potvrzeny před generováním dokumentů.
         </p>

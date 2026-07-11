@@ -28,6 +28,7 @@ export interface ApplyMarketPricesResult {
   preskocene_polozky: MarketPriceSkippedItem[];
   nova_celkova_cena_bez_dph: number;
   nova_celkova_cena_s_dph: number;
+  zrusena_potvrzeni: number[];
 }
 
 export class UnknownMarketPriceItemError extends Error {}
@@ -70,6 +71,7 @@ export function applyMarketPrices(
 
   const skipped: MarketPriceSkippedItem[] = [];
   let updated = 0;
+  const invalidatedReviews: number[] = [];
 
   for (const item of items) {
     if (requested && !requested.has(item.polozka_index)) continue;
@@ -105,6 +107,9 @@ export function applyMarketPrices(
     const purchaseWithoutVat = roundCurrency(cheapest.unitPriceWithoutVat);
     const margin = item.cenova_uprava?.marze_procent ?? defaultMarginPercent;
     const calculated = calculateItemPrice(purchaseWithoutVat, margin);
+    if (item.cenova_uprava?.potvrzeno || item.cenova_uprava?.zkontrolovano_at) {
+      invalidatedReviews.push(item.polozka_index);
+    }
     item.cenova_uprava = PriceOverrideSchema.parse({
       ...calculated,
       potvrzeno: false,
@@ -133,5 +138,6 @@ export function applyMarketPrices(
     preskocene_polozky: skipped,
     nova_celkova_cena_bez_dph: totalWithoutVat,
     nova_celkova_cena_s_dph: roundCurrency(totalWithoutVat * 1.21),
+    zrusena_potvrzeni: invalidatedReviews,
   };
 }

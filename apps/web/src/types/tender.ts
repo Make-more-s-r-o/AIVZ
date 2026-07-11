@@ -55,6 +55,8 @@ export interface PriceOverride {
   nabidkova_cena_bez_dph: number;
   nabidkova_cena_s_dph: number;
   potvrzeno: boolean;
+  zkontrolovano_at?: string;
+  zkontrolovano_kym?: string;
   poznamka?: string;
   zdroj_nakupu?: {
     url: string;

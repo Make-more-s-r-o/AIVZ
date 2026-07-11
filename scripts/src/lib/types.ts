@@ -148,13 +148,15 @@ export const ProductCandidateSchema = z.object({
   match_score: z.preprocess(parseAiNumber, z.number().optional()),
 });
 
-export const PriceOverrideSchema = z.object({
+const PriceOverrideObjectSchema = z.object({
   nakupni_cena_bez_dph: z.number(),
   nakupni_cena_s_dph: z.number(),
   marze_procent: z.number().default(0),
   nabidkova_cena_bez_dph: z.number(),
   nabidkova_cena_s_dph: z.number(),
   potvrzeno: z.boolean().default(false),
+  zkontrolovano_at: z.string().datetime({ offset: true }).optional(),
+  zkontrolovano_kym: z.string().trim().min(1).optional(),
   poznamka: z.string().optional(),
   zdroj_nakupu: z.object({
     url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
@@ -166,6 +168,20 @@ export const PriceOverrideSchema = z.object({
     schvalil: z.string().trim().min(1).optional(),
   }).optional(),
 });
+
+export const PriceOverrideSchema = PriceOverrideObjectSchema.superRefine((value, context) => {
+  if (value.potvrzeno && (!value.zkontrolovano_at || !value.zkontrolovano_kym)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Potvrzená cena musí obsahovat čas a identitu lidské kontroly',
+      path: ['potvrzeno'],
+    });
+  }
+});
+
+// Pouze pro čtení historických product-match souborů. Všechny zápisové endpointy
+// používají výše uvedené přísné schéma a legacy potvrzení tedy neumějí vytvořit.
+const LegacyPriceOverrideSchema = PriceOverrideObjectSchema;
 
 export const PriceSanityFlagSchema = z.object({
   polozka_index: z.number(),
@@ -253,7 +269,7 @@ export const PolozkaMatchSchema = z.object({
   kandidati: z.array(ProductCandidateSchema),
   vybrany_index: aiNumber(),
   oduvodneni_vyberu: z.string(),
-  cenova_uprava: PriceOverrideSchema.optional(),
+  cenova_uprava: LegacyPriceOverrideSchema.optional(),
   sanity_flags: z.array(PriceSanityFlagSchema).optional(),
   overeni_ceny: OvereniCenySchema.optional(),
 });
@@ -268,7 +284,7 @@ export const ProductMatchSchema = z.object({
   kandidati: z.array(ProductCandidateSchema).optional(),
   vybrany_index: z.preprocess(parseAiNumber, z.number().optional()),
   oduvodneni_vyberu: z.string().optional(),
-  cenova_uprava: PriceOverrideSchema.optional(),
+  cenova_uprava: LegacyPriceOverrideSchema.optional(),
   overeni_ceny: OvereniCenySchema.optional(),
   // Multi-product fields
   polozky_match: z.array(PolozkaMatchSchema).optional(),

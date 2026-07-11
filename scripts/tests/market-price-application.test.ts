@@ -41,6 +41,7 @@ function item(index: number, options: {
         nakupni_cena_bez_dph: 50, nakupni_cena_s_dph: 60.5,
         marze_procent: options.existingMargin, nabidkova_cena_bez_dph: 60,
         nabidkova_cena_s_dph: 72.6, potvrzeno: true, poznamka: 'původní poznámka',
+        zkontrolovano_at: '2026-07-11T10:00:00.000Z', zkontrolovano_kym: 'tester',
       },
     } : {}),
     overeni_ceny: {
@@ -84,6 +85,8 @@ test('výběr zdroje zohlední celá balení a zachová stávající marži', ()
   assert.equal(price?.nabidkova_cena_bez_dph, 218.18);
   assert.equal(price?.zdroj_nakupu?.dodavatel, 'Levné balení');
   assert.equal(price?.potvrzeno, false);
+  assert.equal(price?.zkontrolovano_at, undefined);
+  assert.deepEqual(result.zrusena_potvrzeni, [0]);
   assert.equal(price?.poznamka, 'původní poznámka; cena z ověřeného zdroje (Levné balení)');
 });
 

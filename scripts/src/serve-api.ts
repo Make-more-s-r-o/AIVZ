@@ -10,7 +10,8 @@ import { spawn } from 'child_process';
 import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
-import { PriceOverrideSchema, ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
+import { ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
+import { clearPriceForProductChange, validateBulkPriceWrites, validatePriceWrite } from './lib/price-review.js';
 import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
@@ -1642,6 +1643,12 @@ app.post('/api/tenders/:id/product-match/apply-market-prices', createApplyMarket
   },
   resolveDefaultMargin: async (tenderId) =>
     (await resolvePricingDefaults(tenderId)).default_marze_procent,
+  onReviewsInvalidated: async (tenderId, indexes, request) => {
+    await logActivity(tenderId, 'cena_potvrzeni_zruseno', (request as any).user?.sub ?? null, {
+      duvod: 'apply-market-prices změnil nákupní nebo nabídkovou cenu',
+      polozka_indexy: indexes,
+    });
+  },
 }));
 
 // GET /api/tenders/:id/bid-score — profit-aware bid skóre počítané on-the-fly
@@ -1945,7 +1952,7 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
     const productMatch = JSON.parse(raw);
 
     // Validate the incoming price override
-    const parsed = PriceOverrideSchema.parse(req.body);
+    const parsed = validatePriceWrite(req.body, (req as any).user);
 
     // Merge into product-match.json
     productMatch.cenova_uprava = parsed;
@@ -2015,13 +2022,7 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     }
     // Zvaliduj každou položku (index + PriceOverrideSchema) do dočasného pole — teprve po
     // úspěšné validaci VŠECH se zapisuje (buď projde vše, nebo nic → žádný částečný zápis).
-    const validated = items.map((it: any, i: number) => {
-      const idx = Number(it?.itemIndex);
-      if (!Number.isInteger(idx) || idx < 0) {
-        throw new Error(`items[${i}].itemIndex musí být nezáporné celé číslo`);
-      }
-      return { idx, cenova_uprava: PriceOverrideSchema.parse(it?.cenova_uprava) };
-    });
+    const { validated, preskoceno } = validateBulkPriceWrites(items, (req as any).user);
 
     const raw = await readFile(matchPath, 'utf-8');
     const productMatch = JSON.parse(raw);
@@ -2072,7 +2073,7 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
       canResumeRunAll = !stillPending;
     }
 
-    res.json({ success: true, updated: validated.length, warnings, can_resume_run_all: canResumeRunAll });
+    res.json({ success: true, updated: validated.length, preskoceno_bez_kontroly: preskoceno, warnings, can_resume_run_all: canResumeRunAll });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
@@ -2095,7 +2096,7 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
       return res.status(400).json({ error: `Invalid item index ${idx}` });
     }
 
-    const parsed = PriceOverrideSchema.parse(req.body);
+    const parsed = validatePriceWrite(req.body, (req as any).user);
     productMatch.polozky_match[idx].cenova_uprava = parsed;
 
     let warnings: PriceSanityFlag[] = [];
@@ -2171,11 +2172,8 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     }
 
     // Změnou kandidáta se ruší dřív potvrzená cena (vázaná na jiný produkt).
-    let priceCleared = false;
-    if (target.cenova_uprava !== undefined) {
-      delete target.cenova_uprava;
-      priceCleared = true;
-    }
+    const priceCleared = target.cenova_uprava !== undefined;
+    const reviewWasInvalidated = clearPriceForProductChange(target);
     let verificationCleared = false;
     if (target.overeni_ceny !== undefined) {
       delete target.overeni_ceny;
@@ -2189,6 +2187,13 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     const tmpPath = `${matchPath}.tmp`;
     await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');
     await rename(tmpPath, matchPath);
+
+    if (reviewWasInvalidated) {
+      await logActivity(id, 'cena_potvrzeni_zruseno', (req as any).user?.sub ?? null, {
+        duvod: 'operátor změnil vybraný produkt',
+        polozka_index: Number(itemIndex),
+      });
+    }
 
     res.json({ success: true, itemIndex: Number(itemIndex), candidateIndex: candIdx, priceCleared, verificationCleared });
   } catch (err: any) {
