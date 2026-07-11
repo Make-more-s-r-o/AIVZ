@@ -135,6 +135,16 @@ function parseDump(xml: string, limit: number, collected: number): WinPriceRecor
       const cas = z.find('casZverejneni').first().text().trim();
       datum = cas ? cas.slice(0, 10) : null;
     }
+    // Sanitizace: Registr smluv obsahuje i nesmyslná data (0001-01-01, budoucí roky).
+    // Mimo rozsah [2015-01-01, dnešek] nebo mimo ISO formát → NULL (cena zůstává,
+    // zahazuje se jen nedůvěryhodné datum). Stejné pravidlo řeší migrace 013 pro už
+    // importovaná data.
+    if (datum) {
+      const dnes = new Date().toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || datum < '2015-01-01' || datum > dnes) {
+        datum = null;
+      }
+    }
 
     // cena: CZK pole, nebo cizí měna
     const cena_bez_dph = parseNumber(z.find('smlouva > hodnotaBezDph').first().text());

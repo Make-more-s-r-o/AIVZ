@@ -138,6 +138,10 @@ export const ProductCandidateSchema = z.object({
   zdroj_ceny: z.string().optional(),
   katalogove_cislo: z.string().optional(),
   reference_urls: z.array(z.string()).optional(),
+  // AI nenašla reálný odpovídající produkt — kandidát je jen zástupný záznam s nulovou
+  // cenou (viz prompt „KDYŽ NENAJDEŠ REÁLNÝ PRODUKT"). Taková položka se NIKDY
+  // nepředvyplňuje cenou kandidáta — nacení ji operátor ručně.
+  zadna_shoda: z.boolean().optional(),
   // Warehouse matching metadata
   warehouse_product_id: z.string().uuid().optional(),
   match_tier: z.enum(['exact', 'text', 'vector']).optional(),

@@ -209,6 +209,18 @@ export async function getProductMatch(id: string) {
   return fetchJson<ProductMatch>(`/tenders/${id}/product-match`);
 }
 
+export interface PricingDefaults {
+  default_marze_procent: number;
+}
+
+/**
+ * Výchozí marže (%) pro cenové potvrzení — z nastavení firmy přiřazené zakázce
+ * (fallback default firma → legacy config → 10 %). Backend vrací vždy 200.
+ */
+export async function getPricingDefaults(id: string): Promise<PricingDefaults> {
+  return fetchJson(`/tenders/${id}/pricing-defaults`);
+}
+
 export interface WinPriceSample {
   predmet: string;
   cena_bez_dph: number;
@@ -232,6 +244,78 @@ export async function getWinPriceBand(subject: string, category?: string): Promi
   const params = new URLSearchParams({ q: subject });
   if (category) params.set('kategorie', category);
   return fetchJson(`/winprice/band?${params.toString()}`);
+}
+
+// --- Výsledky podání (win-rate feedback loop) ---
+
+export type VysledekPodani = 'vyhra' | 'prohra' | 'zruseno';
+
+export interface TenderOutcome {
+  id: string;
+  tender_id: string;
+  vysledek: VysledekPodani;
+  vitezna_cena_bez_dph: number | null;
+  nase_cena_bez_dph: number | null;
+  pocet_uchazecu: number | null;
+  vitez_nazev: string | null;
+  poznamka: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OutcomeInput {
+  vysledek: VysledekPodani;
+  vitezna_cena_bez_dph?: number | null;
+  nase_cena_bez_dph?: number | null;
+  pocet_uchazecu?: number | null;
+  vitez_nazev?: string | null;
+  poznamka?: string | null;
+}
+
+export interface OutcomeStats {
+  celkem: number;
+  vyhry: number;
+  prohry: number;
+  zrusene: number;
+  win_rate_procent: number | null;
+  prumerna_odchylka_od_viteze_procent: number | null;
+}
+
+/** Výsledek zakázky — resilientní (401/chyba/bez záznamu → null, ne reload). */
+export async function getOutcome(id: string): Promise<TenderOutcome | null> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/outcome`, { headers: authHeaders() });
+    if (!res.ok) return null;
+    return (await res.json()).outcome ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Uloží výsledek podání (idempotentní upsert). Vítěznou cenu backend propíše do win_prices. */
+export async function saveOutcome(id: string, input: OutcomeInput): Promise<{ outcome: TenderOutcome; winprice_feedback: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/outcome`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.detail || err.error || 'Nepodařilo se uložit výsledek');
+  }
+  return res.json();
+}
+
+/** Souhrnné win-rate statistiky — resilientní (401/chyba → prázdné nuly, ne reload). */
+export async function getOutcomeStats(): Promise<OutcomeStats> {
+  const empty: OutcomeStats = { celkem: 0, vyhry: 0, prohry: 0, zrusene: 0, win_rate_procent: null, prumerna_odchylka_od_viteze_procent: null };
+  try {
+    const res = await fetch(`${API_BASE}/outcomes/stats`, { headers: authHeaders() });
+    if (!res.ok) return empty;
+    return await res.json();
+  } catch {
+    return empty;
+  }
 }
 
 export async function getDocuments(id: string): Promise<string[]> {

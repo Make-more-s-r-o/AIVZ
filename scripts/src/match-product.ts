@@ -9,7 +9,7 @@ import { checkPriceSanity } from './lib/price-sanity.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
 import { getCompany, getTenderCompanyId, resolveDefaultMarzeProcent } from './lib/company-store.js';
-import { calculateItemPrice } from './lib/price-calculator.js';
+import { applyPricePrefill } from './lib/price-prefill.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -44,19 +44,8 @@ const WAREHOUSE_MATCH_ENABLED = process.env.WAREHOUSE_MATCH_ENABLED === '1';
 const WAREHOUSE_MIN_SCORE = 0.35;
 const WAREHOUSE_AUTOSELECT_SCORE = 0.75;
 
-// Zástupná / prázdná hodnota názvu produktu (AI někdy vrátí „None", „-", prázdno místo reálného
-// produktu). Kandidát bez reálného produktu NESMÍ dostat auto-předvyplněnou závaznou cenu k podání.
-function isPlaceholderProductName(value: unknown): boolean {
-  const v = String(value ?? '').trim().toLowerCase();
-  return v === '' || v === '-' || v === '–' || v === '—' || v === 'none' || v === 'null' || v === 'n/a';
-}
-
-// Reálný produkt = má smysluplný model NEBO popis. Samotný výrobce nestačí (služby mají
-// záměrně `vyrobce: '-'` a přesto jsou legitimní — jejich model je název služby).
-function candidateHasRealProduct(candidate: { vyrobce?: string; model?: string; popis?: string } | undefined): boolean {
-  if (!candidate) return false;
-  return !isPlaceholderProductName(candidate.model) || !isPlaceholderProductName(candidate.popis);
-}
+// Pozn.: helpery isPlaceholderProductName / candidateHasRealProduct se přestěhovaly
+// do lib/price-prefill.ts spolu s prefill logikou (testovatelné bez AI a FS).
 
 // Service keywords — fixed-price services, no product matching needed
 const SERVICE_KEYWORDS = [
@@ -786,39 +775,15 @@ async function main() {
     }
   }
 
-  // Předvyplň ceny z AI kandidáta. Výchozí marže firmy má v kódu fallback 10 %,
-  // protože produkční volume může obsahovat starý config bez nového klíče.
+  // Předvyplň ceny z AI kandidáta (logika v lib/price-prefill.ts — testovatelná bez AI).
+  // Výchozí marže firmy má v kódu fallback 10 %, protože produkční volume může obsahovat
+  // starý config bez nového klíče.
   // potvrzeno=false zůstává záměrně — závaznou cenu musí uživatel zkontrolovat (H3).
+  // Kandidát bez reálné shody (zadna_shoda / placeholder / nulová cena) dostane NULOVOU
+  // nepotvrzenou cenu → HARD sanity flag zero_price blokuje potvrzení i podání, dokud
+  // operátor nezadá reálnou cenu ručně (nikdy nepřebíráme AI odhad jiného rozsahu).
   const defaultMarze = resolveDefaultMarzeProcent(company.default_marze_procent);
-  for (const pm of polozkyMatch) {
-    const selected = pm.kandidati?.[pm.vybrany_index];
-    if (selected && !pm.cenova_uprava) {
-      const bez = selected.cena_bez_dph || 0;
-      const calculatedPrice = calculateItemPrice(bez, defaultMarze);
-      const nabS = calculatedPrice.nabidkova_cena_s_dph;
-      const cap = pm.cena_max_s_dph;
-      const overCap = cap != null && nabS > cap;
-      // Kandidát bez reálného produktu (halucinace / prázdný název) NIKDY nedostane
-      // auto-potvrzenou cenu — cena je čirý AI odhad bez ověřeného produktu. potvrzeno
-      // zůstává false (viz H3) a poznámka to výslovně označí jako nutnou kontrolu.
-      const hasRealProduct = candidateHasRealProduct(selected);
-      let poznamka: string;
-      if (!hasRealProduct) {
-        poznamka = 'VYŽADUJE KONTROLU: bez reálného produktu — cena je AI odhad bez ověřeného produktu, potvrďte až po výběru reálného produktu.';
-      } else if (overCap) {
-        poznamka = `⚠ PŘEKRAČUJE STROP ${cap} Kč s DPH — uprav cenu. Cena z AI odhadu, nutné potvrzení.`;
-      } else {
-        poznamka = 'Cena z AI odhadu — zkontrolujte a potvrďte před podáním.';
-      }
-      pm.cenova_uprava = {
-        ...calculatedPrice,
-        potvrzeno: false,
-        poznamka,
-      };
-      if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
-      if (!hasRealProduct) console.warn(`  ⚠ Bez reálného produktu: "${pm.polozka_nazev}" — cena ${nabS} Kč je AI odhad, vyžaduje kontrolu.`);
-    }
-  }
+  applyPricePrefill(polozkyMatch, defaultMarze);
 
   // Sanity nálezy pouze čteme a zapisujeme jako flagy; ceny ani potvrzení tím neměníme.
   const sanityFindings = checkPriceSanity(polozkyMatch, {});

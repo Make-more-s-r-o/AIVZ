@@ -12,6 +12,7 @@ import {
   UserPlus,
   Plus,
   Trash2,
+  Trophy,
   X,
 } from 'lucide-react';
 import {
@@ -39,6 +40,10 @@ import {
   getTenderTags,
   attachTag,
   detachTag,
+  getOutcome,
+  saveOutcome,
+  getProductMatch,
+  type VysledekPodani,
   type PipelineSteps,
   type ActivityEntry,
   type Task,
@@ -53,7 +58,7 @@ import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-ad
 import { allowedNextStages } from '../lib/stage-machine';
 import { STAGE_LABELS, type StageKey } from '../lib/stages';
 import { fmtCZK } from '../lib/format';
-import type { TenderAnalysis } from '../types/tender';
+import type { TenderAnalysis, ProductMatch } from '../types/tender';
 import {
   StageBadge,
   DecisionPill,
@@ -87,6 +92,7 @@ const TABS = [
   { value: 'dokumenty', label: 'Dokumenty' },
   { value: 'ukoly', label: 'Úkoly' },
   { value: 'terminy', label: 'Termíny' },
+  { value: 'vysledek', label: 'Výsledek' },
   { value: 'historie', label: 'Historie' },
   { value: 'komentare', label: 'Komentáře' },
 ] as const;
@@ -283,6 +289,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             {tab === 'dokumenty' && <DocumentList tenderId={tenderId} />}
             {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
             {tab === 'terminy' && <TerminyTab tenderId={tenderId} />}
+            {tab === 'vysledek' && <VysledekTab tenderId={tenderId} />}
             {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
             {tab === 'komentare' && <CommentsTab tenderId={tenderId} />}
           </div>
@@ -563,6 +570,246 @@ function TerminyTab({ tenderId }: { tenderId: string }) {
         </div>
       )}
     </Card>
+  );
+}
+
+// --- Výsledek podání (win-rate feedback loop) --------------------------------
+
+const VYSLEDEK_OPTIONS: SelectOption[] = [
+  { value: 'vyhra', label: 'Výhra' },
+  { value: 'prohra', label: 'Prohra' },
+  { value: 'zruseno', label: 'Zrušeno' },
+];
+
+const VYSLEDEK_BADGE: Record<VysledekPodani, { label: string; tone: BadgeTone }> = {
+  vyhra: { label: 'Výhra', tone: 'success' },
+  prohra: { label: 'Prohra', tone: 'danger' },
+  zruseno: { label: 'Zrušeno', tone: 'neutral' },
+};
+
+/** Celková nabídková cena bez DPH z product-match (stejný výpočet jako Ocenění). */
+function matchTotalBezDph(match: ProductMatch | undefined): number | null {
+  if (!match) return null;
+  const polozky = match.polozky_match;
+  if (polozky && polozky.length > 0) {
+    const total = polozky.reduce((sum, pm) => {
+      const product = pm.kandidati?.[pm.vybrany_index];
+      const price = pm.cenova_uprava?.nabidkova_cena_bez_dph ?? product?.cena_bez_dph ?? 0;
+      return sum + price * (pm.mnozstvi || 1);
+    }, 0);
+    return total > 0 ? Math.round(total * 100) / 100 : null;
+  }
+  // Legacy tvar s jedním produktem (kandidáti na rootu).
+  const single = match.cenova_uprava?.nabidkova_cena_bez_dph
+    ?? (match.vybrany_index != null ? match.kandidati?.[match.vybrany_index]?.cena_bez_dph : undefined);
+  return typeof single === 'number' && single > 0 ? single : null;
+}
+
+/** Převod textového pole na nezáporné číslo; prázdno/nevalidní → null. */
+function parseCena(value: string): number | null {
+  if (!value.trim()) return null;
+  const n = Number(value.replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/**
+ * Záložka Výsledek — zápis výhry/prohry/zrušení podané nabídky (win-rate feedback
+ * loop). Naše cena se předvyplňuje součtem z Ocenění (product-match); vítězná cena
+ * se na backendu propisuje do win_prices jako učicí signál pro historii cen.
+ */
+function VysledekTab({ tenderId }: { tenderId: string }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+
+  const { data: outcome, isFetched } = useQuery({
+    queryKey: ['outcome', tenderId],
+    queryFn: () => getOutcome(tenderId),
+  });
+  // Product-match nemusí existovat (404 před krokem Produkty) → retry:false, chyba = bez předvyplnění.
+  const { data: match } = useQuery({
+    queryKey: ['product-match', tenderId],
+    queryFn: () => getProductMatch(tenderId),
+    retry: false,
+  });
+
+  const [vysledek, setVysledek] = useState<VysledekPodani>('vyhra');
+  const [viteznaCena, setViteznaCena] = useState('');
+  const [naseCena, setNaseCena] = useState('');
+  const [pocetUchazecu, setPocetUchazecu] = useState('');
+  const [vitezNazev, setVitezNazev] = useState('');
+  const [poznamka, setPoznamka] = useState('');
+  const [saving, setSaving] = useState(false);
+  const prefilled = useRef(false);
+
+  // Načtení uloženého výsledku do formuláře (při příchodu i po uložení).
+  useEffect(() => {
+    if (!outcome) return;
+    prefilled.current = true; // uložený stav má přednost před předvyplněním z Ocenění
+    setVysledek(outcome.vysledek);
+    setViteznaCena(outcome.vitezna_cena_bez_dph != null ? String(outcome.vitezna_cena_bez_dph) : '');
+    setNaseCena(outcome.nase_cena_bez_dph != null ? String(outcome.nase_cena_bez_dph) : '');
+    setPocetUchazecu(outcome.pocet_uchazecu != null ? String(outcome.pocet_uchazecu) : '');
+    setVitezNazev(outcome.vitez_nazev ?? '');
+    setPoznamka(outcome.poznamka ?? '');
+  }, [outcome]);
+
+  // Předvyplnění naší ceny součtem z Ocenění — jen jednou, bez uloženého výsledku.
+  useEffect(() => {
+    if (prefilled.current || !isFetched || outcome) return;
+    const total = matchTotalBezDph(match);
+    if (total != null) {
+      prefilled.current = true;
+      setNaseCena(String(total));
+    }
+  }, [match, outcome, isFetched]);
+
+  const naseCenaNum = parseCena(naseCena);
+  const viteznaCenaNum = parseCena(viteznaCena);
+  // Odchylka od vítěze (jen u prohry s oběma cenami) — náhled téhož výpočtu jako ve statistikách.
+  const odchylka = vysledek === 'prohra' && naseCenaNum != null && naseCenaNum > 0 && viteznaCenaNum != null && viteznaCenaNum > 0
+    ? ((naseCenaNum - viteznaCenaNum) / viteznaCenaNum) * 100
+    : null;
+
+  async function handleSave() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const r = await saveOutcome(tenderId, {
+        vysledek,
+        vitezna_cena_bez_dph: viteznaCenaNum,
+        nase_cena_bez_dph: naseCenaNum,
+        pocet_uchazecu: pocetUchazecu.trim() ? Math.trunc(Number(pocetUchazecu)) : null,
+        vitez_nazev: vitezNazev.trim() || null,
+        poznamka: poznamka.trim() || null,
+      });
+      await qc.invalidateQueries({ queryKey: ['outcome', tenderId] });
+      toast(
+        r.winprice_feedback
+          ? 'Výsledek uložen · vítězná cena propsána do historie cen'
+          : 'Výsledek uložen',
+        'success',
+      );
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const badge = outcome ? VYSLEDEK_BADGE[outcome.vysledek] : null;
+
+  return (
+    <Card
+      title="Výsledek podání"
+      action={badge && (
+        <Badge tone={badge.tone} size="sm">
+          {badge.label}
+          {outcome?.updated_at ? ` · ${new Date(outcome.updated_at).toLocaleDateString('cs-CZ')}` : ''}
+        </Badge>
+      )}
+    >
+      {!outcome && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, color: 'var(--text-tertiary)', fontSize: 'var(--font-size-sm)' }}>
+          <Trophy size={16} />
+          Výsledek zatím nebyl zaznamenán — po rozhodnutí zadavatele ho zde uložte, ať se stroj učí z reálných dat.
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+        <FormField label="Výsledek">
+          <Select
+            size="sm"
+            value={vysledek}
+            options={VYSLEDEK_OPTIONS}
+            onChange={(e) => setVysledek(e.target.value as VysledekPodani)}
+          />
+        </FormField>
+        <FormField label="Vítězná cena bez DPH (Kč)">
+          <Input
+            type="number"
+            min={0}
+            size="sm"
+            value={viteznaCena}
+            onChange={(e) => setViteznaCena(e.target.value)}
+            placeholder={vysledek === 'vyhra' ? 'U výhry = naše cena' : 'např. 385000'}
+          />
+        </FormField>
+        <FormField label="Naše cena bez DPH (Kč)">
+          <Input
+            type="number"
+            min={0}
+            size="sm"
+            value={naseCena}
+            onChange={(e) => setNaseCena(e.target.value)}
+            placeholder="Součet z Ocenění…"
+          />
+        </FormField>
+        <FormField label="Počet uchazečů">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            size="sm"
+            value={pocetUchazecu}
+            onChange={(e) => setPocetUchazecu(e.target.value)}
+            placeholder="např. 4"
+          />
+        </FormField>
+        <FormField label="Vítěz">
+          <Input
+            size="sm"
+            value={vitezNazev}
+            onChange={(e) => setVitezNazev(e.target.value)}
+            placeholder="Název vítězného dodavatele…"
+          />
+        </FormField>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <FormField label="Poznámka">
+          <textarea
+            value={poznamka}
+            onChange={(e) => setPoznamka(e.target.value)}
+            placeholder="Poučení pro příště, důvod prohry…"
+            rows={3}
+            style={{
+              width: '100%', boxSizing: 'border-box', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5,
+              fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-sm)', color: 'var(--text-primary)',
+              background: 'var(--surface-card)', border: '1px solid var(--border-strong)',
+              borderRadius: 'var(--radius-md)', outline: 'none',
+            }}
+          />
+        </FormField>
+      </div>
+
+      {odchylka != null && (
+        <div style={{ marginTop: 10, fontSize: 'var(--font-size-sm)', color: 'var(--text-secondary)' }}>
+          Naše cena byla o{' '}
+          <strong className="tnum" style={{ color: odchylka > 0 ? 'var(--danger-fg)' : 'var(--success-fg)' }}>
+            {Math.abs(odchylka).toLocaleString('cs-CZ', { maximumFractionDigits: 1 })} %
+          </strong>{' '}
+          {odchylka > 0 ? 'vyšší' : 'nižší'} než vítězná ({fmtCZK(viteznaCenaNum!)}).
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+        <Button onClick={() => void handleSave()} disabled={saving}>
+          {outcome ? 'Uložit změny' : 'Uložit výsledek'}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/** Popisek + pole formuláře (lokální primitiv záložky Výsledek). */
+function FormField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 'var(--font-size-2xs)', fontWeight: 'var(--weight-semibold)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-tertiary)', marginBottom: 4 }}>
+        {label}
+      </div>
+      {children}
+    </div>
   );
 }
 

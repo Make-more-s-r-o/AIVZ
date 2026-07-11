@@ -44,6 +44,8 @@ export interface ProductCandidate {
   dostupnost: string;
   zdroj_ceny?: string;
   katalogove_cislo?: string;
+  // AI nenašla reálný odpovídající produkt — zástupný kandidát s nulovou cenou (ruční nacenění)
+  zadna_shoda?: boolean;
 }
 
 export interface PriceOverride {

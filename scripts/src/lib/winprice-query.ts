@@ -33,6 +33,23 @@ export interface FindSimilarOptions {
 }
 
 /**
+ * Dopočet ceny bez DPH z ceny s DPH (sazba 21 %) pro záznamy, kde Registr smluv
+ * uvádí jen hodnotu včetně DPH (~25 % importovaných řádků — bez dopočtu se jejich
+ * cena v pásmech nevyužije). Jen pro CZK — u cizí měny přepočet nedává smysl.
+ */
+export function deriveCenaBezDph(
+  cenaBezDph: number | null,
+  cenaSDph: number | null,
+  mena: string,
+): number | null {
+  if (cenaBezDph !== null && cenaBezDph > 0) return cenaBezDph;
+  if (cenaSDph !== null && cenaSDph > 0 && mena === 'CZK') {
+    return Math.round((cenaSDph / 1.21) * 100) / 100;
+  }
+  return cenaBezDph;
+}
+
+/**
  * Najde historické záznamy s předmětem podobným dotazu.
  *
  * Skóre relevance = kombinace trigram similarity a fulltext match.
@@ -85,12 +102,18 @@ export async function findSimilarWins(
 
   const { rows } = await query<SimilarWin>(sql, params);
   // pg vrací NUMERIC jako string → převedeme cenové sloupce na number.
-  return rows.map((r) => ({
-    ...r,
-    cena_bez_dph: r.cena_bez_dph === null ? null : Number(r.cena_bez_dph),
-    cena_s_dph: r.cena_s_dph === null ? null : Number(r.cena_s_dph),
-    similarity: Number(r.similarity),
-  }));
+  // Chybějící cenu bez DPH dopočítáme z ceny s DPH (viz deriveCenaBezDph),
+  // ať se čtvrtina záznamů „jen s DPH" neztrácí z pásem ani ze vzorků.
+  return rows.map((r) => {
+    const cenaSDph = r.cena_s_dph === null ? null : Number(r.cena_s_dph);
+    const cenaBezDph = r.cena_bez_dph === null ? null : Number(r.cena_bez_dph);
+    return {
+      ...r,
+      cena_bez_dph: deriveCenaBezDph(cenaBezDph, cenaSDph, r.mena),
+      cena_s_dph: cenaSDph,
+      similarity: Number(r.similarity),
+    };
+  });
 }
 
 /** Agregovaná cenová statistika nad množinou podobných výher. */
