@@ -25,8 +25,8 @@ function CountBadge({ count, tone, icon }: { count: number; tone: 'danger' | 'wa
   );
 }
 
-const GRID = 'minmax(220px, 2fr) 120px 130px 130px 130px minmax(120px, 1fr)';
-const HEAD = ['Zakázka', 'Stav', 'Nepotvrzené ceny', 'HARD flagy', 'Chyby validace', 'Nabídková cena'];
+const GRID = 'minmax(200px, 2fr) 110px 120px 110px 120px minmax(110px, 1fr) minmax(110px, 1fr)';
+const HEAD = ['Zakázka', 'Stav', 'Nepotvrzené ceny', 'HARD flagy', 'Chyby validace', 'Zisk', 'Nabídková cena'];
 
 /**
  * Ke schválení (schvalovací inbox) — jeden pohled napříč všemi zakázkami s tím,
@@ -54,7 +54,7 @@ export default function InboxPage({ onOpen }: InboxPageProps) {
 
       <Card padding={0}>
         <div className="vz-scroll" style={{ overflowX: 'auto' }}>
-          <div style={{ minWidth: 840 }}>
+          <div style={{ minWidth: 960 }}>
             {/* Hlavička */}
             <div
               style={{
@@ -69,7 +69,7 @@ export default function InboxPage({ onOpen }: InboxPageProps) {
                   style={{
                     fontSize: 'var(--font-size-2xs)', fontWeight: 'var(--weight-semibold)',
                     textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-tertiary)',
-                    textAlign: i >= 2 ? (i === 5 ? 'right' : 'center') : 'left',
+                    textAlign: i >= 2 ? (i >= 5 ? 'right' : 'center') : 'left',
                   }}
                 >
                   {h}
@@ -146,6 +146,20 @@ function InboxRow({ entry, onOpen }: { entry: InboxEntry; onOpen?: (id: string) 
       </span>
       <span style={{ textAlign: 'center' }}>
         <CountBadge count={entry.validation_fails} tone="danger" icon={<ClipboardCheck size={12} />} />
+      </span>
+
+      <span
+        className="tnum"
+        style={{
+          textAlign: 'right', fontSize: 'var(--font-size-sm)', fontVariantNumeric: 'tabular-nums',
+          fontWeight: 'var(--weight-semibold)',
+          color: entry.zisk_kc == null
+            ? 'var(--text-tertiary)'
+            : entry.zisk_kc > 0 ? 'var(--color-success, #16a34a)' : 'var(--color-danger, #dc2626)',
+        }}
+        title="Očekávaný hrubý zisk bez DPH (Σ nabídková − nákupní × množství)"
+      >
+        {entry.zisk_kc != null ? fmtCZK(entry.zisk_kc) : '—'}
       </span>
 
       <span

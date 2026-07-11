@@ -202,6 +202,16 @@ export const ProductMatchSchema = z.object({
   cenova_uprava: PriceOverrideSchema.optional(),
   // Multi-product fields
   polozky_match: z.array(PolozkaMatchSchema).optional(),
+  // Profit-aware bid skóre počítané PO nacenění (viz go-no-go.ts scoreBid).
+  // Ukládá se do product-match.json; při potvrzení ceny se přepočítává on-the-fly
+  // přes GET /api/tenders/:id/bid-score (nezapisuje se znovu).
+  bid_score: z.object({
+    score: z.number(),
+    doporuceni: z.enum(['GO', 'ZVAZIT', 'NOGO']),
+    duvody: z.array(z.string()),
+    zisk_kc: z.number(),
+    marze_procent: z.number(),
+  }).optional(),
 }).refine(d => d.kandidati || d.polozky_match,
   { message: "Must have 'kandidati' or 'polozky_match'" }
 );

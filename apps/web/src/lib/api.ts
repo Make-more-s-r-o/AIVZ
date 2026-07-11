@@ -86,6 +86,15 @@ export interface GoNoGo {
   duvody: string[];
 }
 
+// Profit-aware bid skóre počítané PO nacenění (go-no-go.ts scoreBid).
+export interface BidScore {
+  score: number;
+  doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+  duvody: string[];
+  zisk_kc: number;
+  marze_procent: number;
+}
+
 export interface HlidacTenderCandidate {
   id: string;
   nazev: string;
@@ -258,12 +267,18 @@ export interface InboxEntry {
   validation_fails: number;
   ready_to_submit: boolean;
   celkova_cena_s_dph: number | null;
+  zisk_kc: number | null;
   data_error: boolean;
   data_error_files: string[];
 }
 
 export async function getInbox(): Promise<InboxEntry[]> {
   return fetchJson('/inbox');
+}
+
+// Profit-aware bid skóre počítané on-the-fly z aktuálních souborů zakázky.
+export async function getBidScore(id: string): Promise<BidScore> {
+  return fetchJson(`/tenders/${id}/bid-score`);
 }
 
 /**

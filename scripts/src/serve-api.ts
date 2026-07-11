@@ -21,7 +21,7 @@ import {
 } from './lib/user-store.js';
 import {
   migrateFromLegacy as migrateCompanies,
-  getAllCompanies, getCompany, createCompany, updateCompany, deleteCompany as deleteCompanyById,
+  getAllCompanies, getCompany, getTenderCompanyId, createCompany, updateCompany, deleteCompany as deleteCompanyById,
   getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
   copyCompanyDocsToTender,
   getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
@@ -60,6 +60,8 @@ import { generateMissingEmbeddings } from './lib/embedding-service.js';
 import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-client.js';
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
 import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
+import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
+import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
@@ -1333,6 +1335,32 @@ app.get('/api/tenders/:id/product-match', async (req, res) => {
       'utf-8'
     );
     res.json(JSON.parse(data));
+  } catch {
+    res.status(404).json({ error: 'Not found — run match step first' });
+  }
+});
+
+// GET /api/tenders/:id/bid-score — profit-aware bid skóre počítané on-the-fly
+// z aktuálních analysis.json + product-match.json. Používá se po potvrzení ceny,
+// kdy uložený bid_score v product-match.json může být zastaralý. Nezapisuje nic.
+// Degraduje gracefully: chybějící product-match → 404, DB nedostupná → skóre bez win-price.
+app.get('/api/tenders/:id/bid-score', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    const dir = join(OUTPUT_DIR, id);
+    const analysis = JSON.parse(await readFile(join(dir, 'analysis.json'), 'utf-8'));
+    const productMatch = JSON.parse(await readFile(join(dir, 'product-match.json'), 'utf-8'));
+
+    const companyId = await getTenderCompanyId(id);
+    const company = (companyId ? await getCompany(companyId) : null) ?? await getCompany('default');
+
+    let winBand: PriceBand | undefined;
+    try {
+      winBand = await priceBandForSubject(analysis?.zakazka?.predmet ?? '');
+    } catch { /* bez DB win-price vynecháme */ }
+
+    res.json(scoreBid(analysis, productMatch, company, winBand));
   } catch {
     res.status(404).json({ error: 'Not found — run match step first' });
   }

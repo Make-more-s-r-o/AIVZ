@@ -5,6 +5,8 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { computeBidEconomics } from './go-no-go.js';
+import type { ProductMatch } from './types.js';
 
 export type InboxJsonReadResult =
   | { state: 'ok'; data: unknown }
@@ -53,6 +55,9 @@ export interface InboxEntry {
   validation_fails: number;
   ready_to_submit: boolean;
   celkova_cena_s_dph: number | null;
+  // Očekávaný hrubý zisk bez DPH z naceněných položek (Σ nabídková − nákupní × množství).
+  // null = zakázka zatím nemá naceněné položky.
+  zisk_kc: number | null;
   data_error: boolean;
   data_error_files: string[];
 }
@@ -123,6 +128,9 @@ export function computeInboxEntry(input: InboxTenderInput): InboxEntry {
   const validation_fails = checks.filter((c: any) => c?.status === 'fail').length;
   const ready_to_submit = validation?.ready_to_submit === true;
 
+  // Hrubý zisk počítáme stejnou logikou jako bid skóre (jediný zdroj kupní ceny je cenova_uprava).
+  const econ = match ? computeBidEconomics(match as ProductMatch) : null;
+
   return {
     tender_id: input.tenderId,
     nazev,
@@ -132,6 +140,7 @@ export function computeInboxEntry(input: InboxTenderInput): InboxEntry {
     validation_fails,
     ready_to_submit,
     celkova_cena_s_dph: maCenu ? Math.round(celkova) : null,
+    zisk_kc: econ && econ.polozek > 0 ? econ.zisk_kc : null,
     data_error: (input.dataErrors?.length ?? 0) > 0,
     data_error_files: input.dataErrors ?? [],
   };
