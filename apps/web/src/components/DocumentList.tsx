@@ -14,6 +14,7 @@ import {
   setDocumentMode,
   finalizeTender,
   getPrilohaChecklist,
+  downloadWithAuth,
   type FieldValidationResult,
   type PrilohaChecklistItem,
 } from '../lib/api';
@@ -212,17 +213,27 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     }
   }, [tenderId, queryClient]);
 
+  // Stažení souboru s Authorization hlavičkou místo `?token=` v URL (viz downloadWithAuth).
+  const handleDownload = useCallback(async (url: string, filename: string) => {
+    try {
+      await downloadWithAuth(url, filename);
+    } catch (err) {
+      toast((err as Error).message || 'Stažení souboru se nezdařilo.', 'danger');
+    }
+  }, [toast]);
+
   const handleFinalize = useCallback(async () => {
     setFinalizing(true);
     try {
       await finalizeTender(tenderId);
       toast('Nabídka označena jako odeslaná', 'success');
-      // Stažení kompletního balíku spustí prohlížeč (Content-Disposition: attachment),
-      // stránka se neodnaviguje, takže invalidace stavu proběhne.
-      window.location.href = getBundleZipUrl(tenderId);
+      // Stažení kompletního balíku (fetch + blob, viz downloadWithAuth) — stránka se
+      // neodnaviguje, takže invalidace stavu proběhne.
+      await downloadWithAuth(getBundleZipUrl(tenderId), `kompletni_nabidka_${tenderId}.zip`);
       queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
     } catch (err) {
-      // Zpráva z API už obsahuje výčet problémů brány (cenový strop, placeholdery, chybějící ceny).
+      // Zpráva z API už obsahuje výčet problémů brány (cenový strop, placeholdery, chybějící ceny)
+      // NEBO chybu stažení balíku (finalizace mohla uspět, jen se ZIP nepodařilo stáhnout).
       toast((err as Error).message, 'danger');
     } finally {
       setFinalizing(false);
@@ -291,23 +302,23 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Vygenerované dokumenty</h3>
             <div className="flex gap-2">
-              <a
-                href={getDocumentsZipUrl(tenderId)}
-                download
+              <button
+                type="button"
+                onClick={() => handleDownload(getDocumentsZipUrl(tenderId), `dokumenty_${tenderId}.zip`)}
                 className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors"
               >
                 <Archive className="h-3.5 w-3.5" />
                 Stáhnout dokumenty
-              </a>
+              </button>
               {attachments && attachments.length > 0 && (
-                <a
-                  href={getBundleZipUrl(tenderId)}
-                  download
+                <button
+                  type="button"
+                  onClick={() => handleDownload(getBundleZipUrl(tenderId), `kompletni_nabidka_${tenderId}.zip`)}
                   className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors"
                 >
                   <Archive className="h-3.5 w-3.5" />
                   Kompletní nabídka
-                </a>
+                </button>
               )}
             </div>
           </div>
@@ -324,10 +335,10 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
                   className="rounded-lg border bg-white p-4 transition-colors hover:bg-gray-50"
                 >
                   <div className="flex items-center justify-between">
-                    <a
-                      href={getDocumentDownloadUrl(tenderId, filename)}
-                      download
-                      className="flex items-center gap-3 flex-1"
+                    <button
+                      type="button"
+                      onClick={() => handleDownload(getDocumentDownloadUrl(tenderId, filename), filename)}
+                      className="flex items-center gap-3 flex-1 text-left"
                     >
                       <FileText className="h-8 w-8 text-blue-500 shrink-0" />
                       <div className="min-w-0">
@@ -347,7 +358,7 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
                           )}
                         </div>
                       </div>
-                    </a>
+                    </button>
                     <div className="flex items-center gap-2 shrink-0">
                       {/* Mode selector — only for DOCX files with known modes */}
                       {filename.endsWith('.docx') && mode && (
@@ -371,9 +382,13 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
                           ? <span title="Validace OK"><ShieldCheck className="h-5 w-5 text-green-500" /></span>
                           : <span title="Vyžaduje kontrolu"><ShieldAlert className="h-5 w-5 text-amber-500" /></span>
                       )}
-                      <a href={getDocumentDownloadUrl(tenderId, filename)} download>
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(getDocumentDownloadUrl(tenderId, filename), filename)}
+                        title="Stáhnout"
+                      >
                         <Download className="h-5 w-5 text-gray-400 hover:text-gray-600" />
-                      </a>
+                      </button>
                     </div>
                   </div>
                   {/* Validation checklist (expandable) */}
@@ -444,18 +459,22 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
                 key={filename}
                 className="flex items-center justify-between rounded-lg border bg-white p-4"
               >
-                <a
-                  href={getAttachmentDownloadUrl(tenderId, filename)}
-                  download
-                  className="flex items-center gap-3 flex-1 hover:text-blue-600 transition-colors"
+                <button
+                  type="button"
+                  onClick={() => handleDownload(getAttachmentDownloadUrl(tenderId, filename), filename)}
+                  className="flex items-center gap-3 flex-1 text-left hover:text-blue-600 transition-colors"
                 >
                   <Paperclip className="h-6 w-6 text-amber-500" />
                   <div className="font-medium text-sm">{filename}</div>
-                </a>
+                </button>
                 <div className="flex items-center gap-2">
-                  <a href={getAttachmentDownloadUrl(tenderId, filename)} download>
+                  <button
+                    type="button"
+                    onClick={() => handleDownload(getAttachmentDownloadUrl(tenderId, filename), filename)}
+                    title="Stáhnout"
+                  >
                     <Download className="h-4 w-4 text-gray-400 hover:text-gray-600" />
-                  </a>
+                  </button>
                   <button
                     onClick={() => handleDelete(filename)}
                     className="text-gray-400 hover:text-red-500 transition-colors"

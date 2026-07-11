@@ -27,11 +27,42 @@ function authHeaders(): Record<string, string> {
   return legacy ? { Authorization: `Bearer ${legacy}` } : {};
 }
 
-function getTokenParam(): string {
-  const jwt = getJwt();
-  if (jwt) return jwt;
-  const legacy = getAuthToken();
-  return legacy || '';
+/**
+ * Stáhne binární soubor (dokument, příloha, ZIP balík) z API endpointu s Authorization
+ * hlavičkou (JWT/legacy token) a spustí jeho uložení v prohlížeči.
+ *
+ * Nahrazuje dřívější posílání tokenu v `?token=` query stringu — ten unikal do nginx access
+ * logů. `<a href>` odkaz ani `window.location` neumí poslat Authorization hlavičku, proto
+ * fetch → blob → programatický `<a download>`.
+ *
+ * Jméno souboru z `Content-Disposition` (server ho u ZIP balíků odvozuje z názvu zakázky) má
+ * přednost před `fallbackFilename`, který se použije jen když hlavička chybí nebo je nečitelná.
+ */
+export async function downloadWithAuth(url: string, fallbackFilename: string): Promise<void> {
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Stažení souboru se nezdařilo');
+  }
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const rawFilename = match?.[1];
+  let filename = fallbackFilename;
+  if (rawFilename) {
+    try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 /**
@@ -563,9 +594,7 @@ export async function deleteTender(id: string): Promise<{ success: boolean }> {
 }
 
 export function getDocumentDownloadUrl(id: string, filename: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
 }
 
 // Attachments (qualification documents)
@@ -588,9 +617,7 @@ export async function deleteAttachment(id: string, filename: string): Promise<{ 
 }
 
 export function getAttachmentDownloadUrl(id: string, filename: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
 }
 
 // --- Generation meta + field validation ---
@@ -1223,15 +1250,11 @@ export async function getCost(id: string): Promise<CostSummary> {
 // --- ZIP downloads ---
 
 export function getDocumentsZipUrl(id: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/download/documents`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/download/documents`;
 }
 
 export function getBundleZipUrl(id: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/download/bundle`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/download/bundle`;
 }
 
 // --- Parts (části zakázky) API ---

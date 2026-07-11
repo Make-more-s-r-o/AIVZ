@@ -155,8 +155,10 @@ app.use((req, res, next) => {
     if (API_TOKEN && token === API_TOKEN) return next();
   }
 
-  // 2. Support ?token= query param (for download links in <a href> a jiná GET stažení,
-  //    kde prohlížeč neumí poslat Authorization hlavičku).
+  // 2. Support ?token= query param — zpětná kompatibilita pro curl/skripty a staré odkazy.
+  //    FE (apps/web) už tuto cestu NEPOUŽÍVÁ (viz downloadWithAuth v apps/web/src/lib/api.ts —
+  //    stahování jde přes fetch + Authorization hlavičku, aby token neunikal do nginx access
+  //    logů). Plné odstranění query-token akceptace na BE je follow-up, ne součást této změny.
   if (req.query.token) {
     const qToken = req.query.token as string;
     const jwtPayload = verifyToken(qToken);
@@ -640,7 +642,8 @@ function requireJwt(req: express.Request, res: express.Response, next: express.N
       return next();
     }
   }
-  // Also check query token (for GET routes that need auth)
+  // Also check query token (zpětná kompatibilita pro curl/skripty — FE už ?token= neposílá,
+  // viz downloadWithAuth v apps/web/src/lib/api.ts; plné odstranění je follow-up)
   if (req.query.token) {
     const payload = verifyToken(req.query.token as string);
     if (payload) {
