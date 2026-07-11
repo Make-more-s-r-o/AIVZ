@@ -217,6 +217,22 @@ export async function ignorovatMonitoring(id: string): Promise<void> {
   }
 }
 
+// Schvalovací inbox — jedna řádka na zakázku, která čeká na akci operátora.
+export interface InboxEntry {
+  tender_id: string;
+  nazev: string;
+  crm_stav: string | null;
+  nepotvrzene_ceny: number;
+  hard_flagy: number;
+  validation_fails: number;
+  ready_to_submit: boolean;
+  celkova_cena_s_dph: number | null;
+}
+
+export async function getInbox(): Promise<InboxEntry[]> {
+  return fetchJson('/inbox');
+}
+
 /**
  * Seznam zakázek s embednutým souhrnem analýzy + AI náklady (jeden request místo N+1).
  * Používají Přehled/Zakázky/Pipeline. Vlastní query key (['tenders','summary']), ať se

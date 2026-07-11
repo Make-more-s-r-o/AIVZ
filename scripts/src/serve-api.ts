@@ -11,6 +11,7 @@ import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { buildInbox, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
@@ -1004,6 +1005,48 @@ app.get('/api/tenders', async (req, res) => {
         })
     );
     res.json(tenders);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/inbox - schvalovací inbox napříč zakázkami.
+// Agreguje "co ode mě čeká akci": nepotvrzené ceny, HARD sanity flagy, počet fail
+// checků z validace a CRM stav. Vrací jen zakázky, kde je akce potřeba (řazeno
+// nejnaléhavější první). Čte soubory per zakázka defenzivně (try/catch, vadný JSON
+// zakázku nezhodí, jen se z ní stane prázdný vstup).
+app.get('/api/inbox', async (req, res) => {
+  try {
+    await mkdir(INPUT_DIR, { recursive: true });
+    const dirs = (await readdir(INPUT_DIR)).filter((d) => !d.startsWith('.'));
+    const crmStatuses = await getAllStatuses();
+
+    const readJson = async (tenderId: string, file: string): Promise<unknown | null> => {
+      try {
+        return JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, file), 'utf-8'));
+      } catch {
+        return null; // chybějící soubor i syntakticky vadný JSON => prázdný vstup
+      }
+    };
+
+    const inputs: InboxTenderInput[] = await Promise.all(
+      dirs.map(async (tenderId) => {
+        const [analysis, productMatch, validation] = await Promise.all([
+          readJson(tenderId, 'analysis.json'),
+          readJson(tenderId, 'product-match.json'),
+          readJson(tenderId, 'validation-report.json'),
+        ]);
+        return {
+          tenderId,
+          analysis,
+          productMatch,
+          validation,
+          crmStav: crmStatuses.get(tenderId)?.status ?? null,
+        };
+      }),
+    );
+
+    res.json(buildInbox(inputs));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
