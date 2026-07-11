@@ -25,6 +25,8 @@ import SubmissionCockpit from './SubmissionCockpit';
 
 interface DocumentListProps {
   tenderId: string;
+  /** Vygenerované dokumenty jsou starší než poslední změna/potvrzení ceny. */
+  stale?: boolean;
 }
 
 const DOC_LABELS: Record<string, string> = {
@@ -138,7 +140,7 @@ function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
   );
 }
 
-export default function DocumentList({ tenderId }: DocumentListProps) {
+export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -270,6 +272,14 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
     <div className="space-y-6">
       {actionError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{actionError}</div>
+      )}
+
+      {/* Ceny se po vygenerování dokumentů změnily/potvrdily — dokumenty jsou zastaralé. */}
+      {stale && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span>Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování.</span>
+        </div>
       )}
 
       {/* Overall status banner */}

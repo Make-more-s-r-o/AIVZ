@@ -25,6 +25,8 @@ interface PipelineStatusProps {
   onStepComplete: () => void;
   /** Přepnout na záložku Ocenění (odkaz z waiting_approval stavu). */
   onGoToPricing?: () => void;
+  /** Vygenerované dokumenty jsou starší než poslední změna/potvrzení ceny. */
+  stale?: boolean;
 }
 
 function StepIcon({ status }: { status: StepStatus }) {
@@ -49,7 +51,7 @@ function getStepCost(stepKey: string, byStep: CostSummary['byStep']): number {
     .reduce((s, [, v]) => s + v.costCZK, 0);
 }
 
-export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete, onGoToPricing }: PipelineStatusProps) {
+export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete, onGoToPricing, stale }: PipelineStatusProps) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<StepName | null>(null);
   const [runningAll, setRunningAll] = useState(false);
@@ -263,6 +265,12 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
 
   return (
     <div className="space-y-4">
+      {stale && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování.</span>
+        </div>
+      )}
       <div className="flex items-center gap-4">
         <div className="flex min-w-0 flex-1 items-center justify-between">
           {STEPS.map((step, i) => (

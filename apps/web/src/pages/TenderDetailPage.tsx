@@ -305,6 +305,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             runAll={statusData?.runAll}
             onStepComplete={handleStepComplete}
             onGoToPricing={() => selectTab('oceneni')}
+            stale={statusData?.stale}
           />
         )}
       </Card>
@@ -317,7 +318,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             {tab === 'prehled' && <PrehledTab analysis={analysis} decision={decision} />}
             {tab === 'analyza' && <AnalysisView tenderId={tenderId} />}
             {tab === 'oceneni' && <ProductMatchView tenderId={tenderId} />}
-            {tab === 'dokumenty' && <DocumentList tenderId={tenderId} />}
+            {tab === 'dokumenty' && <DocumentList tenderId={tenderId} stale={statusData?.stale} />}
             {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
             {tab === 'terminy' && <TerminyTab tenderId={tenderId} />}
             {tab === 'vysledek' && <VysledekTab tenderId={tenderId} />}

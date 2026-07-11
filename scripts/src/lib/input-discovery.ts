@@ -234,6 +234,29 @@ async function walk(dir: string, depth: number, zipDepth: number, ctx: Ctx): Pro
 }
 
 /**
+ * Rychlý náhled obsahu ZIPu BEZ rozbalení na disk — pro okamžitou UI odezvu po uploadu
+ * ("archiv obsahuje N souborů"). Skutečné rozbalení (se zip-slip ochranou a cappem na
+ * velikost) dělá až extract krok přes discoverInputFiles/extractZipBuffer výše.
+ * Vrací null, když ZIP nejde otevřít (poškozený soubor) — volající to bere jako "neznámo".
+ */
+export function peekZipFileCount(buffer: Buffer): number | null {
+  try {
+    const zip = new PizZip(buffer);
+    let count = 0;
+    for (const entryName of Object.keys(zip.files)) {
+      const entry = zip.files[entryName];
+      if (entry.dir) continue;
+      const base = basename(entryName);
+      if (entryName.split('/').some((seg) => isNoiseName(seg)) || isNoiseName(base)) continue;
+      count++;
+    }
+    return count;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Hlavní vstupní bod. Vrátí deduplikovaný seznam relevantních souborů zakázky
  * (rekurzivně + z rozbalených ZIPů), s vyřešenými display names.
  */
