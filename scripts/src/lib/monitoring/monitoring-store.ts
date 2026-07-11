@@ -9,6 +9,9 @@
  * bez DB — mapují surové záznamy zdroje na jednotný vstup pro upsert.
  */
 import { query, queryOne, getPool } from '../db.js';
+import {
+  categorizeCommodity, KOMODITA_KATEGORIE_VALUES, type KomoditaKategorie,
+} from '../winprice-store.js';
 import type { NenTenderCandidate } from './nen-client.js';
 import type { HlidacTenderCandidate } from './hlidac-client.js';
 
@@ -19,6 +22,7 @@ export interface FeedUpsertInput {
   zdroj: string;
   zdroj_id: string;
   nazev: string;
+  kategorie: KomoditaKategorie;
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null; // 'YYYY-MM-DD' | null
@@ -31,6 +35,7 @@ export interface FeedItem {
   zdroj: string;
   zdroj_id: string;
   nazev: string;
+  kategorie: KomoditaKategorie;
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null; // 'YYYY-MM-DD' | null
@@ -48,22 +53,50 @@ function dbReady(): boolean {
 // lhuta_nabidek přes to_char, jinak node-pg parsuje DATE na JS Date v lokální půlnoci
 // a JSON.stringify ji posune o TZ offset → off-by-one (viz TASK_COLS v crm-store).
 const FEED_COLS = `id::text, zdroj, zdroj_id, nazev, zadavatel,
+  kategorie,
   predpokladana_hodnota::float8 AS predpokladana_hodnota,
   to_char(lhuta_nabidek, 'YYYY-MM-DD') AS lhuta_nabidek,
   url, raw, stav, tender_id, created_at`;
 
-type FeedDbRow = Omit<FeedItem, 'predpokladana_hodnota'> & {
+type FeedDbRow = Omit<FeedItem, 'predpokladana_hodnota' | 'kategorie'> & {
   predpokladana_hodnota: number | string | null;
+  kategorie?: string | null;
 };
 
-/** Dodatečná ochrana pro mocky/starší ovladače, které NUMERIC vracejí jako string. */
+/**
+ * Dodatečná ochrana pro mocky/starší ovladače, které NUMERIC vracejí jako string.
+ * Starému řádku bez kategorie ji dopočítá v paměti; čtecí funkce ji následně líně uloží.
+ */
 export function normalizeFeedRow(row: FeedDbRow): FeedItem {
   const value = row.predpokladana_hodnota;
   const numeric = value == null ? null : Number(value);
   return {
     ...row,
+    kategorie: isCommodityCategory(row.kategorie)
+      ? row.kategorie
+      : categorizeCommodity(row.nazev),
     predpokladana_hodnota: numeric == null || Number.isFinite(numeric) ? numeric : null,
   };
+}
+
+function isCommodityCategory(value: unknown): value is KomoditaKategorie {
+  return typeof value === 'string'
+    && KOMODITA_KATEGORIE_VALUES.includes(value as KomoditaKategorie);
+}
+
+/** Líně doplní kategorii starších řádků; chyba backfillu nesmí znepřístupnit feed. */
+async function backfillMissingCategories(rows: FeedDbRow[], items: FeedItem[]): Promise<void> {
+  await Promise.all(rows.map(async (row, index) => {
+    if (isCommodityCategory(row.kategorie)) return;
+    try {
+      await query(
+        `UPDATE monitoring_zakazky SET kategorie = $2 WHERE id = $1::bigint AND kategorie IS NULL`,
+        [row.id, items[index].kategorie],
+      );
+    } catch {
+      // Migrace může při rolling deployi ještě dobíhat; hodnota je i tak dostupná v odpovědi.
+    }
+  }));
 }
 
 /**
@@ -80,10 +113,11 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
   for (const item of items) {
     const row = await queryOne<{ inserted: boolean }>(
       `INSERT INTO monitoring_zakazky
-         (zdroj, zdroj_id, nazev, zadavatel, predpokladana_hodnota, lhuta_nabidek, url, raw)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (zdroj, zdroj_id, nazev, kategorie, zadavatel, predpokladana_hodnota, lhuta_nabidek, url, raw)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (zdroj, zdroj_id) DO UPDATE SET
          nazev = EXCLUDED.nazev,
+         kategorie = EXCLUDED.kategorie,
          zadavatel = EXCLUDED.zadavatel,
          predpokladana_hodnota = EXCLUDED.predpokladana_hodnota,
          lhuta_nabidek = EXCLUDED.lhuta_nabidek,
@@ -94,6 +128,7 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
         item.zdroj,
         item.zdroj_id,
         item.nazev,
+        item.kategorie,
         item.zadavatel,
         item.predpokladana_hodnota,
         item.lhuta_nabidek,
@@ -135,7 +170,9 @@ export async function listFeed(
        LIMIT $${params.length}`,
       params,
     );
-    return r.rows.map(normalizeFeedRow);
+    const items = r.rows.map(normalizeFeedRow);
+    await backfillMissingCategories(r.rows, items);
+    return items;
   } catch {
     return [];
   }
@@ -148,7 +185,10 @@ export async function getFeedItem(id: string): Promise<FeedItem | null> {
       `SELECT ${FEED_COLS} FROM monitoring_zakazky WHERE id = $1::bigint`,
       [id],
     );
-    return row ? normalizeFeedRow(row) : null;
+    if (!row) return null;
+    const item = normalizeFeedRow(row);
+    await backfillMissingCategories([row], [item]);
+    return item;
   } catch {
     return null;
   }
@@ -179,6 +219,7 @@ export function toNenFeedInput(candidate: NenTenderCandidate): FeedUpsertInput {
     zdroj: 'nen',
     zdroj_id: candidate.zdroj_id,
     nazev: candidate.nazev,
+    kategorie: categorizeCommodity(candidate.nazev),
     zadavatel: candidate.zadavatel,
     predpokladana_hodnota: null, // v seznamu NEN není, doplní se až z detailu při zpracování
     lhuta_nabidek: candidate.lhuta_nabidek,
@@ -193,6 +234,7 @@ export function toHlidacFeedInput(candidate: HlidacTenderCandidate): FeedUpsertI
     zdroj: 'hlidac',
     zdroj_id: candidate.id,
     nazev: candidate.nazev,
+    kategorie: categorizeCommodity(candidate.nazev),
     zadavatel: candidate.zadavatel || null,
     predpokladana_hodnota: candidate.budget,
     lhuta_nabidek: toIsoDate(candidate.lhuta),

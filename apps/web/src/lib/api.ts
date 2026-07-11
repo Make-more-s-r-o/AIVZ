@@ -197,12 +197,24 @@ export async function getHlidacTenders(query: string): Promise<HlidacTenderCandi
 // --- Monitoring feed (perzistovaný, s go/no-go skóre) ---
 
 export type MonitoringStav = 'nova' | 'prevzata' | 'ignorovana';
+export type MonitoringKategorie =
+  | 'it_av' | 'naradi_dilna' | 'zdravotnicke' | 'vozidla' | 'stavebni_prace'
+  | 'potraviny' | 'energie' | 'nabytek' | 'kancelar' | 'sluzby' | 'ostatni';
+
+export interface MonitoringConfig {
+  kategorie_zajmu: MonitoringKategorie[];
+  klicova_slova: string[];
+  vyloucena_slova: string[];
+  min_hodnota: number | null;
+  max_hodnota: number | null;
+}
 
 export interface MonitoringFeedItem {
   id: string;
   zdroj: string;
   zdroj_id: string;
   nazev: string;
+  kategorie: MonitoringKategorie;
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null;
@@ -216,7 +228,7 @@ export interface MonitoringFeedItem {
 /** Natáhne nové zakázky ze zdroje do feedu. Vrací počty nalezeno/nových. */
 export async function syncMonitoring(
   opts: { zdroj?: 'nen' | 'hlidac' | 'both'; q?: string } = {},
-): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; varovani?: string }> {
+): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; synchronizovano_at: string; varovani?: string }> {
   const res = await fetch(`${API_BASE}/monitoring/sync`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
@@ -230,8 +242,32 @@ export async function syncMonitoring(
   return res.json();
 }
 
-export async function getMonitoringFeed(stav: MonitoringStav = 'nova'): Promise<MonitoringFeedItem[]> {
-  return fetchJson(`/monitoring/feed?stav=${encodeURIComponent(stav)}`);
+export async function getMonitoringFeed(
+  stav: MonitoringStav = 'nova',
+  options: { kategorie?: MonitoringKategorie; vse?: boolean } = {},
+): Promise<MonitoringFeedItem[]> {
+  const params = new URLSearchParams({ stav });
+  if (options.kategorie) params.set('kategorie', options.kategorie);
+  if (options.vse) params.set('vse', '1');
+  return fetchJson(`/monitoring/feed?${params.toString()}`);
+}
+
+export async function getMonitoringConfig(): Promise<MonitoringConfig> {
+  return fetchJson('/monitoring/config');
+}
+
+export async function saveMonitoringConfig(config: MonitoringConfig): Promise<MonitoringConfig> {
+  const res = await fetch(`${API_BASE}/monitoring/config`, {
+    method: 'PUT',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Nastavení monitoringu se nepodařilo uložit');
+  }
+  return res.json();
 }
 
 export interface PrevzitResult {

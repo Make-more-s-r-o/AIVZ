@@ -83,7 +83,9 @@ import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from 
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
 import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
 import { listFindings } from './lib/web-findings-store.js';
-import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
+import {
+  upsertWinPrices, deleteWinPrice, categorizeCommodity, KOMODITA_KATEGORIE_VALUES,
+} from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
@@ -93,9 +95,10 @@ import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
   type MonitoringStav,
 } from './lib/monitoring/monitoring-store.js';
-import { scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { isFeedItemExcluded, scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
 import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
+import { getMonitoringConfig, saveMonitoringConfig } from './lib/monitoring/monitoring-config.js';
 import {
   RUN_ALL_STEPS,
   ApprovalRequiredError,
@@ -901,18 +904,48 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 // GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
 app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
 
+// GET/PUT /api/monitoring/config - per-instance nastavení zájmu monitoringu.
+app.get('/api/monitoring/config', requireJwt, async (_req, res) => {
+  try {
+    res.json(await getMonitoringConfig());
+  } catch (err) {
+    res.status(500).json({ error: `Nastavení monitoringu nelze načíst: ${String(err)}` });
+  }
+});
+
+app.put('/api/monitoring/config', requireJwt, async (req, res) => {
+  try {
+    res.json(await saveMonitoringConfig(req.body));
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.issues[0]?.message ?? 'Neplatné nastavení monitoringu.' });
+    }
+    res.status(500).json({ error: `Nastavení monitoringu nelze uložit: ${String(err)}` });
+  }
+});
+
 // POST /api/monitoring/sync - natáhne nové zakázky ze zdroje do tabulky monitoring_zakazky.
 // Idempotentní: opakovaný běh nové jen doplní, stav dřív převzatých/ignorovaných nechá.
 // zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
 app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
   try {
     const zdroj = (typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen') as MonitoringSource;
-    const q = typeof req.body?.q === 'string' ? req.body.q : '';
+    const hasExplicitQuery = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'q');
+    if (hasExplicitQuery && typeof req.body.q !== 'string') {
+      return res.status(400).json({ error: 'Fulltextový dotaz musí být text.' });
+    }
     if (!['nen', 'hlidac', 'both'].includes(zdroj)) {
       return res.status(400).json({ error: 'Neplatný zdroj monitoringu.' });
     }
 
-    const sync = await collectMonitoringInputs(zdroj, q, Boolean(process.env.HLIDAC_TOKEN), {
+    const monitoringConfig = await getMonitoringConfig();
+    const queries = hasExplicitQuery
+      ? [req.body.q as string]
+      : monitoringConfig.klicova_slova.length > 0
+        ? [...new Set(monitoringConfig.klicova_slova)]
+        : [''];
+
+    const sync = await collectMonitoringInputs(zdroj, queries, Boolean(process.env.HLIDAC_TOKEN), {
       fetchNen: fetchNenTenders,
       fetchHlidac: fetchNewTenders,
     });
@@ -924,6 +957,7 @@ app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
       nalezeno: sync.inputs.length,
       novych: inserted,
       zdroje_pouzite: sync.zdroje_pouzite,
+      synchronizovano_at: new Date().toISOString(),
       ...(sync.varovani ? { varovani: sync.varovani } : {}),
     });
   } catch (err) {
@@ -944,15 +978,24 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 
     // NEN drží zakázky po lhůtě dál jako „Neukončen" → prošlé lhůty defaultně skryjeme
     // (nedá se do nich podat; jen zaplevelí feed). ?vse=1 je vrátí (audit/přehled).
-    const includeExpired = req.query.vse === '1';
-    const items = await listFeed(stav, undefined, { includeExpired });
+    const includeAll = req.query.vse === '1';
+    const categoryParam = typeof req.query.kategorie === 'string' ? req.query.kategorie : '';
+    if (categoryParam && !KOMODITA_KATEGORIE_VALUES.includes(categoryParam as any)) {
+      return res.status(400).json({ error: 'Neplatná kategorie monitoringu.' });
+    }
+    const items = await listFeed(stav, undefined, { includeExpired: includeAll });
     // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
     const company = await getCompany('default');
+    const monitoringConfig = await getMonitoringConfig();
     const now = new Date();
-    const withScore = items.map((item) => ({
-      ...item,
-      go_no_go: scoreFeedItem(item, company ?? undefined, now),
-    }));
+    const withScore = items
+      .filter((item) => !categoryParam || item.kategorie === categoryParam)
+      .filter((item) => includeAll || !isFeedItemExcluded(item, monitoringConfig))
+      .map((item) => ({
+        ...item,
+        go_no_go: scoreFeedItem(item, company ?? undefined, now, monitoringConfig),
+      }))
+      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || b.created_at.localeCompare(a.created_at));
     res.json(withScore);
   } catch (err) {
     res.status(500).json({ error: String(err) });

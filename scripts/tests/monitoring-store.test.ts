@@ -13,6 +13,7 @@ import { collectMonitoringInputs } from '../src/lib/monitoring/monitoring-sync.j
 import { closePool } from '../src/lib/db.js';
 import { scoreFeedItem, slugifyTender } from '../src/lib/monitoring/monitoring-score.js';
 import type { HlidacTenderCandidate } from '../src/lib/monitoring/hlidac-client.js';
+import type { MonitoringConfig } from '../src/lib/monitoring/monitoring-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = readFileSync(join(__dirname, 'fixtures', 'nen-listing.html'), 'utf-8');
@@ -178,6 +179,27 @@ test('collectMonitoringInputs: selhání NEN s tokenem zavolá Hlídač jako fal
   assert.ok(result.varovani?.includes('NEN se nepodařilo'));
 });
 
+test('collectMonitoringInputs deduplikuje zdroj_id napříč více fulltextovými dotazy', async () => {
+  const calls: string[] = [];
+  const candidate = (id: string, nazev: string): NenTenderCandidate => ({
+    zdroj_id: id, nazev, zadavatel: 'Město', stav: 'Neukončen', lhuta_nabidek: null, url: `https://nen/${id}`,
+  });
+  const result = await collectMonitoringInputs('nen', ['notebooky', 'servery'], false, {
+    fetchNen: async (query) => {
+      calls.push(query);
+      return {
+        ok: true,
+        items: query === 'notebooky'
+          ? [candidate('N1', 'Notebooky'), candidate('N-SHARED', 'IT technika')]
+          : [candidate('N-SHARED', 'IT technika'), candidate('N2', 'Servery')],
+      };
+    },
+    fetchHlidac: async () => [],
+  });
+  assert.deepEqual(calls, ['notebooky', 'servery']);
+  assert.deepEqual(result.inputs.map((item) => item.zdroj_id), ['N1', 'N-SHARED', 'N2']);
+});
+
 test('normalizeFeedRow převádí NUMERIC string na number', () => {
   const row = normalizeFeedRow({
     id: '1', zdroj: 'nen', zdroj_id: 'N1', nazev: 'Zakázka', zadavatel: null,
@@ -186,6 +208,16 @@ test('normalizeFeedRow převádí NUMERIC string na number', () => {
   });
   assert.equal(row.predpokladana_hodnota, 12345.67);
   assert.equal(typeof row.predpokladana_hodnota, 'number');
+  assert.equal(row.kategorie, 'ostatni');
+});
+
+test('normalizeFeedRow líně dopočítá chybějící kategorii ze starého řádku', () => {
+  const row = normalizeFeedRow({
+    id: '2', zdroj: 'nen', zdroj_id: 'N2', nazev: 'Dodávka notebooků a serverů', zadavatel: null,
+    predpokladana_hodnota: null, lhuta_nabidek: null, url: null, raw: null,
+    stav: 'nova', tender_id: null, created_at: '2026-07-11T00:00:00Z', kategorie: null,
+  });
+  assert.equal(row.kategorie, 'it_av');
 });
 
 // --- Quick go/no-go skóre feed položky ---
@@ -221,6 +253,41 @@ test('scoreFeedItem: krátká lhůta sráží skóre oproti komfortní', () => {
   assert.ok(comfortable.score > critical.score, 'delší lhůta = vyšší skóre');
 });
 
+const MONITORING_CONFIG: MonitoringConfig = {
+  kategorie_zajmu: ['it_av'],
+  klicova_slova: [],
+  vyloucena_slova: [],
+  min_hodnota: null,
+  max_hodnota: null,
+};
+
+test('scoreFeedItem výrazně zvýhodní kategorii zájmu a srazí kategorii mimo zájem', () => {
+  const base = { zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null };
+  const matching = scoreFeedItem({ ...base, nazev: 'Dodávka notebooků', kategorie: 'it_av' }, undefined, NOW, MONITORING_CONFIG);
+  const outside = scoreFeedItem({ ...base, nazev: 'Dodávka kancelářských židlí', kategorie: 'nabytek' }, undefined, NOW, MONITORING_CONFIG);
+  assert.ok(matching.score >= outside.score + 50, `${matching.score} vs ${outside.score}`);
+  assert.equal(outside.doporuceni, 'NOGO');
+});
+
+test('scoreFeedItem nastaví NOGO při vyloučeném slovu v názvu', () => {
+  const result = scoreFeedItem(
+    { nazev: 'Pronájem notebooků', kategorie: 'it_av', zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null },
+    undefined,
+    NOW,
+    { ...MONITORING_CONFIG, vyloucena_slova: ['pronájem'] },
+  );
+  assert.equal(result.score, 0);
+  assert.equal(result.doporuceni, 'NOGO');
+});
+
+test('scoreFeedItem srazí skóre při hodnotě mimo nastavený rozsah', () => {
+  const item = { nazev: 'Dodávka notebooků', kategorie: 'it_av' as const, zadavatel: null, predpokladana_hodnota: 3_000_000, lhuta_nabidek: null };
+  const inside = scoreFeedItem(item, undefined, NOW, { ...MONITORING_CONFIG, max_hodnota: 5_000_000 });
+  const outside = scoreFeedItem(item, undefined, NOW, { ...MONITORING_CONFIG, max_hodnota: 2_000_000 });
+  assert.equal(inside.score - outside.score, 20);
+  assert.ok(outside.duvody.some((reason) => reason.includes('maximum')));
+});
+
 // --- slugify ---
 
 // --- Store graceful degradace bez DB ---
@@ -233,7 +300,7 @@ test('store bez DATABASE_URL degraduje gracefully (čtení prázdno, zápis vyha
     assert.deepEqual(await listFeed('nova'), []);
     assert.equal(await getFeedItem('1'), null);
     await assert.rejects(
-      () => upsertFeed([{ zdroj: 'nen', zdroj_id: 'x', nazev: 'X', zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null, url: 'https://h', raw: null }]),
+      () => upsertFeed([{ zdroj: 'nen', zdroj_id: 'x', nazev: 'X', kategorie: 'ostatni', zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null, url: 'https://h', raw: null }]),
       /db_unavailable/,
     );
     await assert.rejects(() => setFeedStav('1', 'ignorovana'), /db_unavailable/);

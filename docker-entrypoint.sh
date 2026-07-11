@@ -5,6 +5,12 @@ if [ ! -f /app/config/company.json ] && [ -f /app/config-defaults/company.json ]
   cp /app/config-defaults/company.json /app/config/company.json
 fi
 
+# Seed výchozího nastavení monitoringu do stejného perzistentního config volume.
+if [ ! -f /app/config/monitoring.json ] && [ -f /app/config-defaults/monitoring.json ]; then
+  echo "Seeding default monitoring.json into config volume..."
+  cp /app/config-defaults/monitoring.json /app/config/monitoring.json
+fi
+
 # Seed empty users.json if it doesn't exist (first-run setup via UI)
 if [ ! -f /app/config/users.json ]; then
   echo "Seeding empty users.json into config volume..."
