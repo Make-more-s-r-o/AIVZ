@@ -12,6 +12,7 @@ import {
   buildDocumentsPromptSection,
   loadGeneratedDocumentTexts,
   runDeterministicValidation,
+  runSpecComplianceChecks,
 } from './lib/validation-deterministic.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
@@ -147,6 +148,23 @@ ${selectedProduct.shoda_s_pozadavky.map((s: any) => `- ${s.pozadavek}: ${s.splne
     console.log(`  [${check.status.toUpperCase()}] ${check.kontrola}: ${check.detail}`);
   }
 
+  // Shoda se specifikací (advisory) — kontroluje, zda vybraní kandidáti splňují povinné
+  // technické požadavky. Čistě informativní pro operátora: NEpřidává se do blockingProblems
+  // (splneno je noisy AI sebe-hodnocení), takže nikdy nepřepíše ready_to_submit ani submit-gate.
+  const specComplianceChecks = runSpecComplianceChecks({
+    technicalRequirements: analysis.technicke_pozadavky,
+    productMatch,
+    selectedPartIds,
+  });
+  const specFailCount = specComplianceChecks.filter((c) => c.status === 'fail').length;
+  console.log(`\n--- Spec-compliance validation (advisory, neblokuje podání) ---`);
+  if (specComplianceChecks.length === 0) {
+    console.log(`  Žádné neshody se specifikací (nebo shoda nebyla vyhodnocena).`);
+  }
+  for (const check of specComplianceChecks) {
+    console.log(`  [${check.status.toUpperCase()}] ${check.kontrola}: ${check.detail}`);
+  }
+
   const documentsSection = buildDocumentsPromptSection(generatedDocuments);
 
   const userMessage = `Zadávací dokumentace požaduje:
@@ -265,9 +283,12 @@ Odpověz ve formátu:
     validatedAt: aiReport.validatedAt,
     overall_score: aiReport.overall_score,
     ready_to_submit: true,
-    checks: [...deterministicChecks, ...aiReport.checks],
+    // specComplianceChecks jsou advisory (zdroj 'deterministic' kvůli zobrazení), ale
+    // ZÁMĚRNĚ se NEpropisují do blockingProblems níže — proto jen do checks, ne do gate.
+    checks: [...deterministicChecks, ...specComplianceChecks, ...aiReport.checks],
     kriticke_problemy: [],
     doporuceni: [
+      ...(specFailCount > 0 ? [`Shoda se specifikací: ${specFailCount} povinných požadavků označeno jako nesplněné (advisory dle AI hodnocení — ověřte ručně, podání to neblokuje).`] : []),
       ...(aiRecovered ? ['AI posouzení bylo obnoveno z neúplné JSON odpovědi; advisory část zkontrolujte ručně.'] : []),
       ...aiReport.kriticke_problemy.map((p) => `AI upozornění: ${p}`),
       ...aiReport.doporuceni,

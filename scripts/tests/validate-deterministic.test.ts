@@ -6,11 +6,12 @@
  */
 import { strict as assert } from 'node:assert';
 
-import type { ProductMatch } from '../src/lib/types.js';
+import type { ProductMatch, TenderAnalysis } from '../src/lib/types.js';
 import {
   computeExpectedPriceTotals,
   containsHardPlaceholder,
   runDeterministicValidation,
+  runSpecComplianceChecks,
   textContainsAmount,
   type GeneratedDocumentText,
 } from '../src/lib/validation-deterministic.js';
@@ -61,6 +62,47 @@ const productMatch = {
   ],
 } as unknown as ProductMatch;
 
+// --- Fixtury pro spec-compliance kontrolu ---
+const technicalRequirements = [
+  { parametr: 'Rozlišení', pozadovana_hodnota: 'Full HD', jednotka: null, povinny: true },
+  { parametr: 'Barva krytu', pozadovana_hodnota: 'černá', jednotka: null, povinny: false },
+] as unknown as TenderAnalysis['technicke_pozadavky'];
+
+function candidate(overrides: Record<string, unknown> = {}): any {
+  return {
+    vyrobce: 'TestCorp',
+    model: 'X1',
+    popis: '',
+    parametry: {},
+    shoda_s_pozadavky: [],
+    cena_bez_dph: 1000,
+    cena_s_dph: 1210,
+    dodavatele: [],
+    dostupnost: 'skladem',
+    ...overrides,
+  };
+}
+
+function polozka(overrides: Record<string, unknown> = {}): any {
+  return {
+    polozka_nazev: 'Projektor',
+    polozka_index: 0,
+    vybrany_index: 0,
+    typ: 'produkt',
+    oduvodneni_vyberu: '',
+    kandidati: [candidate()],
+    ...overrides,
+  };
+}
+
+function specMatch(items: any[]): ProductMatch {
+  return {
+    tenderId: 'fixture',
+    matchedAt: new Date().toISOString(),
+    polozky_match: items,
+  } as unknown as ProductMatch;
+}
+
 async function run(): Promise<void> {
   await test('DPH přepočet používá cenu bez DPH a sazbu 21 %', () => {
     const totals = computeExpectedPriceTotals(productMatch);
@@ -108,6 +150,173 @@ async function run(): Promise<void> {
     });
     const identityCheck = checks.find((check) => check.kontrola.includes('Identita'));
     assert.equal(identityCheck?.status, 'pass');
+  });
+
+  // --- Shoda se specifikací (spec-compliance) ---
+
+  await test('spec: nesplněný povinný požadavek → fail', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'Rozlišení Full HD', splneno: false, hodnota: 'HD 720p', komentar: 'jen 720p' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0].status, 'fail');
+    assert.equal(checks[0].kategorie, 'shoda_specifikace');
+    assert.equal(checks[0].zdroj, 'deterministic');
+    assert.ok(checks[0].detail.includes('HD 720p'));
+    assert.ok(checks[0].detail.includes('jen 720p'));
+  });
+
+  await test('spec: nesplněný NEpovinný požadavek → žádný nález', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'Barva krytu bílá', splneno: false, hodnota: 'černá' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 0);
+  });
+
+  await test('spec: vše splněno → žádný nález', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'Rozlišení Full HD', splneno: true, hodnota: 'Full HD' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 0);
+  });
+
+  await test('spec: prázdné shoda_s_pozadavky u produktu → warning', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({ kandidati: [candidate({ shoda_s_pozadavky: [] })] }),
+      ]),
+    });
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0].status, 'warning');
+    assert.equal(checks[0].kategorie, 'shoda_specifikace');
+  });
+
+  await test('spec: položka typu sluzba se přeskočí', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          typ: 'sluzba',
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'Rozlišení Full HD', splneno: false, hodnota: 'HD' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 0);
+  });
+
+  await test('spec: nenapárovaný požadavek se bere konzervativně jako povinný → fail', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'Hmotnost do 2 kg', splneno: false, hodnota: '3 kg' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0].status, 'fail');
+  });
+
+  await test('spec: párování jmen ignoruje diakritiku a velikost písmen', () => {
+    // Požadavek „ROZLISENI" (bez diakritiky, verzálky) se musí napárovat na parametr
+    // „Rozlišení" (povinny=false) → nepovinný → žádný fail. Bez normalizace by zůstal
+    // nenapárovaný → konzervativně povinný → fail.
+    const reqs = [
+      { parametr: 'Rozlišení', pozadovana_hodnota: 'Full HD', jednotka: null, povinny: false },
+    ] as unknown as TenderAnalysis['technicke_pozadavky'];
+    const checks = runSpecComplianceChecks({
+      technicalRequirements: reqs,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            shoda_s_pozadavky: [
+              { pozadavek: 'ROZLISENI', splneno: false, hodnota: 'HD' },
+            ],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 0);
+  });
+
+  await test('spec: zástupný kandidát (zadna_shoda) i nulová cena se přeskočí', () => {
+    const zadnaShoda = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            zadna_shoda: true,
+            shoda_s_pozadavky: [{ pozadavek: 'Rozlišení Full HD', splneno: false, hodnota: '-' }],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(zadnaShoda.length, 0);
+
+    const nulovaCena = runSpecComplianceChecks({
+      technicalRequirements,
+      productMatch: specMatch([
+        polozka({
+          kandidati: [candidate({
+            cena_bez_dph: 0,
+            shoda_s_pozadavky: [{ pozadavek: 'Rozlišení Full HD', splneno: false, hodnota: '-' }],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(nulovaCena.length, 0);
+  });
+
+  await test('spec: filtr vybraných částí vynechá položky nevybraných částí', () => {
+    const checks = runSpecComplianceChecks({
+      technicalRequirements,
+      selectedPartIds: new Set(['A']),
+      productMatch: specMatch([
+        polozka({
+          cast_id: 'B',
+          kandidati: [candidate({
+            shoda_s_pozadavky: [{ pozadavek: 'Rozlišení Full HD', splneno: false, hodnota: 'HD' }],
+          })],
+        }),
+      ]),
+    });
+    assert.equal(checks.length, 0);
   });
 }
 
