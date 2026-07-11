@@ -1395,6 +1395,9 @@ export interface PrilohaChecklistItem {
   status: 'nahrano' | 'chybi';
   zdroj?: 'firma' | 'zakazka';
   filename?: string;
+  platnost_do?: string | null;
+  platnost_status?: 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
+  poznamka?: string;  // např. „nahraný doklad je po platnosti" / „doklad brzy expiruje"
 }
 
 export interface PrilohaChecklist {
@@ -1611,10 +1614,15 @@ export async function deleteCompanyApi(id: string): Promise<{ success: boolean }
 
 // --- Document slot types (mirrored from shared/constants) ---
 
+export type DocExpiryStatus = 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
+
 export interface DocSlotEntry {
   slot: string;
   filename: string;
   uploadedAt: string;
+  platnost_do?: string | null;       // ISO datum (YYYY-MM-DD) platnosti dokladu
+  platnost_status?: DocExpiryStatus; // dopočítáno serverem
+  dny_do_expirace?: number | null;   // dopočítáno serverem (kladné = platí, záporné = po platnosti)
 }
 
 export interface CompanyDocsResponse {
@@ -1653,6 +1661,28 @@ export async function deleteCompanyDoc(
     { method: 'DELETE', headers: authHeaders() },
   );
   if (!res.ok) throw new Error('Delete failed');
+  return res.json();
+}
+
+/** Nastaví/zruší datum platnosti dokladu (platnost_do = null → zrušit). */
+export async function setCompanyDocPlatnost(
+  companyId: string,
+  filename: string,
+  platnostDo: string | null,
+  slot: string = 'ostatni',
+): Promise<{ success: boolean; entries: DocSlotEntry[] }> {
+  const res = await fetch(
+    `${API_BASE}/companies/${companyId}/documents/${encodeURIComponent(filename)}/platnost`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ platnost_do: platnostDo, slot }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Failed to set platnost');
+  }
   return res.json();
 }
 

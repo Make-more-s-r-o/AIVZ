@@ -24,9 +24,12 @@ import {
   getAllCompanies, getCompany, getTenderCompanyId, createCompany, updateCompany, deleteCompany as deleteCompanyById,
   getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
   copyCompanyDocsToTender,
-  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots,
+  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots, setDocPlatnost,
 } from './lib/company-store.js';
-import { DOC_SLOTS, type DocSlotType } from './lib/doc-slots.js';
+import {
+  DOC_SLOTS, type DocSlotType, type DocSlotEntry,
+  docExpiryStatus, daysUntilExpiry, isValidIsoDateString, buildChecklistItem,
+} from './lib/doc-slots.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
@@ -2180,31 +2183,87 @@ const companyDocUpload = multer({
   },
 });
 
-// POST /api/companies/:companyId/documents - upload company docs (with slot)
+/** Doplní k manifest entries vypočtený stav platnosti (status + dny do expirace) pro FE. */
+function entriesWithExpiry(entries: DocSlotEntry[]) {
+  return entries.map(e => ({
+    ...e,
+    platnost_status: docExpiryStatus(e.platnost_do),
+    dny_do_expirace: daysUntilExpiry(e.platnost_do),
+  }));
+}
+
+// POST /api/companies/:companyId/documents - upload company docs (with slot, optional platnost_do)
 app.post('/api/companies/:companyId/documents', companyDocUpload.array('files', 20), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
+    // multer middleware typuje req.params volněji (string | string[]) — sjednotíme na string.
+    const companyId = String(req.params.companyId);
     const slot = (req.body?.slot || 'ostatni') as DocSlotType;
-    let manifest = await getDocManifest(req.params.companyId);
+    // Volitelné datum platnosti z form fieldu (aplikuje se na všechny soubory v requestu).
+    const rawPlatnost = typeof req.body?.platnost_do === 'string' ? req.body.platnost_do.trim() : '';
+    const platnostDo = rawPlatnost && isValidIsoDateString(rawPlatnost) ? rawPlatnost : null;
+    let manifest = await getDocManifest(companyId);
     for (const f of files) {
-      manifest = await addDocToSlot(req.params.companyId, slot, f.filename);
+      manifest = await addDocToSlot(companyId, slot, f.filename);
     }
-    const allFiles = await getCompanyDocuments(req.params.companyId);
-    res.json({ uploaded: files.map(f => f.filename), entries: manifest.entries, files: allFiles });
+    if (platnostDo) {
+      for (const f of files) {
+        const updated = await setDocPlatnost(companyId, slot, f.filename, platnostDo);
+        if (updated) manifest = updated;
+      }
+    }
+    const allFiles = await getCompanyDocuments(companyId);
+    res.json({ uploaded: files.map(f => f.filename), entries: entriesWithExpiry(manifest.entries), files: allFiles });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// GET /api/companies/:companyId/documents - list company docs (with manifest entries)
+// GET /api/companies/:companyId/documents - list company docs (with manifest entries + expiry status)
 app.get('/api/companies/:companyId/documents', async (req, res) => {
   try {
     const manifest = await getDocManifest(req.params.companyId);
     const files = await getCompanyDocuments(req.params.companyId);
-    res.json({ entries: manifest.entries, files });
+    res.json({ entries: entriesWithExpiry(manifest.entries), files });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/companies/:companyId/documents/:filename/platnost - nastaví/zruší platnost dokladu
+const PlatnostUpdateSchema = z.object({
+  platnost_do: z.union([
+    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'platnost_do musí být ve formátu YYYY-MM-DD'),
+    z.null(),
+  ]),
+  slot: z.string().optional(),
+});
+app.put('/api/companies/:companyId/documents/:filename/platnost', async (req, res) => {
+  const parsed = PlatnostUpdateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'invalid_body' });
+  }
+  const { platnost_do, slot: bodySlot } = parsed.data;
+  // Regex projde i neexistující datum (2026-02-30) — ověříme kalendářní platnost.
+  if (platnost_do && !isValidIsoDateString(platnost_do)) {
+    return res.status(400).json({ error: 'platnost_do není platné kalendářní datum' });
+  }
+  try {
+    const { companyId, filename } = req.params;
+    let slot = bodySlot as DocSlotType | undefined;
+    if (!slot) {
+      // Slot neuveden → dohledáme doklad podle názvu souboru.
+      const manifest = await getDocManifest(companyId);
+      const entry = manifest.entries.find(e => e.filename === filename);
+      if (!entry) return res.status(404).json({ error: 'Document not found' });
+      slot = entry.slot;
+    }
+    const manifest = await setDocPlatnost(companyId, slot, filename, platnost_do);
+    if (!manifest) return res.status(404).json({ error: 'Document not found' });
+    res.json({ success: true, entries: entriesWithExpiry(manifest.entries) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2215,7 +2274,7 @@ app.delete('/api/companies/:companyId/documents/:filename', async (req, res) => 
   try {
     const slot = (req.query.slot || 'ostatni') as DocSlotType;
     const manifest = await removeDocFromSlot(req.params.companyId, slot, req.params.filename);
-    res.json({ success: true, entries: manifest.entries });
+    res.json({ success: true, entries: entriesWithExpiry(manifest.entries) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2253,12 +2312,13 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
       const meta = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'tender-meta.json'), 'utf-8'));
       companyId = typeof meta.company_id === 'string' ? meta.company_id : null;
     } catch {}
-    const slotToCompanyFile = new Map<string, string>();
+    // Slot → firemní doklad (celý entry, nese platnost_do pro kontrolu expirace).
+    const slotToCompanyEntry = new Map<string, DocSlotEntry>();
     if (companyId) {
       try {
         const manifest = await getDocManifest(companyId);
         for (const e of manifest.entries) {
-          if (!slotToCompanyFile.has(e.slot)) slotToCompanyFile.set(e.slot, e.filename);
+          if (!slotToCompanyEntry.has(e.slot)) slotToCompanyEntry.set(e.slot, e);
         }
       } catch {}
     }
@@ -2272,13 +2332,13 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
 
     const items = requiredSlots.map((slot) => {
       const label = DOC_SLOTS.find((s) => s.type === slot)?.label ?? slot;
-      const companyFile = slotToCompanyFile.get(slot);
+      const companyEntry = slotToCompanyEntry.get(slot) ?? null;
+      const companyFile = companyEntry?.filename;
       // Příloha zakázky se páruje volně dle názvu slotu/souboru firmy (přílohy nemají sloty).
       const attMatch = attachments.find((f, i) =>
-        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, '')));
-      if (attMatch) return { slot, label, status: 'nahrano' as const, zdroj: 'zakazka' as const, filename: attMatch };
-      if (companyFile) return { slot, label, status: 'nahrano' as const, zdroj: 'firma' as const, filename: companyFile };
-      return { slot, label, status: 'chybi' as const };
+        (companyFile && f === companyFile) || attachmentsLower[i].includes(slot.replace(/_/g, ''))) ?? null;
+      // Expirace se vyhodnocuje z firemního dokladu (viz buildChecklistItem).
+      return buildChecklistItem({ slot, label, companyEntry, attachmentFilename: attMatch });
     });
 
     res.json({ items, company_id: companyId, analyza_hotova: true });

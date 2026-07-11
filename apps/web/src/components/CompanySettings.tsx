@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getCompanies, createCompany, updateCompanyApi, deleteCompanyApi,
-  getCompanyDocs, uploadCompanyDocs, deleteCompanyDoc,
+  getCompanyDocs, uploadCompanyDocs, deleteCompanyDoc, setCompanyDocPlatnost,
   type CompanyData, type DocSlotEntry,
 } from '../lib/api';
-import { Building2, Trash2, Upload, FileText, Pencil, Plus, X, Check, AlertTriangle } from 'lucide-react';
+import { Building2, Trash2, Upload, FileText, Pencil, Plus, X, Check, AlertTriangle, CalendarClock } from 'lucide-react';
 
 const DOC_SLOTS = [
   { type: 'vypis_or',           label: 'Výpis z obchodního rejstříku', multi: false },
@@ -340,6 +340,17 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
     }
   };
 
+  const handleSetPlatnost = async (slot: string, filename: string, platnostDo: string | null) => {
+    try {
+      const resp = await setCompanyDocPlatnost(companyId, filename, platnostDo, slot);
+      setEntries(resp.entries);
+      setDocError(null);
+    } catch (err) {
+      console.error('Set platnost failed:', err);
+      setDocError('Uložení platnosti se nezdařilo.');
+    }
+  };
+
   return (
     <div className="mt-4 rounded-lg p-3" style={{ border: '1px dashed var(--border-strong)' }}>
       {docError && (
@@ -360,6 +371,7 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
               fileRefs={fileRefs}
               onUpload={handleUpload}
               onDelete={handleDelete}
+              onSetPlatnost={handleSetPlatnost}
             />
           );
         })}
@@ -369,7 +381,7 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
 }
 
 function DocSlotRow({
-  slot, slotEntries, isUploading, fileRefs, onUpload, onDelete,
+  slot, slotEntries, isUploading, fileRefs, onUpload, onDelete, onSetPlatnost,
 }: {
   slot: (typeof DOC_SLOTS)[number];
   slotEntries: DocSlotEntry[];
@@ -377,6 +389,7 @@ function DocSlotRow({
   fileRefs: React.MutableRefObject<Record<string, HTMLInputElement | null>>;
   onUpload: (slotType: string, e: React.ChangeEvent<HTMLInputElement>) => void;
   onDelete: (slot: string, filename: string) => void;
+  onSetPlatnost: (slot: string, filename: string, platnostDo: string | null) => void;
 }) {
   const [rowHover, setRowHover] = useState(false);
   const [uploadHover, setUploadHover] = useState(false);
@@ -403,7 +416,7 @@ function DocSlotRow({
         ) : (
           <div className="space-y-1">
             {slotEntries.map(entry => (
-              <DocEntryRow key={entry.filename} entry={entry} onDelete={onDelete} />
+              <DocEntryRow key={entry.filename} entry={entry} onDelete={onDelete} onSetPlatnost={onSetPlatnost} />
             ))}
           </div>
         )}
@@ -435,18 +448,82 @@ function DocSlotRow({
   );
 }
 
-function DocEntryRow({ entry, onDelete }: { entry: DocSlotEntry; onDelete: (slot: string, filename: string) => void }) {
+// --- Platnost dokladu (badge + inline datum) ---
+
+type ExpiryStatus = 'ok' | 'expiruje' | 'expirovany' | 'nezadano';
+
+/** Barvy a text badge platnosti podle stavu z backendu. */
+function expiryBadgeStyle(status: ExpiryStatus): { bg: string; fg: string } {
+  switch (status) {
+    case 'ok':         return { bg: 'var(--success-soft-bg)', fg: 'var(--success-fg)' };
+    case 'expiruje':   return { bg: 'var(--warning-soft-bg)', fg: 'var(--warning-fg)' };
+    case 'expirovany': return { bg: 'var(--danger-soft-bg)',  fg: 'var(--danger-fg)' };
+    default:           return { bg: 'var(--surface-sunken)',  fg: 'var(--text-tertiary)' };
+  }
+}
+
+/** Formát ISO data (YYYY-MM-DD) na české DD.MM.YYYY. */
+function formatCzDate(iso?: string | null): string {
+  if (!iso) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : iso;
+}
+
+function ExpiryBadge({ entry }: { entry: DocSlotEntry }) {
+  const status = (entry.platnost_status ?? 'nezadano') as ExpiryStatus;
+  const { bg, fg } = expiryBadgeStyle(status);
+  const dny = entry.dny_do_expirace;
+  let text: string;
+  if (status === 'ok') text = `Platí do ${formatCzDate(entry.platnost_do)}`;
+  else if (status === 'expiruje') text = dny != null ? `Expiruje za ${dny} ${dny === 1 ? 'den' : dny >= 2 && dny <= 4 ? 'dny' : 'dní'}` : 'Brzy expiruje';
+  else if (status === 'expirovany') text = `Po platnosti (${formatCzDate(entry.platnost_do)})`;
+  else text = 'Platnost nezadána';
+  return (
+    <span
+      className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium"
+      style={{ background: bg, color: fg }}
+      title={entry.platnost_do ? `Platnost do ${formatCzDate(entry.platnost_do)}` : 'Platnost dokladu není zadána'}
+    >
+      {text}
+    </span>
+  );
+}
+
+function DocEntryRow({
+  entry, onDelete, onSetPlatnost,
+}: {
+  entry: DocSlotEntry;
+  onDelete: (slot: string, filename: string) => void;
+  onSetPlatnost: (slot: string, filename: string, platnostDo: string | null) => void;
+}) {
   const [hover, setHover] = useState(false);
+  const dateValue = entry.platnost_do ? entry.platnost_do.slice(0, 10) : '';
   return (
     <div className="flex items-center gap-2 text-xs">
       <Check className="h-3 w-3 shrink-0" style={{ color: 'var(--success-solid)' }} />
       <FileText className="h-3 w-3 shrink-0" style={{ color: 'var(--text-tertiary)' }} />
       <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{entry.filename}</span>
+      <ExpiryBadge entry={entry} />
+      <label
+        className="ml-auto flex shrink-0 items-center gap-1"
+        title="Datum platnosti dokladu (platnost do)"
+        style={{ color: 'var(--text-tertiary)' }}
+      >
+        <CalendarClock className="h-3 w-3" />
+        <input
+          type="date"
+          value={dateValue}
+          onChange={(e) => onSetPlatnost(entry.slot, entry.filename, e.target.value || null)}
+          className="rounded px-1 py-0.5 text-[11px]"
+          style={{ border: '1px solid var(--border-strong)', background: 'var(--surface-card)', color: 'var(--text-secondary)' }}
+          aria-label={`Platnost do — ${entry.filename}`}
+        />
+      </label>
       <button
         onClick={() => onDelete(entry.slot, entry.filename)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        className="ml-auto shrink-0"
+        className="shrink-0"
         style={{ color: hover ? 'var(--danger-solid)' : 'var(--text-tertiary)' }}
         title="Smazat"
         aria-label={`Smazat dokument ${entry.filename}`}

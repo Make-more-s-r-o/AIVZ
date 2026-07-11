@@ -236,6 +236,24 @@ export async function addDocToSlot(companyId: string, slot: DocSlotType, filenam
   return manifest;
 }
 
+/**
+ * Nastaví (nebo zruší při null) datum platnosti `platnost_do` u konkrétního dokladu.
+ * Vrací aktualizovaný manifest, nebo null když doklad ve slotu neexistuje.
+ */
+export async function setDocPlatnost(
+  companyId: string,
+  slot: DocSlotType,
+  filename: string,
+  platnostDo: string | null,
+): Promise<DocManifest | null> {
+  const manifest = await getDocManifest(companyId);
+  const entry = manifest.entries.find(e => e.slot === slot && e.filename === filename);
+  if (!entry) return null;
+  entry.platnost_do = platnostDo;
+  await saveDocManifest(companyId, manifest);
+  return manifest;
+}
+
 /** Remove a file from a slot (deletes from disk too) */
 export async function removeDocFromSlot(companyId: string, slot: DocSlotType, filename: string): Promise<DocManifest> {
   const manifest = await getDocManifest(companyId);
