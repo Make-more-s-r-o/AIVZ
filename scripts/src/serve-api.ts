@@ -69,6 +69,7 @@ import {
   advanceRunAllChain,
   loadPipelineJobs,
   savePipelineJobs,
+  selectJobsToStart,
   type PipelineJob as Job,
   type PipelineStep,
 } from './lib/pipeline-job-state.js';
@@ -204,7 +205,14 @@ app.use(async (req, res, next) => {
 // --- Async Job Queue ---
 
 const jobs = new Map<string, Job>();
-let currentJob: string | null = null;
+// Souběžná fronta: místo jednoho slotu držíme množinu právě běžících úloh. Limit řídí
+// PIPELINE_MAX_CONCURRENT (default 2). Plánovač (selectJobsToStart) navíc zaručuje per-tender
+// serializaci — nikdy dvě úlohy téže zakázky současně (sdílí soubory v output/<tenderId>).
+const runningJobs = new Set<string>();
+const PIPELINE_MAX_CONCURRENT = (() => {
+  const raw = Number(process.env.PIPELINE_MAX_CONCURRENT);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2;
+})();
 const jobQueue: string[] = [];
 let persistTimer: NodeJS.Timeout | null = null;
 let persistDirty = false;
@@ -301,18 +309,47 @@ function appendJobLogs(job: Job, lines: string[]) {
   scheduleJobsPersist();
 }
 
-function processQueue() {
-  if (currentJob) return;
-  const nextId = jobQueue.shift();
-  if (!nextId) return;
+/** Zakázky, které mají právě běžící úlohu (per-tender lock pro plánovač). */
+function runningTenderIds(): string[] {
+  const ids: string[] = [];
+  for (const jobId of runningJobs) {
+    const running = jobs.get(jobId);
+    if (running) ids.push(running.tenderId);
+  }
+  return ids;
+}
 
-  const job = jobs.get(nextId);
-  if (!job) {
-    processQueue();
-    return;
+/**
+ * Naplánuje a odstartuje způsobilé úlohy z fronty až do limitu souběhu. Vybírá čistá funkce
+ * selectJobsToStart (FIFO + per-tender lock); zde jen provedeme mutace (odebrání z fronty, spawn).
+ */
+function processQueue() {
+  // Vyřaď z fronty úlohy, které už mezitím zmizely z mapy (cleanup), ať plánovač počítá s realitou.
+  for (let i = jobQueue.length - 1; i >= 0; i--) {
+    if (!jobs.has(jobQueue[i])) jobQueue.splice(i, 1);
   }
 
-  currentJob = nextId;
+  const queueJobs = jobQueue.map((id) => jobs.get(id)!);
+  const toStart = selectJobsToStart(
+    queueJobs.map((j) => ({ id: j.id, tenderId: j.tenderId })),
+    runningTenderIds(),
+    PIPELINE_MAX_CONCURRENT,
+  );
+  if (toStart.length === 0) return;
+
+  const toStartSet = new Set(toStart);
+  // Odeber vybrané úlohy z fronty (zbytek zůstává ve FIFO pořadí).
+  for (let i = jobQueue.length - 1; i >= 0; i--) {
+    if (toStartSet.has(jobQueue[i])) jobQueue.splice(i, 1);
+  }
+  for (const jobId of toStart) {
+    const job = jobs.get(jobId);
+    if (job) startJob(job);
+  }
+}
+
+function startJob(job: Job) {
+  runningJobs.add(job.id);
   job.status = 'running';
   if (job.parentJobId) {
     const parent = jobs.get(job.parentJobId);
@@ -328,7 +365,7 @@ function processQueue() {
     job.status = 'error';
     job.error = `Unknown step: ${job.step}`;
     job.finishedAt = new Date().toISOString();
-    currentJob = null;
+    runningJobs.delete(job.id);
     scheduleJobsPersist();
     processQueue();
     return;
@@ -414,7 +451,7 @@ function processQueue() {
     job.status = status;
     if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
-    currentJob = null;
+    runningJobs.delete(job.id);
     scheduleJobsPersist();
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
