@@ -87,7 +87,9 @@ import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { createApplyMarketPricesHandler } from './lib/market-price-api.js';
-import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
+import { getOutcome, upsertOutcome, getOutcomeStats, getCalibrationPairs, type VysledekPodani } from './lib/outcomes-store.js';
+import { buildBidSnapshot, persistSnapshotBestEffort, type BidSnapshot } from './lib/bid-snapshot.js';
+import { insertSnapshot } from './lib/bid-snapshot-store.js';
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
 import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
 import { listFindings } from './lib/web-findings-store.js';
@@ -3144,7 +3146,7 @@ function writeSubmissionZip(zipPath: string, contents: Array<{ name: string; buf
  * + kvalifikační přílohy, spočítá sha256, sestaví manifest a rozhodne verzi: nezměněný
  * obsah → recyklace stávajícího balíku, změna → nová verze (podani-v{N}.zip).
  */
-async function buildSubmissionBundle(tenderId: string): Promise<{ manifest: SubmissionManifest; reused: boolean }> {
+async function buildSubmissionBundle(tenderId: string, snapshot?: BidSnapshot): Promise<{ manifest: SubmissionManifest; reused: boolean }> {
   const outputDir = join(OUTPUT_DIR, tenderId);
   const podaniDir = join(outputDir, 'podani');
 
@@ -3163,6 +3165,7 @@ async function buildSubmissionBundle(tenderId: string): Promise<{ manifest: Subm
   const contents: Array<{ name: string; buf: Buffer }> = [];
   for (const f of docFiles) contents.push({ name: f, buf: await readFile(join(outputDir, f)) });
   for (const f of attachmentFiles) contents.push({ name: `prilohy/${f}`, buf: await readFile(join(prilohyDir, f)) });
+  if (snapshot) contents.push({ name: 'bid-snapshot.json', buf: Buffer.from(JSON.stringify(snapshot, null, 2)) });
 
   const fileEntries: ManifestFileEntry[] = contents.map((c) => ({
     name: c.name,
@@ -3226,8 +3229,24 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
       });
     }
 
-    // Immutable balík + manifest.
-    const { manifest, reused } = await buildSubmissionBundle(id);
+    // Snapshot se sestaví z právě finalizovaných dat. Čtení každého zdroje je
+    // nezávislé: starší zakázka bez některého souboru stále dostane validní snapshot.
+    const readJson = async (name: string): Promise<unknown> => {
+      try { return JSON.parse(await readFile(join(outputDir, name), 'utf-8')); } catch { return null; }
+    };
+    const [analysis, productMatch, validationReport, costLog] = await Promise.all([
+      readJson('analysis.json'), readJson('product-match.json'), readJson('validation-report.json'), readJson('cost-log.json'),
+    ]);
+    let winPriceBand: PriceBand | undefined;
+    try { winPriceBand = await priceBandForSubject((analysis as any)?.zakazka?.predmet ?? ''); } catch {}
+    const snapshot = buildBidSnapshot({ tenderId: id, analysis, productMatch, validationReport, costLog, winPriceBand });
+
+    // Immutable balík + manifest; snapshot je přímo součástí ZIPu a content_hash.
+    const { manifest, reused } = await buildSubmissionBundle(id, snapshot);
+    await persistSnapshotBestEffort(async () => {
+      await writeFile(join(outputDir, 'podani', 'bid-snapshot.json'), JSON.stringify(snapshot, null, 2));
+      await insertSnapshot(snapshot);
+    }, (message, error) => console.warn(`${message} pro ${id}:`, error));
 
     // Stav: posun jen dopředu na 'pripravena' (z pozdějších/terminálních stavů nesnižujeme).
     const pipeline = await getPipelineStatus(id);
@@ -3867,6 +3886,12 @@ app.get('/api/outcomes/stats', async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+// GET kalibrační data — pouze přesně spárované snapshoty a skutečné výsledky.
+app.get('/api/analytics/kalibrace', async (_req, res) => {
+  try { res.json(await getCalibrationPairs()); }
+  catch { res.json([]); }
 });
 
 // --- Nákupní seznam po výhře -----------------------------------------------
