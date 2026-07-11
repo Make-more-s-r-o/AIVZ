@@ -6,13 +6,31 @@ import test from 'node:test';
 import {
   ApprovalRequiredError,
   advanceRunAllChain,
+  claimWaitingApproval,
   loadPipelineJobs,
   savePipelineJobs,
   selectJobsToStart,
+  restoreWaitingApproval,
   type PipelineJob,
   type PipelineStep,
   type SchedulableJob,
 } from '../src/lib/pipeline-job-state.js';
+
+test('resume claim: waiting_approval lze synchronně rezervovat jen jednou', () => {
+  const parent = job({ kind: 'pipeline', status: 'waiting_approval', currentStep: 'generate', error: 'čeká' });
+  assert.equal(claimWaitingApproval(parent), true);
+  assert.equal(parent.status, 'running');
+  assert.equal(claimWaitingApproval(parent), false);
+});
+
+test('resume claim: neúspěšné ověření vrátí parent do waiting_approval', () => {
+  const parent = job({ kind: 'pipeline', status: 'waiting_approval', currentStep: 'generate' });
+  assert.equal(claimWaitingApproval(parent), true);
+  restoreWaitingApproval(parent, 'Ceny nelze ověřit.');
+  assert.equal(parent.status, 'waiting_approval');
+  assert.equal(parent.currentStep, 'generate');
+  assert.equal(parent.error, 'Ceny nelze ověřit.');
+});
 
 function job(overrides: Partial<PipelineJob>): PipelineJob {
   return {

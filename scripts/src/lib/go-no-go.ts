@@ -232,7 +232,7 @@ function isPositiveNumber(value: unknown): value is number {
 //
 // Zatímco `scoreGoNoGo` (výše) je VSTUPNÍ skóre počítané PŘED nacenením (jen
 // z analýzy ZD + volitelně win-price), `scoreBid` je DRUHÉ skóre počítané PO
-// nacenění z reálných dat product-match.json: hrubý zisk v Kč, vážená marže,
+// nacenění z reálných dat product-match.json: hrubý zisk v Kč, obchodní přirážka,
 // kvalita cenových shod, HARD sanity flagy a pozice naší celkové ceny vůči
 // historickému cenovému pásmu výher. Nemění ceny ani stav — je čistě
 // informativní stejně jako go/no-go.
@@ -245,15 +245,16 @@ export const BID_WIN_PRICE_WEIGHT = 25;
 
 // Cílový absolutní hrubý zisk, při kterém je faktor plně nasycen (value = 1).
 export const BID_TARGET_PROFIT_CZK = 50_000;
-// Výchozí cílová marže, pokud firma žádnou nemá (např. web-cenová cesta má 0 %).
+// Výchozí cílová přirážka, pokud firma žádnou nemá (historický název pole je marze_procent).
 export const DEFAULT_TARGET_MARGIN_PROCENT = 10;
 // Nepotvrzená cena je jen odhad — do váženého zisku vstupuje s poloviční vahou.
 export const UNCONFIRMED_PRICE_WEIGHT = 0.5;
 
 export interface BidEconomics {
   zisk_kc: number;          // nominální hrubý zisk (potvrzené i nepotvrzené) v Kč, bez DPH
-  marze_procent: number;    // vážená marže % = zisk / nabídkový obrat bez DPH
+  marze_procent: number;    // obchodní přirážka % = zisk / náklady bez DPH (historický název pole)
   obrat_bez_dph: number;    // Σ nabídkových cen bez DPH × množství
+  naklady_bez_dph: number;  // Σ nákupních cen bez DPH × množství
   vazeny_zisk: number;      // hrubý zisk vážený spolehlivostí (nepotvrzené × 0,5)
   polozek: number;
   slabych_polozek: number;  // bez reálné shody / nízká spolehlivost / bez ceny
@@ -347,11 +348,13 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
   }
 
   const zisk = obrat - naklady;
-  const marze = obrat > 0 ? (zisk / obrat) * 100 : 0;
+  // Firemní cíl i calculateItemPrice používají markup: zisk / nákupní náklady.
+  const marze = naklady > 0 ? (zisk / naklady) * 100 : 0;
   return {
     zisk_kc: Math.round(zisk),
     marze_procent: Math.round(marze * 10) / 10,
     obrat_bez_dph: Math.round(obrat),
+    naklady_bez_dph: Math.round(naklady),
     vazeny_zisk: vazenyZisk,
     polozek: items.length,
     slabych_polozek: slabych,
@@ -361,7 +364,7 @@ export function computeBidEconomics(productMatch?: ProductMatch): BidEconomics {
 
 /**
  * Profit-aware bid skóre počítané PO nacenění. Vstupem je product-match (reálné
- * kupní/nabídkové ceny), firemní cílová marže a volitelné historické cenové pásmo.
+ * kupní/nabídkové ceny), firemní cílová přirážka a volitelné historické cenové pásmo.
  */
 export function scoreBid(
   analysis: TenderAnalysis,
@@ -384,7 +387,7 @@ export function scoreBid(
 
   const factors: Factor[] = [];
 
-  // (b) Vážená marže vs firemní cíl.
+  // (b) Obchodní přirážka (zisk/náklady) vs firemní cíl.
   const target = isPositiveNumber(company?.default_marze_procent)
     ? company!.default_marze_procent!
     : DEFAULT_TARGET_MARGIN_PROCENT;
@@ -393,8 +396,8 @@ export function scoreBid(
     value: marginValue,
     weight: BID_MARGIN_WEIGHT,
     reason: econ.marze_procent <= 0
-      ? 'Nabídka nemá kladnou marži — hrozí ztrátová zakázka.'
-      : `Vážená marže ${econ.marze_procent.toFixed(1)} % (cíl ${target} %).`,
+      ? 'Nabídka nemá kladnou přirážku — hrozí ztrátová zakázka.'
+      : `Obchodní přirážka ${econ.marze_procent.toFixed(1)} % z nákladů (cíl ${target} %).`,
   });
 
   // (a) Absolutní hrubý zisk, vážený spolehlivostí cen (nepotvrzené s poloviční vahou).

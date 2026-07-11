@@ -1,6 +1,7 @@
 import { readdir, readFile, mkdir, writeFile, rm, stat } from 'fs/promises';
 import { join, extname, basename, sep, relative, resolve } from 'path';
 import PizZip from 'pizzip';
+import { ZIP_PEEK_SIZE_LIMIT_BYTES } from './upload-limits.js';
 
 /**
  * Robustní discovery vstupních souborů zakázky.
@@ -240,6 +241,7 @@ async function walk(dir: string, depth: number, zipDepth: number, ctx: Ctx): Pro
  * Vrací null, když ZIP nejde otevřít (poškozený soubor) — volající to bere jako "neznámo".
  */
 export function peekZipFileCount(buffer: Buffer): number | null {
+  if (!shouldPeekZipFile(buffer.length)) return null;
   try {
     const zip = new PizZip(buffer);
     let count = 0;
@@ -254,6 +256,11 @@ export function peekZipFileCount(buffer: Buffer): number | null {
   } catch {
     return null;
   }
+}
+
+/** Informativní ZIP náhled nad tímto limitem přeskočíme ještě před readFile. */
+export function shouldPeekZipFile(sizeBytes: number): boolean {
+  return Number.isFinite(sizeBytes) && sizeBytes >= 0 && sizeBytes <= ZIP_PEEK_SIZE_LIMIT_BYTES;
 }
 
 /**

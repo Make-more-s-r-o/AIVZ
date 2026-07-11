@@ -6,6 +6,7 @@ import {
   runStep, runAllSteps, getJobStatus, getCost, JobNotFoundError,
   type PipelineSteps, type StepName, type StepStatus, type CostSummary, type RunAllStatus,
 } from '../lib/api';
+import { pipelineObservationKey } from '../lib/pipeline-observation';
 
 // Kolik po sobě jdoucích síťových chyb pollu tolerujeme, než úlohu vzdáme (interval 2s → ~60s).
 const MAX_FAILED_POLLS = 30;
@@ -70,6 +71,8 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
   // Počítadlo po sobě jdoucích neúspěšných pollů — po překročení limitu úlohu vzdáme,
   // ať spinner netočí donekonečna při delším výpadku spojení.
   const failedPollsRef = useRef(0);
+  // Sleduj i stav, ne jen jobId: resume pokračuje pod stejným parent ID a přechod
+  // waiting_approval → running se proto musí znovu zpracovat po invalidaci status query.
   const observedRunAllRef = useRef<string | null>(null);
   const onStepCompleteRef = useRef(onStepComplete);
   onStepCompleteRef.current = onStepComplete;
@@ -83,8 +86,10 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
   // Po reloadu stránky se znovu připoj k perzistentnímu run-all jobu; terminální stav
   // zobraz rovnou z tender statusu, i když jej spustila jiná karta prohlížeče.
   useEffect(() => {
-    if (!runAll || observedRunAllRef.current === runAll.jobId) return;
-    observedRunAllRef.current = runAll.jobId;
+    if (!runAll) return;
+    const observationKey = pipelineObservationKey(runAll);
+    if (observedRunAllRef.current === observationKey) return;
+    observedRunAllRef.current = observationKey;
     if (runAll.status === 'queued' || runAll.status === 'running') {
       setActiveJobId(runAll.jobId);
       setActiveStep(runAll.currentStep ?? null);
@@ -236,7 +241,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
 
     try {
       const result = await runAllSteps(tenderId);
-      observedRunAllRef.current = result.jobId;
+      observedRunAllRef.current = pipelineObservationKey(result);
       setActiveJobId(result.jobId);
       if (result.currentStep) {
         setActiveStep(result.currentStep);

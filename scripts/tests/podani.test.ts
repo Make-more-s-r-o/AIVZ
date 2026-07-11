@@ -8,6 +8,10 @@ import {
   celkovaCenaZMatch,
   evidenceInputSchema,
   buildEvidence,
+  evidenceMatchesSubmission,
+  finalizeEvidenceConflict,
+  decideSubmissionRecord,
+  persistEvidenceAfterStatus,
   type ManifestFileEntry,
   type SubmissionManifest,
 } from '../src/lib/podani.js';
@@ -142,6 +146,53 @@ test('buildEvidence: přidá server timestamp a vazbu na balík', () => {
   assert.equal(ev.manifest_version, 3);
   assert.equal(ev.manifest_content_hash, 'abc123');
   assert.equal(ev.zaznamenano, '2026-07-11T10:05:00.000Z');
+});
+
+test('evidenceMatchesSubmission: stejné klíčové údaje jsou idempotentní', () => {
+  const manifest: SubmissionManifest = {
+    version: 1, content_hash: 'hash', created_at: '2026-01-01T00:00:00.000Z',
+    zip_filename: 'podani-v1.zip', files: [], celkova_cena_s_dph: null, vybrane_casti: null,
+  };
+  const input = { portal: 'NEN', cas_podani: '2026-07-11T10:00:00.000Z', evidencni_cislo: 'E-1' };
+  const existing = buildEvidence(input, manifest, '2026-07-11T10:05:00.000Z');
+  assert.equal(evidenceMatchesSubmission(existing as unknown as Record<string, unknown>, input, manifest), true);
+  assert.equal(evidenceMatchesSubmission(existing as unknown as Record<string, unknown>, { ...input, evidencni_cislo: 'E-2' }, manifest), false);
+});
+
+test('finalizeEvidenceConflict: existující evidence blokuje re-finalizaci', () => {
+  assert.match(finalizeEvidenceConflict(true) ?? '', /už byla podána/);
+  assert.equal(finalizeEvidenceConflict(false), null);
+});
+
+test('decideSubmissionRecord: podání je one-way a idempotentní jen se stejnou evidencí', () => {
+  assert.equal(decideSubmissionRecord('pripravena', false), 'create');
+  assert.equal(decideSubmissionRecord('odeslana', true), 'idempotent');
+  assert.equal(decideSubmissionRecord('odeslana', false), 'different_evidence');
+  assert.equal(decideSubmissionRecord('vyhodnocena', true), 'illegal_stage');
+  assert.equal(decideSubmissionRecord('vyhrano', true), 'illegal_stage');
+});
+
+test('persistEvidenceAfterStatus: DB předchází souboru', async () => {
+  const calls: string[] = [];
+  const result = await persistEvidenceAfterStatus({
+    setSubmitted: async () => { calls.push('db:odeslana'); },
+    writeEvidence: async () => { calls.push('fs:evidence'); },
+    restorePrepared: async () => { calls.push('db:pripravena'); },
+  });
+  assert.deepEqual(calls, ['db:odeslana', 'fs:evidence']);
+  assert.equal(result.ok, true);
+});
+
+test('persistEvidenceAfterStatus: chyba souboru spustí kompenzaci', async () => {
+  const calls: string[] = [];
+  const result = await persistEvidenceAfterStatus({
+    setSubmitted: async () => { calls.push('db:odeslana'); },
+    writeEvidence: async () => { calls.push('fs:evidence'); throw new Error('disk'); },
+    restorePrepared: async () => { calls.push('db:pripravena'); },
+  });
+  assert.deepEqual(calls, ['db:odeslana', 'fs:evidence', 'db:pripravena']);
+  assert.equal(result.ok, false);
+  assert.match(String(result.writeError), /disk/);
 });
 
 // --- Stavové přechody submission cockpitu ---

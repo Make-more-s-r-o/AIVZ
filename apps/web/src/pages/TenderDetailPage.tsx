@@ -886,7 +886,7 @@ function MetadataRail({
                 {inputScore != null ? `${inputScore}/100` : '—'}
               </span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Bid skóre — profit-aware hodnocení po nacenění (marže, zisk, kvalita shod, win-price).">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Bid skóre — profit-aware hodnocení po nacenění (přirážka z nákladů, zisk, kvalita shod, win-price).">
               <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', minWidth: 78 }}>Bid skóre</span>
               {bidScore == null ? (
                 <span style={{ fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>—</span>
@@ -913,7 +913,7 @@ function MetadataRail({
                 {fmtCZK(bidScore.zisk_kc)}
               </span>
             </RailField>
-            <RailField label="Marže">
+            <RailField label="Přirážka">
               <span className="tnum" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)', color: 'var(--text-primary)' }}>
                 {bidScore.marze_procent.toFixed(1)} %
               </span>

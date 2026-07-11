@@ -162,7 +162,7 @@ function CompanyForm({ company, onSave, onCancel }: CompanyFormProps) {
         <Field label="Bankovní účet" value={form.ucet} onChange={set('ucet')} placeholder="283090885/0300" />
         <Field label="Datová schránka" value={form.datova_schranka} onChange={set('datova_schranka')} placeholder="abc123" />
         <Field
-          label="Výchozí marže (%)"
+          label="Výchozí přirážka k nákupu (%)"
           value={form.default_marze_procent}
           onChange={(e) => setForm(prev => ({ ...prev, default_marze_procent: Number(e.target.value) }))}
           type="number"
@@ -242,7 +242,7 @@ function CompanyCard({ company, isEditing, onEdit, onDelete, onSaved }: CompanyC
           <div>
             <div className="font-medium" style={{ color: 'var(--text-primary)' }}>{company.nazev}</div>
             <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-              IČO: {company.ico} | {company.jednajici_osoba} | Výchozí marže: {company.default_marze_procent ?? 10} %
+              IČO: {company.ico} | {company.jednajici_osoba} | Výchozí přirážka: {company.default_marze_procent ?? 10} %
             </div>
           </div>
         </div>

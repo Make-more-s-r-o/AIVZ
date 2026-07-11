@@ -819,7 +819,7 @@ async function main() {
     console.warn('  Win-price historie není dostupná — bid skóre ji vynechá.');
   }
   productMatch.bid_score = scoreBid(analysis, productMatch, company, winBand);
-  console.log(`  Bid skóre: ${productMatch.bid_score.score}/100 (${productMatch.bid_score.doporuceni}), zisk ${Math.round(productMatch.bid_score.zisk_kc).toLocaleString('cs-CZ')} Kč, marže ${productMatch.bid_score.marze_procent} %`);
+  console.log(`  Bid skóre: ${productMatch.bid_score.score}/100 (${productMatch.bid_score.doporuceni}), zisk ${Math.round(productMatch.bid_score.zisk_kc).toLocaleString('cs-CZ')} Kč, přirážka ${productMatch.bid_score.marze_procent} %`);
 
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');

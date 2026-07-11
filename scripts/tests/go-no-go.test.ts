@@ -181,7 +181,14 @@ test('scoreBid: vysoký zisk + vysoká spolehlivost → GO', () => {
   assert.equal(result.doporuceni, 'GO');
   assert.ok(result.score >= 75, `score ${result.score}`);
   assert.equal(result.zisk_kc, 120_000); // (130k−100k)×4
-  assert.ok(result.marze_procent > 20 && result.marze_procent < 24);
+  assert.equal(result.marze_procent, 30);
+});
+
+test('scoreBid: nabídka přesně na cílové 10% přirážce není krácena na 9,1%', () => {
+  const match = bidMatch([pricedItem({ index: 0, nakupni: 100_000, nabidkova: 110_000 })]);
+  const result = scoreBid(analysis(), match, { default_marze_procent: 10 }, undefined);
+  assert.equal(result.marze_procent, 10);
+  assert.ok(result.duvody.some((d) => /Přirážka 10\.0 % z nákladů/i.test(d)), result.duvody.join(' | '));
 });
 
 test('scoreBid: nulová marže → srážka + důvod', () => {
@@ -193,7 +200,7 @@ test('scoreBid: nulová marže → srážka + důvod', () => {
   assert.equal(result.zisk_kc, 0);
   assert.equal(result.marze_procent, 0);
   assert.notEqual(result.doporuceni, 'GO');
-  assert.ok(result.duvody.some((d) => /marži/i.test(d)), result.duvody.join(' | '));
+  assert.ok(result.duvody.some((d) => /přirážku/i.test(d)), result.duvody.join(' | '));
 });
 
 test('scoreBid: HARD sanity flag → NOGO strop i při dobré ekonomice', () => {

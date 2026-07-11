@@ -37,15 +37,24 @@ import {
   canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, ACTIVE_ORDER, isTerminal,
   type StageKey, type StepFlags,
 } from './lib/stage-machine.js';
-import { computeSubmitGate } from './lib/submit-gate.js';
+import { computeSubmitGate, STALE_DOCUMENTS_MESSAGE } from './lib/submit-gate.js';
 import {
   sha256Hex, buildManifest, celkovaCenaZMatch, buildEvidence, evidenceInputSchema,
+  evidenceMatchesSubmission, finalizeEvidenceConflict, decideSubmissionRecord,
+  persistEvidenceAfterStatus,
   type ManifestFileEntry, type SubmissionManifest,
 } from './lib/podani.js';
 import { checkPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
 import { peekZipFileCount } from './lib/input-discovery.js';
 import { isStale } from './lib/stale-check.js';
+import { findUnconfirmedPrices } from './lib/price-confirmation.js';
+import {
+  UPLOAD_FILE_SIZE_LIMIT_BYTES,
+  ZIP_PEEK_SIZE_LIMIT_BYTES,
+  createUploadSizeLimiter,
+  exceedsUploadLimit,
+} from './lib/upload-limits.js';
 import {
   getTerminy, getAllTerminy, createTermin, updateTermin, deleteTermin, seedTerminy, getDueReminders, markReminded,
 } from './lib/terminy-store.js';
@@ -87,7 +96,9 @@ import {
   RUN_ALL_STEPS,
   ApprovalRequiredError,
   advanceRunAllChain,
+  claimWaitingApproval,
   loadPipelineJobs,
+  restoreWaitingApproval,
   savePipelineJobs,
   selectJobsToStart,
   type PipelineJob as Job,
@@ -277,7 +288,7 @@ const STEP_FILES: Record<string, string> = {
 
 /**
  * Vrátí počet položek s NEPOTVRZENOU cenou pro generate money-gate (a jejich názvy).
- * `null` = product-match.json chybí nebo je nečitelný → gate se řeší jinde (getStepGateError).
+ * `null` = product-match.json chybí nebo je nečitelný → fail-closed v každém volajícím.
  * Sdílené run-all řetězcem (pauza na waiting_approval) i resume endpointem (409 kontrola).
  */
 async function getUnconfirmedPrices(
@@ -286,13 +297,12 @@ async function getUnconfirmedPrices(
   try {
     const matchRaw = await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8');
     const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
-    if (matchData.polozky_match) {
-      const unconfirmed = matchData.polozky_match.filter((item) => !item.cenova_uprava?.potvrzeno);
-      return { count: unconfirmed.length, names: unconfirmed.map((item) => item.polozka_nazev) };
-    }
-    return matchData.cenova_uprava?.potvrzeno
-      ? { count: 0, names: [] }
-      : { count: 1, names: ['cenová kalkulace'] };
+    let selectedParts: Set<string> | null = null;
+    try {
+      const selection = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'parts-selection.json'), 'utf-8'));
+      selectedParts = new Set<string>(selection.selected_parts || []);
+    } catch { /* jednočástová zakázka nebo zatím bez výběru */ }
+    return findUnconfirmedPrices(matchData, selectedParts);
   } catch {
     return null;
   }
@@ -509,7 +519,10 @@ function startJob(job: Job) {
       // ho do waiting_approval (ApprovalRequiredError). Lidský checkpoint, ne chyba.
       if (nextStep === 'generate') {
         const pending = await getUnconfirmedPrices(job.tenderId);
-        if (pending && pending.count > 0) {
+        if (pending === null) {
+          throw new Error('Nelze ověřit potvrzení cen — product-match.json chybí nebo je poškozený.');
+        }
+        if (pending.count > 0) {
           throw new ApprovalRequiredError(
             pending.count,
             `Čeká na potvrzení cen (${pending.count}) v záložce Ocenění — pipeline pozastavena před generováním dokumentů.`,
@@ -569,6 +582,7 @@ function assignTenderId(req: express.Request, _res: express.Response, next: expr
 
 // File upload config
 const upload = multer({
+  limits: { fileSize: UPLOAD_FILE_SIZE_LIMIT_BYTES },
   storage: multer.diskStorage({
     destination: async (req, _file, cb) => {
       const tenderId = req.params.id || (req as any)._tenderId || `tender-${Date.now()}`;
@@ -1172,6 +1186,9 @@ async function buildZipInfo(
   const zipFiles = files.filter((f) => extname(f.originalname).toLowerCase() === '.zip');
   if (zipFiles.length === 0) return undefined;
   return Promise.all(zipFiles.map(async (f) => {
+    if (f.size > ZIP_PEEK_SIZE_LIMIT_BYTES) {
+      return { filename: f.filename, fileCount: null };
+    }
     try {
       const buf = await readFile(f.path);
       return { filename: f.filename, fileCount: peekZipFileCount(buf) };
@@ -1269,6 +1286,10 @@ app.post('/api/tenders/upload-url', async (req, res) => {
           errors.push(`${url}: HTTP ${response.status}`);
           continue;
         }
+        if (exceedsUploadLimit(response.headers.get('content-length'))) {
+          errors.push(`${url}: soubor překračuje limit 100 MB`);
+          continue;
+        }
 
         // Extract filename from URL or Content-Disposition header
         const disposition = response.headers.get('content-disposition');
@@ -1303,8 +1324,17 @@ app.post('/api/tenders/upload-url', async (req, res) => {
           errors.push(`${url}: empty response body`);
           continue;
         }
-        await pipeline(Readable.fromWeb(body as any), createWriteStream(filePath));
-        downloaded.push(filename);
+        try {
+          await pipeline(
+            Readable.fromWeb(body as any),
+            createUploadSizeLimiter(),
+            createWriteStream(filePath),
+          );
+          downloaded.push(filename);
+        } catch (error) {
+          await rm(filePath, { force: true }).catch(() => {});
+          errors.push(`${url}: ${String(error)}`);
+        }
       } catch (err) {
         errors.push(`${url}: ${String(err)}`);
       }
@@ -2352,7 +2382,7 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
 
   const existing = [...jobs.values()].find((job) =>
     job.tenderId === id && job.kind === 'pipeline'
-    && (job.status === 'running' || job.status === 'queued'));
+    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
   if (existing) {
     return res.json({ jobId: existing.id, status: existing.status, message: 'Pipeline already in progress' });
   }
@@ -2384,27 +2414,47 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
 app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   const { id } = req.params;
 
+  // Bez await mezi nalezením a změnou stavu: první request synchronně claimne parent job,
+  // druhý už waiting_approval neuvidí a nemůže zařadit duplicitní generate.
   const waiting = [...jobs.values()].find((job) =>
     job.tenderId === id && job.kind === 'pipeline' && job.status === 'waiting_approval');
   if (!waiting) {
+    const active = [...jobs.values()].find((job) =>
+      job.tenderId === id && job.kind === 'pipeline'
+      && (job.status === 'running' || job.status === 'queued'));
+    if (active) {
+      return res.status(409).json({
+        error: 'Pipeline už pokračuje; další resume by zdvojilo generování.',
+        jobId: active.id,
+      });
+    }
     return res.status(404).json({ error: 'Žádný pozastavený pipeline řetězec pro tuto zakázku.' });
   }
+  if (!claimWaitingApproval(waiting)) {
+    return res.status(409).json({ error: 'Pipeline už pokračuje.', jobId: waiting.id });
+  }
+  scheduleJobsPersist();
 
   // Ověř, že ceny jsou skutečně potvrzené (nespoléhej na FE) — money-gate se drží na serveru.
   const pending = await getUnconfirmedPrices(id);
-  if (pending && pending.count > 0) {
+  if (pending === null) {
+    const message = 'Nelze ověřit potvrzení cen — product-match.json chybí nebo je poškozený.';
+    restoreWaitingApproval(waiting, message);
+    scheduleJobsPersist();
+    return res.status(422).json({ error: message, jobId: waiting.id });
+  }
+  if (pending.count > 0) {
+    const message = `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`;
+    restoreWaitingApproval(waiting, message);
+    scheduleJobsPersist();
     return res.status(409).json({
-      error: `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`,
+      error: message,
       pendingCount: pending.count,
+      jobId: waiting.id,
     });
   }
 
   // Rozjeď řetězec: zařaď generate krok pod původní parent job (chain pokračuje generate→validate).
-  waiting.status = 'running';
-  waiting.currentStep = 'generate';
-  waiting.error = undefined;
-  waiting.failedStep = undefined;
-  waiting.finishedAt = undefined;
   enqueueStepJob(id, 'generate', waiting.id);
   scheduleJobsPersist();
 
@@ -2803,13 +2853,22 @@ async function buildSubmissionBundle(tenderId: string): Promise<{ manifest: Subm
 app.post('/api/tenders/:id/finalize', async (req, res) => {
   const { id } = req.params;
   if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const outputDir = join(OUTPUT_DIR, id);
+  const evidenceConflict = finalizeEvidenceConflict(existsSync(join(outputDir, 'podani', 'evidence.json')));
+  if (evidenceConflict) {
+    return res.status(409).json({
+      error: 'already_submitted',
+      reason: evidenceConflict,
+    });
+  }
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const gate = await computeSubmitGate(join(OUTPUT_DIR, id));
+    const gate = await computeSubmitGate(outputDir);
     if (!gate.ready) {
+      const stale = gate.problems.includes(STALE_DOCUMENTS_MESSAGE);
       return res.status(409).json({
-        error: 'not_ready',
-        reason: 'Nabídka není připravená k podání.',
+        error: stale ? 'stale_documents' : 'not_ready',
+        reason: stale ? STALE_DOCUMENTS_MESSAGE : 'Nabídka není připravená k podání.',
         problems: gate.problems,
         warnings: gate.warnings,
       });
@@ -2907,15 +2966,50 @@ app.post('/api/tenders/:id/podano', async (req, res) => {
     const done = stepsDone(pipeline.steps);
     const crm = await getStatus(id);
     const current = crm?.status ?? deriveStageFromSteps(done);
-    if (current !== 'odeslana') {
-      const check = canTransition(current, 'odeslana' as StageKey, done);
-      if (!check.ok) return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+    const existingEvidence = await readEvidence(outputDir);
+    const decision = decideSubmissionRecord(
+      current,
+      evidenceMatchesSubmission(existingEvidence, parsed.data, manifest),
+    );
+
+    // Jediná povolená opakovaná operace je přesně stejná evidence ve stavu Odeslaná.
+    if (decision === 'idempotent') {
+      return res.json({ success: true, status: 'odeslana', evidence: existingEvidence, idempotent: true });
     }
+    if (decision === 'different_evidence') {
+      return res.status(409).json({
+        error: 'different_evidence',
+        reason: 'Nabídka už byla podána s jinou evidencí — existující záznam nelze přepsat.',
+      });
+    }
+    if (decision === 'illegal_stage') {
+      return res.status(409).json({
+        error: 'illegal_transition',
+        reason: 'Podání lze zaznamenat pouze ze stavu Připravená. Pozdější stav nelze vrátit na Odeslaná.',
+      });
+    }
+    const check = canTransition(current, 'odeslana' as StageKey, done);
+    if (!check.ok) return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
 
     const evidence = buildEvidence(parsed.data, manifest, new Date().toISOString());
-    await mkdir(join(outputDir, 'podani'), { recursive: true });
-    await writeFile(join(outputDir, 'podani', 'evidence.json'), JSON.stringify(evidence, null, 2));
-    if (current !== 'odeslana') await setStatus(id, 'odeslana' as StageKey);
+    // Nejprve autoritativní CRM stav. Soubor zapisujeme až potom; při selhání se pokusíme
+    // stav kompenzačně vrátit, aby osiřelá evidence nevytvářela falešné „Odesláno“.
+    const persistence = await persistEvidenceAfterStatus({
+      setSubmitted: () => setStatus(id, 'odeslana' as StageKey),
+      writeEvidence: async () => {
+        await mkdir(join(outputDir, 'podani'), { recursive: true });
+        await writeFile(join(outputDir, 'podani', 'evidence.json'), JSON.stringify(evidence, null, 2));
+      },
+      restorePrepared: () => setStatus(id, 'pripravena' as StageKey),
+    });
+    if (!persistence.ok) {
+      return res.status(500).json({
+        error: 'evidence_write_failed',
+        reason: persistence.compensationError
+          ? `Evidence podání se nezapsala a nepodařilo se vrátit CRM stav na Připravená. Nutný ruční zásah. Zápis: ${String(persistence.writeError)}; kompenzace: ${String(persistence.compensationError)}`
+          : `Evidence podání se nezapsala; CRM stav byl vrácen na Připravená. Podání zaznamenejte znovu. ${String(persistence.writeError)}`,
+      });
+    }
 
     const actor = (req as any).user?.sub ?? null;
     const actorName = (req as any).user?.name ?? null;

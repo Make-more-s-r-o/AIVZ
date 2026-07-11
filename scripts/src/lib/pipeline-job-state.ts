@@ -33,6 +33,30 @@ export interface PipelineJob {
   failedStep?: PipelineStep;
 }
 
+/**
+ * Synchronně rezervuje pauznutý parent job pro jediný resume požadavek.
+ * Volající mezi nalezením jobu a touto změnou nesmí provést await; v jednom Node procesu
+ * tak druhý souběžný request už neuvidí waiting_approval a nezařadí druhý generate.
+ */
+export function claimWaitingApproval(job: PipelineJob): boolean {
+  if (job.kind !== 'pipeline' || job.status !== 'waiting_approval') return false;
+  job.status = 'running';
+  job.currentStep = 'generate';
+  job.error = undefined;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+  return true;
+}
+
+/** Vrátí neúspěšně ověřený claim do stavu, ve kterém ho může operátor opravit a zopakovat. */
+export function restoreWaitingApproval(job: PipelineJob, error: string): void {
+  job.status = 'waiting_approval';
+  job.currentStep = 'generate';
+  job.error = error;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+}
+
 interface PersistedJobFile {
   version: 1;
   jobs: PipelineJob[];

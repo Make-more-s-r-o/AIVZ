@@ -77,6 +77,11 @@ export interface InboxEntry {
 // Alarm okno: připravený nepodaný balík s lhůtou do 48 hodin (i po lhůtě).
 const ALARM_WINDOW_HOURS = 48;
 
+/** Evidence zhasíná alarm jen tehdy, když CRM potvrzuje podání nebo jeho pozdější výsledek. */
+export function hasValidSubmissionEvidence(crmStav: string | null | undefined, evidenceExists: boolean): boolean {
+  return evidenceExists && ['odeslana', 'vyhodnocena', 'vyhrano', 'prohrano'].includes(crmStav ?? '');
+}
+
 // Hodin do lhůty podání z ISO řetězce vůči referenčnímu „teď". Null když nevalidní.
 function hoursUntil(lhutaNabidek: string | null | undefined, nowMs: number): number | null {
   if (!lhutaNabidek) return null;
@@ -153,9 +158,10 @@ export function computeInboxEntry(input: InboxTenderInput): InboxEntry {
 
   // Deadline alarm: připravený balík, který ještě nikdo nepodal, a lhůta se blíží/uplynula.
   const hodin_do_lhuty = hoursUntil(input.lhutaNabidek, input.nowMs ?? Date.now());
+  const validEvidence = hasValidSubmissionEvidence(input.crmStav, input.evidenceExistuje === true);
   const deadline_alarm = Boolean(
     input.balikExistuje &&
-    !input.evidenceExistuje &&
+    !validEvidence &&
     input.crmStav === 'pripravena' &&
     hodin_do_lhuty !== null &&
     hodin_do_lhuty <= ALARM_WINDOW_HOURS,

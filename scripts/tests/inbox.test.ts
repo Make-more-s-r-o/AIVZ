@@ -204,6 +204,32 @@ test('deadline_alarm: zaznamenané podání (evidence) → bez alarmu', () => {
   assert.equal(e.deadline_alarm, false);
 });
 
+test('deadline_alarm: osiřelá evidence bez CRM stavu Odeslaná alarm nevypne', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm-orphan',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: true,
+    evidenceExistuje: true,
+    lhutaNabidek: '2026-07-12T00:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, true);
+});
+
+test('deadline_alarm: evidence zůstává platná v pozdějším výsledkovém stavu', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm-result',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'vyhrano',
+    balikExistuje: true,
+    evidenceExistuje: true,
+    lhutaNabidek: '2026-07-12T00:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, false);
+});
+
 test('deadline_alarm: bez balíku → bez alarmu i s blízkou lhůtou', () => {
   const e = computeInboxEntry({
     tenderId: 'alarm4',

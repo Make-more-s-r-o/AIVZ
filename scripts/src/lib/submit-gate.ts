@@ -9,11 +9,12 @@
  *  - field-validaci vygenerovaných dokumentů (musí projít),
  *  - zbytkové placeholdery ve vygenerovaných .docx ("doplní účastník", "______").
  */
-import { readFile, readdir } from 'fs/promises';
+import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import type { ProductMatch, PolozkaMatch } from './types.js';
 import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
+import { isStale } from './stale-check.js';
 import {
   assertPartsSelectionUnchanged,
   hasPartsSelectionSnapshot,
@@ -25,6 +26,8 @@ export interface SubmitGateResult {
   problems: string[];
   warnings: string[];
 }
+
+export const STALE_DOCUMENTS_MESSAGE = 'Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování a Kontrolu.';
 
 /**
  * Vrátí množinu vybraných částí (parts-selection.json). Null = zakázka bez částí (jedna
@@ -54,6 +57,7 @@ function filterBySelectedParts(items: PolozkaMatch[], selected: Set<string> | nu
 export async function computeSubmitGate(outputDir: string): Promise<SubmitGateResult> {
   const problems: string[] = [];
   const warnings: string[] = [];
+  let pricesUpdatedAt: string | null = null;
 
   // Cenové kontroly pro multi-item zakázky vždy přepočítáme z aktuálních dat.
   let productMatchRaw: string | null = null;
@@ -72,6 +76,9 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
       // Poškozený product-match.json NESMÍ tiše propustit money gate (fail-closed).
       return { ready: false, problems: [`Nelze načíst cenová data (product-match.json je poškozený): ${err}`], warnings };
     }
+    pricesUpdatedAt = typeof (pm as any).prices_updated_at === 'string'
+      ? (pm as any).prices_updated_at
+      : null;
     const allItems = pm.polozky_match || [];
     if (hasPartsSelectionSnapshot(pm)) {
       try {
@@ -106,6 +113,27 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
         `${unconfirmed.length} z ${items.length} položek nemá potvrzenou cenu` +
         `${unconfirmed.length > 5 ? ` (mj. ${preview}, …)` : ` (${preview})`}.`,
       );
+    }
+  }
+
+  // Stejný freshness princip jako GET status: poslední změna ceny nesmí být novější
+  // než nejstarší dokument z generované dávky. Jinak by závazný ZIP obsahoval staré ceny.
+  if (pricesUpdatedAt) {
+    try {
+      const generated = (await readdir(outputDir))
+        .filter((file) => ['.docx', '.xlsx', '.pdf'].some((ext) => file.toLowerCase().endsWith(ext)));
+      let oldestDocumentMs: number | null = null;
+      for (const file of generated) {
+        const fileStat = await stat(join(outputDir, file));
+        if (oldestDocumentMs === null || fileStat.mtimeMs < oldestDocumentMs) {
+          oldestDocumentMs = fileStat.mtimeMs;
+        }
+      }
+      if (isStale(oldestDocumentMs, pricesUpdatedAt)) {
+        problems.push(STALE_DOCUMENTS_MESSAGE);
+      }
+    } catch {
+      // Chybějící dokumenty řeší field-validace; freshness zde nevyrábí falešné pozitivum.
     }
   }
 

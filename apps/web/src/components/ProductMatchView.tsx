@@ -24,6 +24,7 @@ import { getErrorMessage } from '../types/tender';
 import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, OvereniCeny, PriceOverride } from '../types/tender';
 import { safeHttpUrl } from '../lib/url';
 import { calculateItemPrice, roundCurrency, DEFAULT_MARZE_PROCENT } from '../lib/price-calculator';
+import { invalidatePriceDerivedQueries } from '../lib/product-match-invalidation';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -355,7 +356,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
 
   const handleConfirm = useCallback(async (priceData: PriceOverrideData) => {
     await updatePriceOverride(tenderId, priceData);
-    queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+    await invalidatePriceDerivedQueries(queryClient, tenderId);
   }, [tenderId, queryClient]);
 
   // Legacy single-product: itemIndex se na backendu ignoruje, posíláme -1 (konvence jako verify-prices).
@@ -364,7 +365,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
     setSelecting(true);
     try {
       const { priceCleared } = await selectProductCandidate(tenderId, -1, candidateIndex);
-      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      await invalidatePriceDerivedQueries(queryClient, tenderId);
       if (priceCleared) toast('Vybrán jiný produkt — cenu je potřeba znovu potvrdit', 'info');
     } catch (err: unknown) {
       toast(getErrorMessage(err), 'danger');
@@ -483,7 +484,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
 
   const handleItemConfirm = useCallback(async (itemIndex: number, priceData: PriceOverrideData) => {
     await updateItemPriceOverride(tenderId, itemIndex, priceData);
-    queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+    await invalidatePriceDerivedQueries(queryClient, tenderId);
   }, [tenderId, queryClient]);
 
   // Ruční přepnutí kandidáta. Klíčujeme přes `polozka_index` (ne pozici v poli) — backend hledá
@@ -493,7 +494,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
     setSelectingItem(polozkaIndex);
     try {
       const { priceCleared } = await selectProductCandidate(tenderId, polozkaIndex, candidateIndex);
-      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      await invalidatePriceDerivedQueries(queryClient, tenderId);
       if (priceCleared) toast('Vybrán jiný produkt — cenu je potřeba znovu potvrdit', 'info');
     } catch (err: unknown) {
       toast(getErrorMessage(err), 'danger');
@@ -586,7 +587,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
         return next;
       });
       setSelected(new Set());
-      queryClient.invalidateQueries({ queryKey: ['product-match', tenderId] });
+      await invalidatePriceDerivedQueries(queryClient, tenderId);
       const skippedParts = [
         skippedHard > 0 ? `${skippedHard} přeskočeno — blokující cenový nález` : null,
         skippedWithoutPrice > 0 ? `${skippedWithoutPrice} přeskočeno — bez ceny` : null,
@@ -601,6 +602,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
             onClick: async () => {
               try {
                 await resumeRunAll(tenderId);
+                await queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
                 toast('Generování dokumentů spuštěno.', 'success');
               } catch (err: unknown) {
                 toast(getErrorMessage(err), 'danger');
@@ -672,7 +674,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
             s DPH: {totalSdph.toLocaleString('cs-CZ')} Kč
           </div>
           <div className="text-xs font-medium text-gray-600">
-            Celková marže: {totalMarzeKc.toLocaleString('cs-CZ')} Kč ({totalMarzeProcent.toLocaleString('cs-CZ')} %)
+            Celková přirážka: {totalMarzeKc.toLocaleString('cs-CZ')} Kč ({totalMarzeProcent.toLocaleString('cs-CZ')} % z nákladů)
           </div>
         </div>
       </div>

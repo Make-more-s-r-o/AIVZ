@@ -156,3 +156,71 @@ export function buildEvidence(input: EvidenceInput, manifest: SubmissionManifest
     manifest_content_hash: manifest.content_hash,
   };
 }
+
+/**
+ * Idempotence POST /podano: serverové `zaznamenano` se neporovnává, ale uživatelská
+ * klíčová pole a vazba na immutable manifest musejí být shodné.
+ */
+export function evidenceMatchesSubmission(
+  existing: Record<string, unknown> | null,
+  input: EvidenceInput,
+  manifest: SubmissionManifest,
+): boolean {
+  if (!existing) return false;
+  return existing.portal === input.portal
+    && existing.cas_podani === input.cas_podani
+    && (existing.evidencni_cislo ?? undefined) === input.evidencni_cislo
+    && (existing.poznamka ?? undefined) === input.poznamka
+    && existing.manifest_version === manifest.version
+    && existing.manifest_content_hash === manifest.content_hash;
+}
+
+export const ALREADY_SUBMITTED_FINALIZE_MESSAGE =
+  'Nabídka už byla podána — nový balík nelze připravit. Pro novou verzi použij novou zakázku/revizi.';
+
+/** Čistý H2 guard před finalizací; null znamená, že lze pokračovat submit-gatem. */
+export function finalizeEvidenceConflict(evidenceExists: boolean): string | null {
+  return evidenceExists ? ALREADY_SUBMITTED_FINALIZE_MESSAGE : null;
+}
+
+export type SubmissionRecordDecision =
+  | 'create'
+  | 'idempotent'
+  | 'different_evidence'
+  | 'illegal_stage';
+
+/** One-way rozhodnutí POST /podano bez závislosti na Expressu nebo DB. */
+export function decideSubmissionRecord(currentStage: string, sameEvidence: boolean): SubmissionRecordDecision {
+  if (currentStage === 'pripravena') return 'create';
+  if (currentStage === 'odeslana') return sameEvidence ? 'idempotent' : 'different_evidence';
+  return 'illegal_stage';
+}
+
+export interface EvidencePersistenceResult {
+  ok: boolean;
+  writeError?: unknown;
+  compensationError?: unknown;
+}
+
+/**
+ * Vynutí pořadí DB → evidence.json. Když druhý krok selže, provede best-effort
+ * kompenzaci DB zpět na Připravená a vrátí obě případné chyby volajícímu.
+ */
+export async function persistEvidenceAfterStatus(deps: {
+  setSubmitted: () => Promise<unknown>;
+  writeEvidence: () => Promise<unknown>;
+  restorePrepared: () => Promise<unknown>;
+}): Promise<EvidencePersistenceResult> {
+  await deps.setSubmitted();
+  try {
+    await deps.writeEvidence();
+    return { ok: true };
+  } catch (writeError) {
+    try {
+      await deps.restorePrepared();
+      return { ok: false, writeError };
+    } catch (compensationError) {
+      return { ok: false, writeError, compensationError };
+    }
+  }
+}

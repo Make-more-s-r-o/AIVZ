@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import PizZip from 'pizzip';
 
-import { peekZipFileCount } from '../src/lib/input-discovery.js';
+import { peekZipFileCount, shouldPeekZipFile } from '../src/lib/input-discovery.js';
+import { ZIP_PEEK_SIZE_LIMIT_BYTES } from '../src/lib/upload-limits.js';
 
 function buildZip(entries: Record<string, string>): Buffer {
   const zip = new PizZip();
@@ -39,4 +40,9 @@ test('peekZipFileCount: soubory ve vnořené složce se počítají', () => {
     'ZD komplet/priloha/smlouva.doc': 'b',
   });
   assert.equal(peekZipFileCount(buf), 2);
+});
+
+test('ZIP náhled: archiv nad 50 MB se přeskočí před načtením', () => {
+  assert.equal(shouldPeekZipFile(ZIP_PEEK_SIZE_LIMIT_BYTES), true);
+  assert.equal(shouldPeekZipFile(ZIP_PEEK_SIZE_LIMIT_BYTES + 1), false);
 });
