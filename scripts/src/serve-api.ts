@@ -5,7 +5,7 @@ import archiver from 'archiver';
 import { readFile, readdir, mkdir, stat, writeFile, rm, rename } from 'fs/promises';
 import { getCostSummary } from './lib/cost-tracker.js';
 import { join, extname, basename } from 'path';
-import { existsSync, createWriteStream } from 'fs';
+import { existsSync, createWriteStream, createReadStream } from 'fs';
 import { spawn } from 'child_process';
 import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
@@ -34,9 +34,14 @@ import {
   getTask, getTasks, getMyTasks, getTaskCounts, createTask, updateTask, deleteTask, seedChecklist,
 } from './lib/crm-store.js';
 import {
-  canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, type StageKey, type StepFlags,
+  canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, ACTIVE_ORDER, isTerminal,
+  type StageKey, type StepFlags,
 } from './lib/stage-machine.js';
 import { computeSubmitGate } from './lib/submit-gate.js';
+import {
+  sha256Hex, buildManifest, celkovaCenaZMatch, buildEvidence, evidenceInputSchema,
+  type ManifestFileEntry, type SubmissionManifest,
+} from './lib/podani.js';
 import { checkPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
 import {
@@ -1068,13 +1073,23 @@ app.get('/api/inbox', async (req, res) => {
           readInboxJson(OUTPUT_DIR, tenderId, 'validation-report.json'),
         ]);
         const reads = [analysis, productMatch, validation];
+        // Submission cockpit: existence balíku a evidence pro deadline alarm.
+        const outputDir = join(OUTPUT_DIR, tenderId);
+        const [balikExistuje, evidenceExistuje] = await Promise.all([
+          stat(join(outputDir, 'podani', 'manifest.json')).then(() => true, () => false),
+          stat(join(outputDir, 'podani', 'evidence.json')).then(() => true, () => false),
+        ]);
+        const analysisData = analysis.state === 'ok' ? (analysis.data as any) : null;
         return {
           tenderId,
-          analysis: analysis.state === 'ok' ? analysis.data : null,
+          analysis: analysisData,
           productMatch: productMatch.state === 'ok' ? productMatch.data : null,
           validation: validation.state === 'ok' ? validation.data : null,
           dataErrors: reads.filter((read) => read.state === 'corrupt').map((read) => read.filename),
           crmStav: crmStatuses.get(tenderId)?.status ?? null,
+          balikExistuje,
+          evidenceExistuje,
+          lhutaNabidek: analysisData?.terminy?.lhuta_nabidek ?? null,
         };
       }),
     );
@@ -2509,8 +2524,116 @@ app.post('/api/tenders/:id/tasks/seed', async (req, res) => {
   }
 });
 
-// POST finalize — gate na kompletní podatelnou nabídku, pak přechod pripravena→odeslana.
-// FE po úspěchu stáhne kompletní balík přes existující GET /download/bundle.
+// --- Submission cockpit (balík podání + evidence) ---
+// Adresář podani/ v outputu zakázky drží immutable ZIP balík (verzovaný), manifest.json
+// (sha256 každého souboru + celkový content_hash + cena) a po podání evidence.json.
+const PODANI_DOC_EXTS = ['.docx', '.xlsx', '.pdf'];
+
+/** Vybrané části vícečástové zakázky (null = jednočástová / bez výběru). */
+async function readSelectedParts(outputDir: string): Promise<string[] | null> {
+  try {
+    const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
+    const arr = Array.isArray(sel?.selected_parts)
+      ? sel.selected_parts.filter((x: unknown): x is string => typeof x === 'string')
+      : null;
+    return arr && arr.length > 0 ? arr : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readSubmissionManifest(outputDir: string): Promise<SubmissionManifest | null> {
+  try {
+    return JSON.parse(await readFile(join(outputDir, 'podani', 'manifest.json'), 'utf-8')) as SubmissionManifest;
+  } catch {
+    return null;
+  }
+}
+
+async function readEvidence(outputDir: string): Promise<Record<string, unknown> | null> {
+  try {
+    return JSON.parse(await readFile(join(outputDir, 'podani', 'evidence.json'), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/** Zapíše ZIP balík z bufferů (deterministické pořadí řeší volající). */
+function writeSubmissionZip(zipPath: string, contents: Array<{ name: string; buf: Buffer }>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const out = createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    out.on('close', () => resolve());
+    out.on('error', reject);
+    archive.on('error', reject);
+    archive.pipe(out);
+    for (const c of contents) archive.append(c.buf, { name: c.name });
+    archive.finalize();
+  });
+}
+
+/**
+ * Vytvoří / recykluje immutable balík podání pro zakázku. Sesbírá vygenerované dokumenty
+ * + kvalifikační přílohy, spočítá sha256, sestaví manifest a rozhodne verzi: nezměněný
+ * obsah → recyklace stávajícího balíku, změna → nová verze (podani-v{N}.zip).
+ */
+async function buildSubmissionBundle(tenderId: string): Promise<{ manifest: SubmissionManifest; reused: boolean }> {
+  const outputDir = join(OUTPUT_DIR, tenderId);
+  const podaniDir = join(outputDir, 'podani');
+
+  const allFiles = await readdir(outputDir);
+  const docFiles = allFiles
+    .filter((f) => PODANI_DOC_EXTS.some((ext) => f.toLowerCase().endsWith(ext)))
+    .sort((a, b) => a.localeCompare(b));
+
+  // Kvalifikační přílohy patří do podaného balíku (jsou součástí nabídky).
+  let attachmentFiles: string[] = [];
+  const prilohyDir = join(outputDir, 'prilohy');
+  try {
+    attachmentFiles = (await readdir(prilohyDir)).filter((f) => !f.startsWith('.')).sort((a, b) => a.localeCompare(b));
+  } catch {}
+
+  const contents: Array<{ name: string; buf: Buffer }> = [];
+  for (const f of docFiles) contents.push({ name: f, buf: await readFile(join(outputDir, f)) });
+  for (const f of attachmentFiles) contents.push({ name: `prilohy/${f}`, buf: await readFile(join(prilohyDir, f)) });
+
+  const fileEntries: ManifestFileEntry[] = contents.map((c) => ({
+    name: c.name,
+    sha256: sha256Hex(c.buf),
+    size: c.buf.length,
+  }));
+
+  const selectedParts = await readSelectedParts(outputDir);
+  let celkovaCena: number | null = null;
+  try {
+    const pm = JSON.parse(await readFile(join(outputDir, 'product-match.json'), 'utf-8'));
+    celkovaCena = celkovaCenaZMatch(pm, selectedParts);
+  } catch {}
+
+  const previous = await readSubmissionManifest(outputDir);
+  const { manifest, reused } = buildManifest({
+    files: fileEntries,
+    celkovaCena,
+    vybraneCasti: selectedParts,
+    previous,
+    createdAt: new Date().toISOString(),
+  });
+
+  await mkdir(podaniDir, { recursive: true });
+  const zipPath = join(podaniDir, manifest.zip_filename);
+  // Immutabilita: existující ZIP nepřepisujeme; zapisujeme jen novou verzi (nebo když chybí).
+  if (!reused || !existsSync(zipPath)) {
+    await writeSubmissionZip(zipPath, contents);
+  }
+  // manifest.json vždy ukazuje na poslední (aktuální) balík.
+  await writeFile(join(podaniDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+  return { manifest, reused };
+}
+
+// POST finalize — gate na kompletní podatelnou nabídku, pak vytvoří IMMUTABILNÍ balík
+// podání (ZIP + manifest se sha256) a přepne zakázku maximálně na 'pripravena'.
+// NEPŘEPÍNÁ na 'odeslana' — to dělá až POST /podano se skutečnou evidencí podání.
 app.post('/api/tenders/:id/finalize', async (req, res) => {
   const { id } = req.params;
   if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
@@ -2525,19 +2648,119 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
         warnings: gate.warnings,
       });
     }
+
+    // Immutable balík + manifest.
+    const { manifest, reused } = await buildSubmissionBundle(id);
+
+    // Stav: posun jen dopředu na 'pripravena' (z pozdějších/terminálních stavů nesnižujeme).
     const pipeline = await getPipelineStatus(id);
     const done = stepsDone(pipeline.steps);
     const crm = await getStatus(id);
     const current = crm?.status ?? deriveStageFromSteps(done);
-    const check = canTransition(current, 'odeslana' as StageKey, done);
-    if (!check.ok) {
-      return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+    let status: StageKey = current;
+    const preparedIdx = ACTIVE_ORDER.indexOf('pripravena');
+    const currentIdx = ACTIVE_ORDER.indexOf(current);
+    if (!isTerminal(current) && currentIdx >= 0 && currentIdx < preparedIdx) {
+      const check = canTransition(current, 'pripravena' as StageKey, done);
+      if (!check.ok) return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+      await setStatus(id, 'pripravena' as StageKey);
+      status = 'pripravena';
     }
-    await setStatus(id, 'odeslana' as StageKey);
+
     const actor = (req as any).user?.sub ?? null;
     const actorName = (req as any).user?.name ?? null;
-    await logActivity(id, 'finalized', actor, { actor_name: actorName });
-    res.json({ success: true, status: 'odeslana', warnings: gate.warnings });
+    await logActivity(id, 'balik_pripraven', actor, {
+      actor_name: actorName, verze: manifest.version, content_hash: manifest.content_hash, reused,
+    });
+    res.json({ success: true, status, reused, warnings: gate.warnings, manifest });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET stav podání zakázky — manifest immutable balíku + případná evidence (public GET, resilientní).
+app.get('/api/tenders/:id/podani', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const [manifest, evidence] = await Promise.all([readSubmissionManifest(outputDir), readEvidence(outputDir)]);
+    res.json({ manifest, evidence });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET stažení aktuálního balíku podání (verzovaný ZIP dle manifestu).
+app.get('/api/tenders/:id/podani/download', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const manifest = await readSubmissionManifest(outputDir);
+    if (!manifest) return res.status(404).json({ error: 'no_bundle' });
+    const zipPath = join(outputDir, 'podani', manifest.zip_filename);
+    if (!existsSync(zipPath)) return res.status(404).json({ error: 'bundle_file_missing' });
+    let zipName = id;
+    try {
+      const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+      if (meta.name) zipName = meta.name.replace(/[^a-zA-Z0-9À-ɏ _-]/g, '').substring(0, 60);
+    } catch {}
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(zipName)}_podani_v${manifest.version}.zip"`,
+    );
+    await pipeline(createReadStream(zipPath), res);
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST podano — teprve zápis evidence podání (portál, čas, evidenční číslo) přepne
+// zakázku na 'odeslana'. Vyžaduje existující balík (manifest).
+app.post('/api/tenders/:id/podano', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  const parsed = evidenceInputSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_input', detail: parsed.error.flatten() });
+  }
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const manifest = await readSubmissionManifest(outputDir);
+    if (!manifest) {
+      return res.status(409).json({
+        error: 'no_bundle',
+        reason: 'Balík podání neexistuje — nejprve připravte balík (Finalizace).',
+      });
+    }
+
+    const pipeline = await getPipelineStatus(id);
+    const done = stepsDone(pipeline.steps);
+    const crm = await getStatus(id);
+    const current = crm?.status ?? deriveStageFromSteps(done);
+    if (current !== 'odeslana') {
+      const check = canTransition(current, 'odeslana' as StageKey, done);
+      if (!check.ok) return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
+    }
+
+    const evidence = buildEvidence(parsed.data, manifest, new Date().toISOString());
+    await mkdir(join(outputDir, 'podani'), { recursive: true });
+    await writeFile(join(outputDir, 'podani', 'evidence.json'), JSON.stringify(evidence, null, 2));
+    if (current !== 'odeslana') await setStatus(id, 'odeslana' as StageKey);
+
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await logActivity(id, 'podano', actor, {
+      actor_name: actorName,
+      portal: evidence.portal,
+      evidencni_cislo: evidence.evidencni_cislo ?? null,
+      cas_podani: evidence.cas_podani,
+      verze: manifest.version,
+    });
+    res.json({ success: true, status: 'odeslana', evidence });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
