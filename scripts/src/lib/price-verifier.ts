@@ -13,7 +13,13 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { resolveModelId, getModelPricing } from './ai-client.js';
 import { logCost } from './cost-tracker.js';
-import type { ProductMatch, ProductCandidate, PolozkaMatch } from './types.js';
+import type {
+  ProductMatch,
+  ProductCandidate,
+  PolozkaMatch,
+  OvereniCeny as StoredOvereniCeny,
+  WebPriceSource,
+} from './types.js';
 
 config({ path: new URL('../../../.env', import.meta.url).pathname });
 
@@ -33,19 +39,8 @@ const client = new Anthropic({
 // ----------------------------------------------------------------------------
 // Veřejný kontrakt uloženého návrhu (FE na tomto poli staví)
 // ----------------------------------------------------------------------------
-export interface OvereniCeny {
-  stav: 'nalezeno' | 'nenalezeno' | 'chyba';
-  web_cena_bez_dph?: number;
-  web_cena_s_dph?: number;
-  mena?: string;
-  zdroj_url?: string;
-  dodavatel?: string;
-  dostupnost?: string;
-  poznamka?: string;
-  overeno_at: string; // ISO
-  // true, pokud web_cena_s_dph > cena_max_s_dph položky (cenový strop)
-  prekracuje_strop?: boolean;
-}
+export type OvereniCeny = StoredOvereniCeny;
+export type { WebPriceSource };
 
 export interface VerifyInput {
   vyrobce: string;
@@ -105,12 +100,14 @@ const PRICE_VERIFY_SYSTEM = `Jsi asistent nákupčího ve veřejných zakázkác
 Pravidla:
 - Hledej výhradně v českých e-shopech (ceny v Kč, doména .cz).
 - Najdi konkrétní produkt podle výrobce a modelu. Pokud přesný model nenajdeš, vrať nalezeno=false (neodhaduj cenu jiného produktu).
-- Preferuj e-shop, kde je produkt skladem a s jasně uvedenou cenou.
+- Najdi až 3 různé nákupní zdroje. Preferuj e-shopy, kde je produkt skladem a s jasně uvedenou cenou.
 - Uveď cenu bez DPH i s DPH, pokud to jde (české e-shopy běžně uvádějí obojí; sazba DPH je 21 %).
-- Vrať přímý odkaz na konkrétní produktovou stránku (zdroj_url), ne odkaz na výsledky vyhledávání.
+- U každého zdroje vrať přímý odkaz na konkrétní produktovou stránku, ne odkaz na výsledky vyhledávání.
+- Zdroje seřaď od nejlevnějšího podle ceny s DPH. Neopakuj stejnou URL.
 
 Odpověz VÝHRADNĚ jedním JSON objektem jako ÚPLNĚ POSLEDNÍ blok textu, bez jakéhokoli komentáře za ním, přesně v tomto tvaru:
-{"nalezeno": true|false, "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "mena": "CZK", "zdroj_url": "https://...", "dodavatel": "název e-shopu", "dostupnost": "skladem|na dotaz|není skladem|neznámá", "poznamka": "krátká poznámka"}
+{"nalezeno": true|false, "mena": "CZK", "zdroje": [{"url": "https://...", "dodavatel": "název e-shopu", "cena_bez_dph": číslo|null, "cena_s_dph": číslo|null, "dostupnost": "skladem|na dotaz|není skladem|neznámá", "poznamka": "krátká poznámka"}], "poznamka": "volitelná souhrnná poznámka"}
+Když přesný produkt nenajdeš, vrať {"nalezeno": false, "mena": "CZK", "zdroje": [], "poznamka": "důvod"}.
 Ceny uváděj jako čistá čísla bez měny a mezer (např. 3509, ne "3 509 Kč").`;
 
 function buildUserMessage(input: VerifyInput): string {
@@ -132,6 +129,19 @@ function buildUserMessage(input: VerifyInput): string {
 // ----------------------------------------------------------------------------
 
 // Lenient schéma — čísla/booleany přijímáme i jako string, dočistíme níže
+const RawWebPriceSourceSchema = z
+  .object({
+    url: z.union([z.string(), z.null()]).optional(),
+    // Tolerujeme i starší pojmenování, pokud ho model navzdory promptu použije.
+    zdroj_url: z.union([z.string(), z.null()]).optional(),
+    dodavatel: z.union([z.string(), z.null()]).optional(),
+    cena_bez_dph: z.union([z.number(), z.string(), z.null()]).optional(),
+    cena_s_dph: z.union([z.number(), z.string(), z.null()]).optional(),
+    dostupnost: z.union([z.string(), z.null()]).optional(),
+    poznamka: z.union([z.string(), z.null()]).optional(),
+  })
+  .passthrough();
+
 const RawWebPriceSchema = z
   .object({
     nalezeno: z.union([z.boolean(), z.string()]).optional(),
@@ -142,6 +152,7 @@ const RawWebPriceSchema = z
     dodavatel: z.union([z.string(), z.null()]).optional(),
     dostupnost: z.union([z.string(), z.null()]).optional(),
     poznamka: z.union([z.string(), z.null()]).optional(),
+    zdroje: z.array(RawWebPriceSourceSchema).optional(),
   })
   .passthrough();
 
@@ -214,6 +225,137 @@ function cleanUrl(v: unknown): string | undefined {
   return /^https?:\/\//i.test(s) ? s : undefined;
 }
 
+type RawWebPriceSource = z.infer<typeof RawWebPriceSourceSchema>;
+
+/** Normalizuje jeden AI nález. Bez bezpečné URL nebo bez ceny nejde o nákupní zdroj. */
+function normalizeSource(raw: RawWebPriceSource): WebPriceSource | null {
+  const url = cleanUrl(raw.url ?? raw.zdroj_url);
+  const cenaBezDph = coerceNumber(raw.cena_bez_dph);
+  const cenaSdph = coerceNumber(raw.cena_s_dph);
+  if (!url || (cenaBezDph === undefined && cenaSdph === undefined)) return null;
+
+  return {
+    url,
+    dodavatel: cleanStr(raw.dodavatel) ?? null,
+    cena_bez_dph: cenaBezDph ?? null,
+    cena_s_dph: cenaSdph ?? null,
+    dostupnost: cleanStr(raw.dostupnost) ?? null,
+    poznamka: cleanStr(raw.poznamka) ?? null,
+  };
+}
+
+/** Srovnávací cena s DPH; chybějící protějšek dopočítáme pouze pro řazení. */
+function sourceGrossPrice(source: WebPriceSource): number {
+  return source.cena_s_dph ?? (source.cena_bez_dph !== null ? source.cena_bez_dph * 1.21 : Number.POSITIVE_INFINITY);
+}
+
+/**
+ * Čistý parser odpovědi AI, exportovaný pro fixture testy. Podporuje nový seznam
+ * `zdroje` i původní top-level kontrakt a vždy naplní legacy top-level pole z
+ * nejlevnějšího validního zdroje.
+ */
+export function parseWebPriceResponse(
+  text: string,
+  input: Pick<VerifyInput, 'cena_max_s_dph'> = {},
+  overenoAt = new Date().toISOString(),
+): OvereniCeny {
+  const jsonStr = extractJsonObject(text);
+  if (!jsonStr) {
+    return { stav: 'nenalezeno', poznamka: 'AI nevrátila strukturovanou odpověď', overeno_at: overenoAt };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return { stav: 'nenalezeno', poznamka: 'Odpověď AI nešla naparsovat jako JSON', overeno_at: overenoAt };
+  }
+
+  const valid = RawWebPriceSchema.safeParse(parsed);
+  if (!valid.success) {
+    return { stav: 'nenalezeno', poznamka: 'Odpověď AI neodpovídá očekávanému tvaru', overeno_at: overenoAt };
+  }
+
+  const raw = valid.data;
+  const rawSources = [...(raw.zdroje ?? [])];
+  // Starý kontrakt převedeme na stejný interní tvar, takže další logika je společná.
+  if (rawSources.length === 0 && (raw.zdroj_url !== undefined || raw.cena_bez_dph !== undefined || raw.cena_s_dph !== undefined)) {
+    rawSources.push({
+      url: raw.zdroj_url,
+      dodavatel: raw.dodavatel,
+      cena_bez_dph: raw.cena_bez_dph,
+      cena_s_dph: raw.cena_s_dph,
+      dostupnost: raw.dostupnost,
+      poznamka: raw.poznamka,
+    });
+  }
+
+  const normalized = rawSources
+    .map(normalizeSource)
+    .filter((source): source is WebPriceSource => source !== null)
+    .sort((a, b) => sourceGrossPrice(a) - sourceGrossPrice(b));
+  const seenUrls = new Set<string>();
+  const zdroje = normalized
+    .filter((source) => {
+      if (seenUrls.has(source.url)) return false;
+      seenUrls.add(source.url);
+      return true;
+    })
+    .slice(0, 3);
+
+  const cheapest = zdroje[0];
+  const legacyBez = coerceNumber(raw.cena_bez_dph);
+  const legacySdph = coerceNumber(raw.cena_s_dph);
+  let bez = cheapest?.cena_bez_dph ?? legacyBez;
+  let sdph = cheapest?.cena_s_dph ?? legacySdph;
+  if (bez === null) bez = undefined;
+  if (sdph === null) sdph = undefined;
+
+  let dopocetPoznamka: string | undefined;
+  if (sdph === undefined && bez !== undefined) {
+    sdph = Math.round(bez * 1.21 * 100) / 100;
+    dopocetPoznamka = 'cena s DPH dopočtena z ceny bez DPH (DPH 21 %)';
+  }
+  if (bez === undefined && sdph !== undefined) {
+    bez = Math.round((sdph / 1.21) * 100) / 100;
+    dopocetPoznamka = 'cena bez DPH dopočtena z ceny s DPH (DPH 21 %)';
+  }
+
+  const nalezeno = coerceBool(raw.nalezeno) || zdroje.length > 0;
+  if (!nalezeno || (bez === undefined && sdph === undefined)) {
+    return {
+      stav: 'nenalezeno',
+      mena: cleanStr(raw.mena),
+      zdroj_url: cleanUrl(raw.zdroj_url),
+      poznamka: cleanStr(raw.poznamka) ?? 'Cena nenalezena',
+      overeno_at: overenoAt,
+      ...(zdroje.length > 0 ? { zdroje } : {}),
+    };
+  }
+
+  const poznamka = [cheapest?.poznamka ?? cleanStr(raw.poznamka), dopocetPoznamka]
+    .filter(Boolean)
+    .join(' | ') || undefined;
+  const strop = input.cena_max_s_dph;
+  const prekracujeStrop = typeof strop === 'number' && strop > 0 && sdph !== undefined
+    ? sdph > strop
+    : undefined;
+
+  return {
+    stav: 'nalezeno',
+    web_cena_bez_dph: bez,
+    web_cena_s_dph: sdph,
+    mena: cleanStr(raw.mena) ?? 'CZK',
+    zdroj_url: cheapest?.url ?? cleanUrl(raw.zdroj_url),
+    dodavatel: cheapest?.dodavatel ?? cleanStr(raw.dodavatel),
+    dostupnost: cheapest?.dostupnost ?? cleanStr(raw.dostupnost),
+    poznamka,
+    overeno_at: overenoAt,
+    prekracuje_strop: prekracujeStrop,
+    ...(zdroje.length > 0 ? { zdroje } : {}),
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Volání API s web searchem (+ retry, + pause_turn loop)
 // ----------------------------------------------------------------------------
@@ -283,7 +425,8 @@ async function callWithWebSearch(
       .join('\n');
     combinedText += (combinedText ? '\n' : '') + text;
 
-    if (resp.stop_reason === 'pause_turn') {
+    // SDK 0.39 typ serverového stop_reason ještě neobsahuje hodnotu pause_turn.
+    if ((resp.stop_reason as string | null) === 'pause_turn') {
       // Pokračuj: vrať asistentův (částečný) obsah a nech model turn dokončit
       messages.push({ role: 'assistant', content: resp.content as Anthropic.ContentBlockParam[] });
       continue;
@@ -324,68 +467,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
       usage.output * pricing.output +
       usage.searches * WEB_SEARCH_USD_PER_REQUEST * USD_TO_CZK;
     const base = { inputTokens: usage.input, outputTokens: usage.output, searches: usage.searches, costCZK };
-
-    const jsonStr = extractJsonObject(text);
-    if (!jsonStr) {
-      return { ...base, overeni: { stav: 'nenalezeno', poznamka: 'AI nevrátila strukturovanou odpověď', overeno_at: now() } };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(jsonStr);
-    } catch {
-      return { ...base, overeni: { stav: 'nenalezeno', poznamka: 'Odpověď AI nešla naparsovat jako JSON', overeno_at: now() } };
-    }
-
-    const valid = RawWebPriceSchema.safeParse(parsed);
-    if (!valid.success) {
-      return { ...base, overeni: { stav: 'nenalezeno', poznamka: 'Odpověď AI neodpovídá očekávanému tvaru', overeno_at: now() } };
-    }
-
-    const r = valid.data;
-    const nalezeno = coerceBool(r.nalezeno);
-    const bez = coerceNumber(r.cena_bez_dph);
-    let sdph = coerceNumber(r.cena_s_dph);
-    let poznamka = cleanStr(r.poznamka);
-
-    // Dopočet ceny s DPH z ceny bez DPH (sazba 21 %), když chybí — pro porovnání se stropem
-    if (sdph === undefined && bez !== undefined) {
-      sdph = Math.round(bez * 1.21);
-      poznamka = [poznamka, 'cena s DPH dopočtena z ceny bez DPH (DPH 21 %)'].filter(Boolean).join(' | ');
-    }
-
-    if (!nalezeno || (bez === undefined && sdph === undefined)) {
-      return {
-        ...base,
-        overeni: {
-          stav: 'nenalezeno',
-          mena: cleanStr(r.mena),
-          zdroj_url: cleanUrl(r.zdroj_url),
-          poznamka: poznamka ?? 'Cena nenalezena',
-          overeno_at: now(),
-        },
-      };
-    }
-
-    const strop = input.cena_max_s_dph;
-    const prekracuje_strop =
-      typeof strop === 'number' && strop > 0 && sdph !== undefined ? sdph > strop : undefined;
-
-    return {
-      ...base,
-      overeni: {
-        stav: 'nalezeno',
-        web_cena_bez_dph: bez,
-        web_cena_s_dph: sdph,
-        mena: cleanStr(r.mena) ?? 'CZK',
-        zdroj_url: cleanUrl(r.zdroj_url),
-        dodavatel: cleanStr(r.dodavatel),
-        dostupnost: cleanStr(r.dostupnost),
-        poznamka,
-        overeno_at: now(),
-        prekracuje_strop,
-      },
-    };
+    return { ...base, overeni: parseWebPriceResponse(text, input, now()) };
   } catch (err) {
     // Per-item chyba nesmí shodit celek
     return {
@@ -480,6 +562,27 @@ function buildTargets(matchData: ProductMatch): Target[] {
   }
 
   return targets;
+}
+
+/**
+ * Sloučí výsledky ověření do právě načteného product-match objektu a nedotkne se
+ * cenova_uprava ani ostatních polí. Volající předává čerstvě načtenou kopii kvůli
+ * ochraně před lost-update během dlouhého web search běhu.
+ */
+export function mergePriceVerifications(matchData: ProductMatch, results: ItemVerification[]): ProductMatch {
+  const byIndex = new Map<number, OvereniCeny>(results.map((result) => [result.polozka_index, result.overeni_ceny]));
+
+  if (Array.isArray(matchData.polozky_match)) {
+    for (const item of matchData.polozky_match) {
+      const overeni = byIndex.get(item.polozka_index);
+      if (overeni) item.overeni_ceny = overeni;
+    }
+  } else {
+    const overeni = byIndex.get(-1);
+    if (overeni) matchData.overeni_ceny = overeni;
+  }
+
+  return matchData;
 }
 
 function formatPrice(ov: OvereniCeny): string {

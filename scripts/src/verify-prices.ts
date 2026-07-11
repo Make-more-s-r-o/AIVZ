@@ -13,8 +13,9 @@
 import { readFile, writeFile, rename } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
-import { verifyAllPrices, type OvereniCeny } from './lib/price-verifier.js';
-import type { ProductMatch, PolozkaMatch } from './lib/types.js';
+import { mergePriceVerifications, verifyAllPrices, type ItemVerification } from './lib/price-verifier.js';
+import { upsertFindings, type WebFindingInput } from './lib/web-findings-store.js';
+import type { ProductMatch, ProductCandidate } from './lib/types.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -30,6 +31,51 @@ function parseIntArg(name: string): number | undefined {
   if (v === undefined) return undefined;
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? undefined : n;
+}
+
+function selectedCandidate(matchData: ProductMatch, polozkaIndex: number): ProductCandidate | undefined {
+  if (polozkaIndex === -1) {
+    return matchData.kandidati?.[matchData.vybrany_index ?? 0];
+  }
+  const item = matchData.polozky_match?.find((candidateItem) => candidateItem.polozka_index === polozkaIndex);
+  return item?.kandidati[item.vybrany_index];
+}
+
+/** Připraví všechny validní nákupní zdroje pro oddělený sklad webových nálezů. */
+function findingsFromResults(
+  tenderId: string,
+  matchData: ProductMatch,
+  results: ItemVerification[],
+): WebFindingInput[] {
+  return results.flatMap((result) => {
+    if (result.overeni_ceny.stav !== 'nalezeno') return [];
+    const candidate = selectedCandidate(matchData, result.polozka_index);
+    const produkt = candidate ? `${candidate.vyrobce} ${candidate.model}`.trim() : null;
+    const sources = result.overeni_ceny.zdroje?.length
+      ? result.overeni_ceny.zdroje
+      : result.overeni_ceny.zdroj_url && /^https?:\/\//i.test(result.overeni_ceny.zdroj_url)
+        ? [{
+            url: result.overeni_ceny.zdroj_url,
+            dodavatel: result.overeni_ceny.dodavatel ?? null,
+            cena_bez_dph: result.overeni_ceny.web_cena_bez_dph ?? null,
+            cena_s_dph: result.overeni_ceny.web_cena_s_dph ?? null,
+            dostupnost: result.overeni_ceny.dostupnost ?? null,
+            poznamka: result.overeni_ceny.poznamka ?? null,
+          }]
+        : [];
+
+    return sources.map((source) => ({
+      tender_id: tenderId,
+      polozka_index: result.polozka_index,
+      polozka_nazev: result.polozka_nazev,
+      produkt,
+      dodavatel: source.dodavatel,
+      url: source.url,
+      cena_bez_dph: source.cena_bez_dph,
+      cena_s_dph: source.cena_s_dph,
+      dostupnost: source.dostupnost,
+    }));
+  });
 }
 
 async function main(): Promise<void> {
@@ -71,8 +117,6 @@ async function main(): Promise<void> {
   // tato potvrzení (money-path!) by tiše zmizela. Proto těsně před zápisem soubor znovu
   // načteme (čerstvá kopie) a mergujeme overeni_ceny jen do ní. Okno mezi tímto re-readem
   // a rename je milisekundy (místo minut), takže souběžná potvrzení zůstanou zachována.
-  const byIndex = new Map<number, OvereniCeny>(results.map((r) => [r.polozka_index, r.overeni_ceny]));
-
   let fresh: ProductMatch;
   try {
     fresh = JSON.parse(await readFile(matchPath, 'utf-8')) as ProductMatch;
@@ -82,20 +126,21 @@ async function main(): Promise<void> {
     fresh = matchData;
   }
 
-  if (Array.isArray(fresh.polozky_match)) {
-    for (const item of fresh.polozky_match as (PolozkaMatch & { overeni_ceny?: OvereniCeny })[]) {
-      const ov = byIndex.get(item.polozka_index);
-      if (ov) item.overeni_ceny = ov;
-    }
-  } else {
-    const rootOv = byIndex.get(-1);
-    if (rootOv) (fresh as ProductMatch & { overeni_ceny?: OvereniCeny }).overeni_ceny = rootOv;
-  }
+  mergePriceVerifications(fresh, results);
 
   // Atomický zápis (tmp + rename) — nikdy nezanechá poškozený soubor
   const tmpPath = `${matchPath}.tmp`;
   await writeFile(tmpPath, JSON.stringify(fresh, null, 2), 'utf-8');
   await rename(tmpPath, matchPath);
+
+  // Nákupní znalost ukládáme odděleně od matchingu. Bez DB jde o no-op; skutečná
+  // chyba skladu je pouze warning a nesmí zneplatnit úspěšné webové ověření.
+  const findings = findingsFromResults(tenderId, matchData, results);
+  try {
+    await upsertFindings(findings);
+  } catch (err) {
+    console.warn(`Webové nálezy se nepodařilo uložit do skladu: ${(err as Error).message}`);
+  }
 
   // Souhrn
   console.log('\n--- Souhrn ---');

@@ -1292,6 +1292,15 @@ export async function detachTag(id: string, stitekId: string): Promise<{ success
 // --- Ověření cen web-searchem + checklist příloh (followup b+d) ---
 
 /** Návrh ceny dohledaný web-searchem (NIKDY nepřepisuje cenova_uprava — potvrzuje uživatel). */
+export interface WebPriceSource {
+  url: string;
+  dodavatel: string | null;
+  cena_bez_dph: number | null;
+  cena_s_dph: number | null;
+  dostupnost: string | null;
+  poznamka: string | null;
+}
+
 export interface OvereniCeny {
   stav: 'nalezeno' | 'nenalezeno' | 'chyba';
   web_cena_bez_dph?: number;
@@ -1303,6 +1312,7 @@ export interface OvereniCeny {
   poznamka?: string;
   overeno_at: string;
   prekracuje_strop?: boolean;
+  zdroje?: WebPriceSource[];
 }
 
 /** Spustí background job ověření cen (web search) — vrací jobId pro polling přes getJobStatus. */

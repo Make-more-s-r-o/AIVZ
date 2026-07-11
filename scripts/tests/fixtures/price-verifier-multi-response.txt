@@ -1,0 +1,52 @@
+Nalezl jsem několik přesných nabídek.
+
+```json
+{
+  "nalezeno": "true",
+  "mena": "CZK",
+  "zdroje": [
+    {
+      "url": "https://shop-a.cz/produkt/model-x",
+      "dodavatel": "Shop A",
+      "cena_bez_dph": "1 000,00 Kč",
+      "cena_s_dph": null,
+      "dostupnost": "skladem",
+      "poznamka": null
+    },
+    {
+      "url": "https://shop-b.cz/model-x",
+      "dodavatel": "Shop B",
+      "cena_bez_dph": null,
+      "cena_s_dph": 968,
+      "dostupnost": "skladem",
+      "poznamka": "akční cena"
+    },
+    {
+      "url": "https://shop-c.cz/model-x",
+      "dodavatel": "Shop C",
+      "cena_bez_dph": 909.09,
+      "cena_s_dph": 1100,
+      "dostupnost": "na dotaz",
+      "poznamka": null
+    },
+    {
+      "url": "https://shop-d.cz/model-x",
+      "dodavatel": "Shop D",
+      "cena_bez_dph": 1200,
+      "cena_s_dph": 1452,
+      "dostupnost": "skladem",
+      "poznamka": null
+    },
+    {
+      "url": "javascript:alert(1)",
+      "dodavatel": "Nebezpečný zdroj",
+      "cena_bez_dph": 1,
+      "cena_s_dph": 1.21,
+      "dostupnost": "skladem",
+      "poznamka": null
+    }
+  ],
+  "poznamka": "souhrn"
+}
+```
+

@@ -25,6 +25,7 @@ import type { ProductMatch, TenderAnalysis, PolozkaMatch, ProductCandidate, Over
 import { safeHttpUrl } from '../lib/url';
 import { calculateItemPrice, roundCurrency, DEFAULT_MARZE_PROCENT } from '../lib/price-calculator';
 import { invalidatePriceDerivedQueries } from '../lib/product-match-invalidation';
+import { buildDraftFromWeb, webPriceInputFromVerification } from '../lib/web-price';
 
 interface ProductMatchViewProps {
   tenderId: string;
@@ -210,30 +211,6 @@ function VerifyPricesHeader({ tenderId, queryClient }: VerifyPricesHeaderProps) 
 }
 
 /**
- * Sestaví cenový návrh (PriceOverride) z web ceny pro předvyplnění cenového panelu.
- * potvrzeno=false — potvrzení dělá uživatel ručně jako dnes. Chybí-li bez DPH, dopočítá se
- * z ceny s DPH (a naopak) sazbou 21 %. Web cena je NÁKUPNÍ podklad — nabídková cena se
- * rovnou počítá s výchozí marží firmy (dřív draft nesl marži 0 a nabídka == nákup,
- * což po one-click potvrzení znamenalo nulový zisk).
- */
-function buildDraftFromWeb(overeni: OvereniCeny, defaultMarze: number): PriceOverride {
-  const bez = overeni.web_cena_bez_dph
-    ?? (overeni.web_cena_s_dph != null ? roundCurrency(overeni.web_cena_s_dph / 1.21) : 0);
-  const sdph = overeni.web_cena_s_dph ?? calculateItemPrice(bez, 0).nakupni_cena_s_dph;
-  const nabidka = calculateItemPrice(bez, defaultMarze);
-  const safeUrl = safeHttpUrl(overeni.zdroj_url);
-  return {
-    nakupni_cena_bez_dph: bez,
-    nakupni_cena_s_dph: sdph,
-    marze_procent: defaultMarze,
-    nabidkova_cena_bez_dph: nabidka.nabidkova_cena_bez_dph,
-    nabidkova_cena_s_dph: nabidka.nabidkova_cena_s_dph,
-    potvrzeno: false,
-    poznamka: safeUrl ? `Cena z webu: ${safeUrl}` : 'Cena z webu',
-  };
-}
-
-/**
  * Sestaví data pro potvrzení ceny jedné položky (pro hromadné „Potvrdit"). Zdroj v pořadí priority:
  * web-draft (pokud si operátor „Použít" web cenu) → již existující cenova_uprava → AI odhad
  * (cena_bez_dph vybraného kandidáta). Počítá stejně jako ItemPriceCalculator (jednotný
@@ -311,12 +288,14 @@ function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
             zdroj <ExternalLink className="h-3 w-3" />
           </a>
         )}
-        <button
-          onClick={onUse}
-          className="ml-auto rounded border border-blue-300 bg-white px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-50"
-        >
-          Použít
-        </button>
+        {!overeni.zdroje?.length && (
+          <button
+            onClick={onUse}
+            className="ml-auto rounded border border-blue-300 bg-white px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-50"
+          >
+            Použít
+          </button>
+        )}
       </div>
     );
   }
@@ -397,7 +376,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
       {overeni && (
         <OvereniCenyChip
           overeni={overeni}
-          onUse={() => setWebDraft(buildDraftFromWeb(overeni, defaultMarze))}
+          onUse={() => setWebDraft(buildDraftFromWeb(webPriceInputFromVerification(overeni), defaultMarze))}
         />
       )}
 
@@ -411,6 +390,7 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
           historySubject={historySubject ?? `${selectedProduct.vyrobce} ${selectedProduct.model}`}
           historyCacheKey={`${tenderId}:single`}
           defaultMarzeProcent={defaultMarze}
+          overeniCeny={overeni}
         />
       )}
     </div>
@@ -469,7 +449,10 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
   };
 
   const handleUseWebPrice = (itemIndex: number, overeni: OvereniCeny) => {
-    setPriceDrafts(prev => new Map(prev).set(itemIndex, buildDraftFromWeb(overeni, defaultMarze)));
+    setPriceDrafts(prev => new Map(prev).set(
+      itemIndex,
+      buildDraftFromWeb(webPriceInputFromVerification(overeni), defaultMarze),
+    ));
     setExpandedItems(prev => new Set(prev).add(itemIndex)); // rozbal, ať je panel vidět
   };
 
@@ -884,6 +867,7 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
                     historyCacheKey={`${tenderId}:${idx}`}
                     onWinPriceBandLoaded={handleWinPriceBandLoaded}
                     defaultMarzeProcent={defaultMarze}
+                    overeniCeny={pm.overeni_ceny}
                   />
                 )}
               </div>
