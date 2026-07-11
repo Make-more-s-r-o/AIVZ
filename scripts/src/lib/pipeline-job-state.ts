@@ -32,6 +32,44 @@ export interface RestoredJobs {
   interruptedCount: number;
 }
 
+/** Minimální tvar úlohy potřebný pro rozhodnutí plánovače (kdo smí běžet). */
+export interface SchedulableJob {
+  id: string;
+  tenderId: string;
+}
+
+/**
+ * Čistá funkce plánovače souběžné fronty. Z FIFO fronty vybere úlohy, které smí odstartovat,
+ * při dodržení dvou invariantů:
+ *  (a) per-tender serializace — nikdy dvě úlohy TÉŽE zakázky současně (čtou/píší stejné soubory);
+ *  (b) FIFO férovost — prochází frontu v pořadí zařazení a bere první způsobilé.
+ * Souběh je omezen `maxConcurrent`; volné sloty = maxConcurrent − počet právě běžících úloh.
+ *
+ * `runningTenderIds` = zakázky, které už mají běžící úlohu (délka pole = počet běžících úloh,
+ * protože invariant (a) drží nejvýše jednu běžící úlohu na zakázku). Vrací ID úloh k odstartování
+ * ve FIFO pořadí.
+ */
+export function selectJobsToStart(
+  queue: SchedulableJob[],
+  runningTenderIds: string[],
+  maxConcurrent: number,
+): string[] {
+  const limit = Number.isFinite(maxConcurrent) && maxConcurrent >= 1 ? Math.floor(maxConcurrent) : 1;
+  const slots = limit - runningTenderIds.length;
+  if (slots <= 0) return [];
+
+  const busyTenders = new Set(runningTenderIds);
+  const selected: string[] = [];
+  for (const job of queue) {
+    if (selected.length >= slots) break;
+    // Zakázka už běží (nebo ji bereme v tomto kole) → přeskoč, ať se kroky neserializují souběžně.
+    if (busyTenders.has(job.tenderId)) continue;
+    busyTenders.add(job.tenderId);
+    selected.push(job.id);
+  }
+  return selected;
+}
+
 function isPipelineJob(value: unknown): value is PipelineJob {
   if (!value || typeof value !== 'object') return false;
   const job = value as Partial<PipelineJob>;
