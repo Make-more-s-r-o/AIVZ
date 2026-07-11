@@ -137,7 +137,7 @@ function parseDump(xml: string, limit: number, collected: number): WinPriceRecor
     }
     // Sanitizace: Registr smluv obsahuje i nesmyslná data (0001-01-01, budoucí roky).
     // Mimo rozsah [2015-01-01, dnešek] nebo mimo ISO formát → NULL (cena zůstává,
-    // zahazuje se jen nedůvěryhodné datum). Stejné pravidlo řeší migrace 012 pro už
+    // zahazuje se jen nedůvěryhodné datum). Stejné pravidlo řeší migrace 013 pro už
     // importovaná data.
     if (datum) {
       const dnes = new Date().toISOString().slice(0, 10);
