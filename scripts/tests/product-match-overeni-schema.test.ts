@@ -28,6 +28,25 @@ test('ProductMatchSchema přijímá staré overeni_ceny bez pole zdroje', () => 
   if (parsed.success) assert.equal(parsed.data.overeni_ceny?.realita, undefined);
 });
 
+test('ProductMatchSchema přijímá volitelnou poslední chybu ověření', () => {
+  const parsed = ProductMatchSchema.safeParse({
+    tenderId: 'T-last-error',
+    matchedAt: '2026-07-11T10:00:00.000Z',
+    kandidati: [],
+    overeni_ceny: {
+      stav: 'nalezeno',
+      overeno_at: '2026-07-10T10:00:00.000Z',
+      posledni_chyba: {
+        zprava: 'Dočasná chyba API',
+        at: '2026-07-11T10:00:00.000Z',
+      },
+    },
+  });
+
+  assert.equal(parsed.success, true);
+  if (parsed.success) assert.equal(parsed.data.overeni_ceny?.posledni_chyba?.zprava, 'Dočasná chyba API');
+});
+
 test('ProductMatchSchema přijímá a zachová nové multi-source overeni_ceny', () => {
   const parsed = ProductMatchSchema.safeParse({
     ...base,

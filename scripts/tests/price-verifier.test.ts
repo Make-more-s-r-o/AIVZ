@@ -83,6 +83,29 @@ function sourceResponse(options: {
   });
 }
 
+function testCandidate(vyrobce = 'Test', model = 'X') {
+  return {
+    vyrobce, model, popis: 'Test', parametry: {}, shoda_s_pozadavky: [],
+    cena_bez_dph: 900, cena_s_dph: 1089, cena_spolehlivost: 'vysoka' as const,
+    dodavatele: [], dostupnost: 'skladem',
+  };
+}
+
+function foundVerification(fingerprint: string, at = '2026-07-10T10:00:00.000Z') {
+  return {
+    stav: 'nalezeno' as const,
+    overeno_at: at,
+    kandidat_fingerprint: fingerprint,
+    poznamka: 'Původní ověření',
+    zdroj_url: 'https://shop.cz/puvodni',
+    zdroje: [{
+      url: 'https://shop.cz/puvodni', dodavatel: 'Shop', nazev_produktu: 'Původní produkt',
+      cena_bez_dph: 800, cena_s_dph: 968, cena_baleni_s_dph: 968, baleni_ks: 1,
+      mena: 'CZK' as const, dostupnost: 'skladem' as const, poznamka: null,
+    }],
+  };
+}
+
 test('dvoufázové ověření spustí fallback jen po nenalezení a bez AI výrobce a modelu', async () => {
   const calls: Array<{ system: string; user: string }> = [];
   const input = {
@@ -371,6 +394,139 @@ test('merge multi-source výsledku mění pouze overeni_ceny správné položky'
   assert.equal(match.polozky_match?.[0]?.overeni_ceny?.zdroje?.[0]?.url, 'https://shop.cz/x');
   assert.strictEqual(match.polozky_match?.[0]?.cenova_uprava, originalOverride);
   assert.equal(match.polozky_match?.[0]?.cenova_uprava?.potvrzeno, true);
+});
+
+test('chyba zachová předchozí ověření a zapíše poslední chybu', () => {
+  const candidate = testCandidate();
+  const fingerprint = candidateFingerprint(candidate, 0);
+  const previous = foundVerification(fingerprint);
+  const match = {
+    tenderId: 'T-error-existing', matchedAt: '2026-07-11T09:00:00.000Z',
+    polozky_match: [{
+      polozka_index: 0, polozka_nazev: 'Položka', typ: 'produkt', kandidati: [candidate],
+      vybrany_index: 0, oduvodneni_vyberu: 'test', overeni_ceny: previous,
+    }],
+  } as ProductMatch;
+
+  mergePriceVerifications(match, [{
+    polozka_index: 0, polozka_nazev: 'Položka',
+    overeni_ceny: {
+      stav: 'chyba', poznamka: 'První fáze ověření selhala.',
+      overeno_at: '2026-07-11T10:00:00.000Z', kandidat_fingerprint: fingerprint,
+    },
+  }]);
+
+  const merged = match.polozky_match?.[0]?.overeni_ceny;
+  assert.equal(merged?.stav, 'nalezeno');
+  assert.equal(merged?.zdroje?.[0]?.url, 'https://shop.cz/puvodni');
+  assert.deepEqual(merged?.posledni_chyba, {
+    zprava: 'První fáze ověření selhala.',
+    at: '2026-07-11T10:00:00.000Z',
+  });
+});
+
+test('chyba bez předchozího ověření se uloží jako stav chyba', () => {
+  const candidate = testCandidate();
+  const fingerprint = candidateFingerprint(candidate, 0);
+  const match = {
+    tenderId: 'T-error-new', matchedAt: '2026-07-11T09:00:00.000Z',
+    polozky_match: [{
+      polozka_index: 0, polozka_nazev: 'Položka', typ: 'produkt', kandidati: [candidate],
+      vybrany_index: 0, oduvodneni_vyberu: 'test',
+    }],
+  } as ProductMatch;
+
+  mergePriceVerifications(match, [{
+    polozka_index: 0, polozka_nazev: 'Položka',
+    overeni_ceny: {
+      stav: 'chyba', poznamka: 'Síťová chyba', overeno_at: '2026-07-11T10:00:00.000Z',
+      kandidat_fingerprint: fingerprint,
+    },
+  }]);
+
+  assert.equal(match.polozky_match?.[0]?.overeni_ceny?.stav, 'chyba');
+});
+
+test('nenalezeno zachová staré zdroje, aktualizuje čas a přidá poznámku', () => {
+  const candidate = testCandidate();
+  const fingerprint = candidateFingerprint(candidate, 0);
+  const previousAt = '2026-07-10T10:00:00.000Z';
+  const match = {
+    tenderId: 'T-not-found', matchedAt: '2026-07-11T09:00:00.000Z',
+    polozky_match: [{
+      polozka_index: 0, polozka_nazev: 'Položka', typ: 'produkt', kandidati: [candidate],
+      vybrany_index: 0, oduvodneni_vyberu: 'test', overeni_ceny: foundVerification(fingerprint, previousAt),
+    }],
+  } as ProductMatch;
+
+  mergePriceVerifications(match, [{
+    polozka_index: 0, polozka_nazev: 'Položka',
+    overeni_ceny: {
+      stav: 'nenalezeno', poznamka: 'Nový dotaz nic nenašel.',
+      overeno_at: '2026-07-11T10:00:00.000Z', kandidat_fingerprint: fingerprint,
+    },
+  }]);
+
+  const merged = match.polozky_match?.[0]?.overeni_ceny;
+  assert.equal(merged?.stav, 'nalezeno');
+  assert.equal(merged?.zdroje?.[0]?.url, 'https://shop.cz/puvodni');
+  assert.equal(merged?.overeno_at, '2026-07-11T10:00:00.000Z');
+  assert.match(merged?.poznamka ?? '', new RegExp(`poslední běh cenu nenašel.*${previousAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+});
+
+test('změna kandidáta má přednost a staré zdroje se zahodí', () => {
+  const oldCandidate = testCandidate('A', '1');
+  const currentCandidate = testCandidate('B', '2');
+  const oldFingerprint = candidateFingerprint(oldCandidate, 0);
+  const currentFingerprint = candidateFingerprint(currentCandidate, 0);
+  const match = {
+    tenderId: 'T-candidate-change', matchedAt: '2026-07-11T09:00:00.000Z',
+    polozky_match: [{
+      polozka_index: 0, polozka_nazev: 'Položka', typ: 'produkt', kandidati: [currentCandidate],
+      vybrany_index: 0, oduvodneni_vyberu: 'změněno', overeni_ceny: foundVerification(oldFingerprint),
+    }],
+  } as ProductMatch;
+
+  mergePriceVerifications(match, [{
+    polozka_index: 0, polozka_nazev: 'Položka',
+    overeni_ceny: {
+      stav: 'nenalezeno', overeno_at: '2026-07-11T10:00:00.000Z',
+      kandidat_fingerprint: currentFingerprint,
+    },
+  }]);
+
+  assert.equal(match.polozky_match?.[0]?.overeni_ceny?.stav, 'nenalezeno');
+  assert.equal(match.polozky_match?.[0]?.overeni_ceny?.zdroje, undefined);
+});
+
+test('došlý kredit přeruší běh po první položce a označí souhrn', async () => {
+  const candidates = [testCandidate('A', '1'), testCandidate('B', '2'), testCandidate('C', '3')];
+  const match = {
+    tenderId: 'T-credit', matchedAt: '2026-07-11T09:00:00.000Z',
+    polozky_match: candidates.map((candidate, index) => ({
+      polozka_index: index, polozka_nazev: `Položka ${index}`, typ: 'produkt', kandidati: [candidate],
+      vybrany_index: 0, oduvodneni_vyberu: 'test',
+    })),
+  } as ProductMatch;
+  let calls = 0;
+  const aiClient: PriceVerifierAiClient = {
+    messages: {
+      async create() {
+        calls++;
+        throw Object.assign(new Error('credit balance is too low'), {
+          status: 400,
+          error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API' },
+        });
+      },
+    },
+  };
+
+  const { results, summary } = await verifyAllPrices(match, { tenderId: 'T-credit', aiClient });
+
+  assert.equal(calls, 1);
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.overeni_ceny.stav, 'chyba');
+  assert.equal(summary.preruseno_kvuli_kreditu, true);
 });
 
 test('C1: autoritativní specifikace pochází z analysis.json a obsahuje relevantní technický požadavek', () => {
