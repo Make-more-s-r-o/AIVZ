@@ -111,7 +111,7 @@ Navrhni ${candidateCount} konkrétní produkty ve formátu:
       "katalogove_cislo": "ABC-12345",
       "dodavatele": ["dodavatel1", "dodavatel2"],
       "dostupnost": "skladem / 2-3 týdny",
-      "zadna_shoda": false  // volitelné — uveď true POUZE když jsi nenašel reálný odpovídající produkt (pak ceny = 0)
+      "zadna_shoda": false
     }
   ],
   "vybrany_index": 0,
@@ -163,7 +163,7 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
           "katalogove_cislo": "ABC-12345",
           "dodavatele": ["dodavatel1", "dodavatel2"],
           "dostupnost": "skladem / 2-3 týdny",
-          "zadna_shoda": false  // volitelné — uveď true POUZE když jsi nenašel reálný odpovídající produkt (pak ceny = 0)
+          "zadna_shoda": false
         }
       ],
       "vybrany_index": 0,
