@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { resolveModelId, getModelPricing } from './ai-client.js';
 import { logCost } from './cost-tracker.js';
 import { compareAiVsMarket } from './price-reality.js';
+import { candidateFingerprint } from './candidate-fingerprint.js';
 import type {
   ProductMatch,
   ProductCandidate,
@@ -863,9 +864,7 @@ function pickCandidate(kandidati: ProductCandidate[] | undefined, vybrany: numbe
   return kandidati[idx];
 }
 
-export function candidateFingerprint(candidate: Pick<ProductCandidate, 'vyrobce' | 'model'>, selectedIndex: number): string {
-  return `${candidate.vyrobce.trim()}|${candidate.model.trim()}|${selectedIndex}`;
-}
+export { candidateFingerprint } from './candidate-fingerprint.js';
 
 function relevantRequirements(
   analysis: TenderAnalysis,

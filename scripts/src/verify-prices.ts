@@ -10,15 +10,15 @@
  * Použití:
  *   npx tsx src/verify-prices.ts --tender-id=<id> [--limit=N] [--only-index=i]
  */
-import { readFile, writeFile, rename } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
 import {
   ANTHROPIC_CREDIT_ERROR_MESSAGE,
-  mergePriceVerifications,
   verifyAllPrices,
   type ItemVerification,
 } from './lib/price-verifier.js';
+import { persistPriceVerifications } from './lib/price-verification-store.js';
 import { upsertFindings, type WebFindingInput } from './lib/web-findings-store.js';
 import type { ProductMatch, ProductCandidate, TenderAnalysis } from './lib/types.js';
 
@@ -138,21 +138,7 @@ async function main(): Promise<void> {
   // tato potvrzení (money-path!) by tiše zmizela. Proto těsně před zápisem soubor znovu
   // načteme (čerstvá kopie) a mergujeme overeni_ceny jen do ní. Okno mezi tímto re-readem
   // a rename je milisekundy (místo minut), takže souběžná potvrzení zůstanou zachována.
-  let fresh: ProductMatch;
-  try {
-    fresh = JSON.parse(await readFile(matchPath, 'utf-8')) as ProductMatch;
-  } catch (error) {
-    // Fail-closed: při chybě čerstvého čtení nesmíme zapsat starý snapshot a
-    // riskovat ztrátu potvrzené ceny ani přilepení výsledku k jinému kandidátovi.
-    throw new Error(`Čerstvé načtení product-match.json před merge selhalo; ověření nezapisuji: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  mergePriceVerifications(fresh, results);
-
-  // Atomický zápis (tmp + rename) — nikdy nezanechá poškozený soubor
-  const tmpPath = `${matchPath}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(fresh, null, 2), 'utf-8');
-  await rename(tmpPath, matchPath);
+  const fresh = await persistPriceVerifications(matchPath, results);
 
   // Nákupní znalost ukládáme odděleně od matchingu. Bez DB jde o no-op; skutečná
   // chyba skladu je pouze warning a nesmí zneplatnit úspěšné webové ověření.
