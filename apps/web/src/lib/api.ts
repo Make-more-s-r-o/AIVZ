@@ -462,6 +462,59 @@ export async function getOutcomeStats(): Promise<OutcomeStats> {
   }
 }
 
+// --- Nákupní seznam po výhře ---
+
+export interface NakupItem {
+  id: number;
+  tender_id: string;
+  polozka_index: number;
+  polozka_nazev: string | null;
+  mnozstvi: number | null;
+  jednotka: string | null;
+  nakupni_cena_bez_dph: number | null;
+  dodavatel: string | null;
+  url: string | null;
+  objednano: boolean;
+  objednano_at: string | null;
+  poznamka: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getNakupy(id: string): Promise<NakupItem[]> {
+  const response = await fetchJson<{ nakupy: NakupItem[] }>(`/tenders/${encodeURIComponent(id)}/nakupy`);
+  return response.nakupy;
+}
+
+export async function seedNakupy(id: string): Promise<{ nakupy: NakupItem[]; seeded: number }> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/nakupy/seed`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.detail || err.error || 'Nepodařilo se sestavit nákupní seznam');
+  }
+  return res.json();
+}
+
+export async function updateNakup(
+  id: string,
+  polozkaIndex: number,
+  input: { objednano: boolean; poznamka?: string | null },
+): Promise<NakupItem> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/nakupy/${polozkaIndex}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.detail || err.error || 'Nepodařilo se upravit nákupní položku');
+  }
+  return (await res.json()).nakup;
+}
+
 export async function getDocuments(id: string): Promise<string[]> {
   return fetchJson(`/tenders/${id}/documents`);
 }
