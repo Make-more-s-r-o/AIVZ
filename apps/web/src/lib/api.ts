@@ -1439,6 +1439,10 @@ export interface OvereniCeny {
   dodavatel?: string;
   dostupnost?: string;
   poznamka?: string;
+  posledni_chyba?: {
+    zprava: string;
+    at: string;
+  };
   overeno_at: string;
   kandidat_fingerprint?: string;
   prekracuje_strop?: boolean;

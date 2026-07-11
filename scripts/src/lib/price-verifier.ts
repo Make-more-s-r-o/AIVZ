@@ -32,6 +32,7 @@ const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 // Každá fáze dostává vlastní wall-clock rozpočet; fallback tedy nedědí vyčerpaný čas fáze 1.
 export const WEB_SEARCH_PHASE_TIMEOUT_MS = 4 * 60 * 1000;
 export const EQUIVALENT_MAX_SEARCHES = 3;
+export const ANTHROPIC_CREDIT_ERROR_MESSAGE = 'Došel kredit Anthropic API — ověřování zastaveno, žádná data nebyla přepsána.';
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -116,6 +117,7 @@ export interface VerifyAllResult {
     outputTokens: number;
     costCZK: number;
     modelId: string;
+    preruseno_kvuli_kreditu: boolean;
   };
 }
 
@@ -540,6 +542,32 @@ class WebSearchPhaseTimeoutError extends Error {
   }
 }
 
+class AnthropicCreditExhaustedError extends Error {
+  constructor() {
+    super(ANTHROPIC_CREDIT_ERROR_MESSAGE);
+    this.name = 'AnthropicCreditExhaustedError';
+  }
+}
+
+/** Anthropic může detail vrátit v message i ve vnořeném těle APIError. */
+function isAnthropicCreditError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  const texts: string[] = [];
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > 4 || value === null || value === undefined || seen.has(value)) return;
+    if (typeof value === 'string') {
+      texts.push(value);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    seen.add(value);
+    if (value instanceof Error) texts.push(value.message);
+    for (const nested of Object.values(value as Record<string, unknown>)) collect(nested, depth + 1);
+  };
+  collect(error, 0);
+  return texts.some((text) => /credit balance is too low/i.test(text));
+}
+
 async function createWithRetry(
   params: unknown,
   aiClient: PriceVerifierAiClient,
@@ -566,6 +594,8 @@ async function createWithRetry(
       if (err instanceof WebSearchPhaseTimeoutError || controller.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
         throw new WebSearchPhaseTimeoutError(timeoutMs);
       }
+      // Vyčerpaný kredit není dočasná chyba; další retry by jen zdržoval fail-fast.
+      if (isAnthropicCreditError(err)) throw err;
       const status = (err as { status?: number })?.status;
       // 400/401 = neretryovatelné (chybný request / klíč)
       if (status === 400 || status === 401) throw err;
@@ -686,6 +716,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
       WEB_SEARCH_PHASE_TIMEOUT_MS,
     );
   } catch (err) {
+    if (isAnthropicCreditError(err)) throw new AnthropicCreditExhaustedError();
     return {
       overeni: {
         stav: 'chyba',
@@ -773,6 +804,7 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
       },
     };
   } catch (err) {
+    if (isAnthropicCreditError(err)) throw new AnthropicCreditExhaustedError();
     // Fallback má vlastní chybovou hranici: dokončenou fázi 1 nikdy nepřepíšeme stavem chyba.
     return {
       overeni: {
@@ -939,9 +971,13 @@ export function mergePriceVerifications(matchData: ProductMatch, results: ItemVe
       const currentFingerprint = current ? candidateFingerprint(current, selectedIndex) : null;
       if (!overeni.kandidat_fingerprint || overeni.kandidat_fingerprint !== currentFingerprint) {
         console.warn(`Zahazuji zastaralé ověření ceny položky ${item.polozka_index}: kandidát se během ověřování změnil.`);
+        // Smažeme jen prokazatelně zastaralý záznam; souběžné ověření aktuálního kandidáta zachováme.
+        if (item.overeni_ceny?.kandidat_fingerprint && item.overeni_ceny.kandidat_fingerprint !== currentFingerprint) {
+          delete item.overeni_ceny;
+        }
         continue;
       }
-      item.overeni_ceny = overeni;
+      item.overeni_ceny = mergeOnePriceVerification(item.overeni_ceny, overeni);
     }
   } else {
     const overeni = byIndex.get(-1);
@@ -949,13 +985,54 @@ export function mergePriceVerifications(matchData: ProductMatch, results: ItemVe
     const selectedIndex = current && matchData.kandidati ? matchData.kandidati.indexOf(current) : -1;
     const currentFingerprint = current ? candidateFingerprint(current, selectedIndex) : null;
     if (overeni?.kandidat_fingerprint && overeni.kandidat_fingerprint === currentFingerprint) {
-      matchData.overeni_ceny = overeni;
+      matchData.overeni_ceny = mergeOnePriceVerification(matchData.overeni_ceny, overeni);
     } else if (overeni) {
       console.warn('Zahazuji zastaralé ověření ceny: kořenový kandidát se během ověřování změnil.');
+      if (matchData.overeni_ceny?.kandidat_fingerprint && matchData.overeni_ceny.kandidat_fingerprint !== currentFingerprint) {
+        delete matchData.overeni_ceny;
+      }
     }
   }
 
   return matchData;
+}
+
+function hasFoundSources(overeni: OvereniCeny): boolean {
+  if (!['nalezeno', 'ekvivalent', 'orientacni'].includes(overeni.stav)) return false;
+  return (overeni.zdroje?.length ?? 0) > 0 || Boolean(overeni.zdroj_url);
+}
+
+/** Sloučí jeden výsledek bez ztráty posledního použitelného nákupního nálezu. */
+function mergeOnePriceVerification(
+  previous: OvereniCeny | undefined,
+  incoming: OvereniCeny,
+): OvereniCeny {
+  const sameCandidate = previous
+    && (!previous.kandidat_fingerprint || previous.kandidat_fingerprint === incoming.kandidat_fingerprint);
+
+  if (!sameCandidate) return incoming;
+
+  if (incoming.stav === 'chyba') {
+    return {
+      ...previous,
+      posledni_chyba: {
+        zprava: incoming.poznamka?.trim() || 'Ověření ceny selhalo bez bližšího popisu.',
+        at: incoming.overeno_at,
+      },
+    };
+  }
+
+  if (incoming.stav === 'nenalezeno' && hasFoundSources(previous)) {
+    const previousDate = previous.overeno_at;
+    const preservationNote = `poslední běh cenu nenašel; zobrazené zdroje jsou z předchozího ověření (${previousDate})`;
+    return {
+      ...previous,
+      overeno_at: incoming.overeno_at,
+      poznamka: [previous.poznamka, preservationNote].filter(Boolean).join(' | '),
+    };
+  }
+
+  return incoming;
 }
 
 function formatPrice(ov: OvereniCeny): string {
@@ -990,16 +1067,51 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
   opts.onProgress?.(`Položek k ověření: ${total} (model ${modelId}, souběžně ${concurrency})`);
 
   let done = 0;
-  const raw = await runWithConcurrency(targets, concurrency, async (t) => {
-    const r = await verifyOneInternal(t.input, {
-      model: opts.model,
-      maxSearches: opts.maxSearches,
-      aiClient: opts.aiClient,
+  let creditInterrupted = false;
+  const verifyTarget = async (target: Target): Promise<{ target: Target; res: RawVerifyResult }> => {
+    try {
+      const res = await verifyOneInternal(target.input, {
+        model: opts.model,
+        maxSearches: opts.maxSearches,
+        aiClient: opts.aiClient,
+      });
+      done++;
+      opts.onProgress?.(`[${done}/${total}] ${target.polozka_nazev}: ${formatPrice(res.overeni)}`);
+      return { target, res };
+    } catch (error) {
+      if (!(error instanceof AnthropicCreditExhaustedError)) throw error;
+      creditInterrupted = true;
+      done++;
+      const res: RawVerifyResult = {
+        overeni: {
+          stav: 'chyba',
+          poznamka: ANTHROPIC_CREDIT_ERROR_MESSAGE,
+          overeno_at: new Date().toISOString(),
+          realita: compareAiVsMarket(target.input.ai_cena_bez_dph ?? null, []),
+        },
+        hitPhase: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        searches: 0,
+        costCZK: 0,
+      };
+      opts.onProgress?.(`[${done}/${total}] ${target.polozka_nazev}: ${ANTHROPIC_CREDIT_ERROR_MESSAGE}`);
+      return { target, res };
+    }
+  };
+
+  const raw: Array<{ target: Target; res: RawVerifyResult }> = [];
+  if (targets.length > 0) {
+    // První položka je preflight: při už vyčerpaném kreditu nespustíme souběžně další requesty.
+    raw.push(await verifyTarget(targets[0]!));
+  }
+  if (!creditInterrupted && targets.length > 1) {
+    const remaining = await runWithConcurrency(targets.slice(1), concurrency, async (target) => {
+      if (creditInterrupted) return null;
+      return verifyTarget(target);
     });
-    done++;
-    opts.onProgress?.(`[${done}/${total}] ${t.polozka_nazev}: ${formatPrice(r.overeni)}`);
-    return { target: t, res: r };
-  });
+    raw.push(...remaining.filter((result): result is { target: Target; res: RawVerifyResult } => result !== null));
+  }
 
   const results: ItemVerification[] = raw.map(({ target, res }) => ({
     polozka_index: target.polozka_index,
@@ -1029,6 +1141,7 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
     outputTokens: raw.reduce((s, x) => s + x.res.outputTokens, 0),
     costCZK: raw.reduce((s, x) => s + x.res.costCZK, 0),
     modelId,
+    preruseno_kvuli_kreditu: creditInterrupted,
   };
 
   // Zapiš náklady jedním agregovaným záznamem (costCZK už zahrnuje i cenu web searchů)

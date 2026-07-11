@@ -222,6 +222,10 @@ export const OvereniCenySchema = z.object({
   dodavatel: z.string().optional(),
   dostupnost: z.string().optional(),
   poznamka: z.string().optional(),
+  posledni_chyba: z.object({
+    zprava: z.string(),
+    at: z.string().datetime(),
+  }).optional(),
   overeno_at: z.string().datetime(),
   kandidat_fingerprint: z.string().optional(),
   prekracuje_strop: z.boolean().optional(),

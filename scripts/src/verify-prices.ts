@@ -13,7 +13,12 @@
 import { readFile, writeFile, rename } from 'fs/promises';
 import { join } from 'path';
 import { config } from 'dotenv';
-import { mergePriceVerifications, verifyAllPrices, type ItemVerification } from './lib/price-verifier.js';
+import {
+  ANTHROPIC_CREDIT_ERROR_MESSAGE,
+  mergePriceVerifications,
+  verifyAllPrices,
+  type ItemVerification,
+} from './lib/price-verifier.js';
 import { upsertFindings, type WebFindingInput } from './lib/web-findings-store.js';
 import type { ProductMatch, ProductCandidate, TenderAnalysis } from './lib/types.js';
 
@@ -116,6 +121,14 @@ async function main(): Promise<void> {
     onlyIndex,
     onProgress: (m) => console.log('  ' + m),
   });
+
+  if (summary.preruseno_kvuli_kreditu) {
+    // Fail-closed: při vyčerpaném kreditu nezapisujeme ani dílčí úspěchy z tohoto běhu.
+    console.error(`\n${ANTHROPIC_CREDIT_ERROR_MESSAGE}`);
+    console.log(`Přerušeno po ${results.length} z ${summary.total} položek (preruseno_kvuli_kreditu: true).`);
+    process.exitCode = 1;
+    return;
+  }
 
   // MERGE overeni_ceny do položek (ostatní pole nedotčená).
   //
