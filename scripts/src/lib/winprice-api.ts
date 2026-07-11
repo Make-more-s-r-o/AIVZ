@@ -8,14 +8,9 @@ import {
   type SimilarWin,
   type WinPriceStats,
 } from './winprice-query.js';
-import type { KomoditaKategorie } from './winprice-store.js';
+import { KOMODITA_KATEGORIE_VALUES, type KomoditaKategorie } from './winprice-store.js';
 
-const WIN_PRICE_CATEGORIES = new Set<KomoditaKategorie>([
-  'it_av',
-  'naradi_dilna',
-  'kancelar',
-  'ostatni',
-]);
+const WIN_PRICE_CATEGORIES = new Set<KomoditaKategorie>(KOMODITA_KATEGORIE_VALUES);
 
 export interface WinPriceSample {
   predmet: string;
