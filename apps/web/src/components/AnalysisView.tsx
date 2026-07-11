@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, type CSSProperties, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getAnalysis, getParts, saveParts, type Cast } from '../lib/api';
+import { getAnalysis, getParts, saveParts, getProductMatch, type Cast } from '../lib/api';
 import type { TenderAnalysis } from '../types/tender';
+import { useToast } from './ui';
 
 interface AnalysisViewProps {
   tenderId: string;
@@ -187,15 +188,25 @@ function InfoRow({ label, value }: { label: string; value?: string | null }) {
 
 function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] }) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [selected, setSelected] = useState<Set<string>>(() => new Set(casti.map(c => c.id)));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveHover, setSaveHover] = useState(false);
+  const [staleWarning, setStaleWarning] = useState(false);
 
   const { data: partsData } = useQuery({
     queryKey: ['parts', tenderId],
     queryFn: () => getParts(tenderId),
+  });
+
+  // Produkty už mohly být naceněny nad jiným výběrem částí — po uložení změny na to
+  // upozorníme (jen pokud match vůbec proběhl, jinak není co přepočítávat).
+  const { data: matchData } = useQuery({
+    queryKey: ['product-match', tenderId],
+    queryFn: () => getProductMatch(tenderId),
+    retry: false,
   });
 
   useEffect(() => {
@@ -214,38 +225,55 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
     setDirty(true);
   }, []);
 
+  const noneSelected = selected.size === 0;
+
   const handleSave = useCallback(async () => {
+    if (noneSelected) return;
     setSaving(true);
     setSaveError(null);
     try {
       await saveParts(tenderId, [...selected]);
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['parts', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['tenders'] });
+      toast('Výběr částí uložen', 'success');
+      if (matchData) setStaleWarning(true);
     } catch (err) {
       console.error('Failed to save parts:', err);
       setSaveError('Uložení výběru se nezdařilo.');
+      toast('Uložení výběru se nezdařilo.', 'danger');
     } finally {
       setSaving(false);
     }
-  }, [tenderId, selected, queryClient]);
+  }, [tenderId, selected, queryClient, matchData, toast, noneSelected]);
+
+  const total = casti.length;
+  const count = selected.size;
 
   return (
     <div className="rounded-lg p-4" style={{ border: '1px solid var(--border-default)', background: 'var(--surface-card)' }}>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between">
         <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Části zakázky</h3>
         <button
           onClick={handleSave}
-          disabled={saving || !dirty}
+          disabled={saving || !dirty || noneSelected}
           onMouseEnter={() => setSaveHover(true)}
           onMouseLeave={() => setSaveHover(false)}
           className="rounded px-3 py-1.5 text-xs font-medium transition-colors"
-          style={dirty
+          style={dirty && !noneSelected
             ? { background: saveHover ? 'var(--accent-hover)' : 'var(--accent)', color: 'var(--text-on-accent)', cursor: 'pointer' }
             : { background: 'var(--gray-100)', color: 'var(--text-tertiary)', cursor: 'not-allowed' }}
         >
           {saving ? 'Ukládám...' : 'Uložit výběr'}
         </button>
       </div>
+      <p className="mb-3 text-xs" style={{ color: 'var(--text-secondary)' }}>
+        {noneSelected
+          ? 'Nevybrána žádná část.'
+          : count === total
+            ? `Naceňují a generují se všechny části (${count}/${total}).`
+            : `Naceňuje a generuje se ${count} z ${total} částí — zbytek se do nabídky nezahrne.`}
+      </p>
       <div className="space-y-2">
         {casti.map(cast => (
           <label
@@ -281,8 +309,23 @@ function PartsSelector({ tenderId, casti }: { tenderId: string; casti: Cast[] })
       {saveError && (
         <div className="mt-2 rounded px-2 py-1 text-xs" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{saveError}</div>
       )}
-      {selected.size === 0 && (
-        <p className="mt-2 text-xs" style={{ color: 'var(--danger-solid)' }}>Vyberte alespoň jednu část.</p>
+      {noneSelected && (
+        <p className="mt-2 text-xs" style={{ color: 'var(--danger-solid)' }}>Vyberte alespoň jednu část — prázdná nabídka nedává smysl.</p>
+      )}
+      {staleWarning && (
+        <div
+          className="mt-3 flex items-start justify-between gap-3 rounded px-3 py-2 text-xs"
+          style={{ background: 'var(--warning-bg)', color: 'var(--warning-fg)' }}
+        >
+          <span>Změna výběru částí — spusťte znovu krok Produkty, ať nacenění odpovídá novému výběru.</span>
+          <button
+            onClick={() => setStaleWarning(false)}
+            className="shrink-0 font-medium underline"
+            style={{ color: 'inherit' }}
+          >
+            Skrýt
+          </button>
+        </div>
       )}
     </div>
   );

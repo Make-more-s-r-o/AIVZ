@@ -22,6 +22,11 @@ import { resolveDocumentData, type DocumentData, type DocMode, type GenerationMe
 import { buildKryciList, buildCestneProhlaseni, buildSeznamPoddodavatelu } from './lib/clean-builders/index.js';
 import { reconstructDocument } from './lib/reconstruct-engine.js';
 import type { TenderAnalysis, ProductMatch, ProductCandidate, ExtractedText } from './lib/types.js';
+import {
+  assertPartsSelectionUnchanged,
+  hasPartsSelectionSnapshot,
+  readPartsSelectionSnapshot,
+} from './lib/parts-selection-guard.js';
 
 // Re-export for backward compatibility
 export type { DocMode, GenerationMeta } from './lib/data-resolver.js';
@@ -78,10 +83,27 @@ async function main() {
   const inputDir = join(ROOT, 'input', tenderId);
   await mkdir(outputDir, { recursive: true });
 
+  // Money-path guard musí proběhnout před smazáním starých dokumentů. Pokud se výběr
+  // částí od nacenění změnil, generate skončí tvrdou chybou a nic nezmění.
+  const analysis: TenderAnalysis = JSON.parse(
+    await readFile(join(outputDir, 'analysis.json'), 'utf-8')
+  );
+  const productMatch: ProductMatch = JSON.parse(
+    await readFile(join(outputDir, 'product-match.json'), 'utf-8')
+  );
+  if (hasPartsSelectionSnapshot(productMatch)) {
+    const currentPartsSelection = await readPartsSelectionSnapshot(outputDir);
+    assertPartsSelectionUnchanged(
+      productMatch,
+      currentPartsSelection,
+      (analysis.casti || []).map((cast) => cast.id),
+    );
+  }
+
   // Vyčistit staré vygenerované soubory (ponechat data z předchozích kroků pipeline)
   const KEEP_FILES = new Set([
     'analysis.json', 'extracted-text.json', 'product-match.json',
-    'cenova_uprava.json', 'cost-log.json', 'tender-meta.json', 'prilohy',
+    'parts-selection.json', 'cenova_uprava.json', 'cost-log.json', 'tender-meta.json', 'prilohy',
   ]);
   const existingFiles = await readdir(outputDir);
   for (const file of existingFiles) {
@@ -90,13 +112,6 @@ async function main() {
     }
   }
 
-  // Read inputs
-  const analysis: TenderAnalysis = JSON.parse(
-    await readFile(join(outputDir, 'analysis.json'), 'utf-8')
-  );
-  const productMatch: ProductMatch = JSON.parse(
-    await readFile(join(outputDir, 'product-match.json'), 'utf-8')
-  );
   // Load company: prefer per-tender company from meta, fallback to legacy
   let company: Record<string, unknown>;
   try {

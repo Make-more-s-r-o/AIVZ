@@ -1,10 +1,10 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude, AICallTimeoutError, getMatchCallDeadlineMs } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
 import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
+import { readPartsSelectionSnapshot } from './lib/parts-selection-guard.js';
 import { checkPriceSanity } from './lib/price-sanity.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
@@ -281,17 +281,14 @@ async function main() {
 
   // Read parts selection if multi-part tender
   let selectedParts: string[] | null = null;
+  let selectedPartsSnapshot: string[] | null = null;
   const hasParts = analysis.casti && analysis.casti.length > 1;
   if (hasParts) {
-    const partsSelPath = join(outputDir, 'parts-selection.json');
-    if (existsSync(partsSelPath)) {
-      try {
-        const partsSelection = JSON.parse(await readFile(partsSelPath, 'utf-8'));
-        selectedParts = partsSelection.selected_parts || null;
-        console.log(`  Parts selection: ${selectedParts?.join(', ') || 'all'}`);
-      } catch {}
-    }
-    if (!selectedParts) {
+    selectedPartsSnapshot = await readPartsSelectionSnapshot(outputDir);
+    selectedParts = selectedPartsSnapshot;
+    if (selectedParts) {
+      console.log(`  Parts selection: ${selectedParts.join(', ') || 'all'}`);
+    } else {
       selectedParts = analysis.casti.map((c: any) => c.id);
       console.log(`  No parts selection — using all parts: ${selectedParts!.join(', ')}`);
     }
@@ -798,6 +795,7 @@ async function main() {
   const finalParse = ProductMatchSchema.safeParse({
     tenderId,
     matchedAt: new Date().toISOString(),
+    selected_parts_snapshot: selectedPartsSnapshot,
     polozky_match: polozkyMatch,
   });
   if (!finalParse.success) {

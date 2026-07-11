@@ -192,6 +192,9 @@ export const PolozkaMatchSchema = z.object({
 export const ProductMatchSchema = z.object({
   tenderId: z.string(),
   matchedAt: z.string().datetime(),
+  // Snapshot výběru částí při nacenění; null znamená všechny části.
+  // Optional zachovává kompatibilitu se staršími product-match soubory.
+  selected_parts_snapshot: z.array(z.string()).nullable().optional(),
   // Legacy single-product fields
   kandidati: z.array(ProductCandidateSchema).optional(),
   vybrany_index: z.preprocess(parseAiNumber, z.number().optional()),

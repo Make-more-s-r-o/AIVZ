@@ -27,11 +27,42 @@ function authHeaders(): Record<string, string> {
   return legacy ? { Authorization: `Bearer ${legacy}` } : {};
 }
 
-function getTokenParam(): string {
-  const jwt = getJwt();
-  if (jwt) return jwt;
-  const legacy = getAuthToken();
-  return legacy || '';
+/**
+ * Stáhne binární soubor (dokument, příloha, ZIP balík) z API endpointu s Authorization
+ * hlavičkou (JWT/legacy token) a spustí jeho uložení v prohlížeči.
+ *
+ * Nahrazuje dřívější posílání tokenu v `?token=` query stringu — ten unikal do nginx access
+ * logů. `<a href>` odkaz ani `window.location` neumí poslat Authorization hlavičku, proto
+ * fetch → blob → programatický `<a download>`.
+ *
+ * Jméno souboru z `Content-Disposition` (server ho u ZIP balíků odvozuje z názvu zakázky) má
+ * přednost před `fallbackFilename`, který se použije jen když hlavička chybí nebo je nečitelná.
+ */
+export async function downloadWithAuth(url: string, fallbackFilename: string): Promise<void> {
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Stažení souboru se nezdařilo');
+  }
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const rawFilename = match?.[1];
+  let filename = fallbackFilename;
+  if (rawFilename) {
+    try { filename = decodeURIComponent(rawFilename); } catch { filename = rawFilename; }
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 /**
@@ -152,6 +183,87 @@ export async function getTenders(): Promise<TenderSummary[]> {
 
 export async function getHlidacTenders(query: string): Promise<HlidacTenderCandidate[]> {
   return fetchJson(`/monitoring/hlidac?q=${encodeURIComponent(query)}`);
+}
+
+// --- Monitoring feed (perzistovaný, s go/no-go skóre) ---
+
+export type MonitoringStav = 'nova' | 'prevzata' | 'ignorovana';
+
+export interface MonitoringFeedItem {
+  id: string;
+  zdroj: string;
+  zdroj_id: string;
+  nazev: string;
+  zadavatel: string | null;
+  predpokladana_hodnota: number | null;
+  lhuta_nabidek: string | null;
+  url: string | null;
+  stav: MonitoringStav;
+  tender_id: string | null;
+  created_at: string;
+  go_no_go: GoNoGo;
+}
+
+/** Natáhne nové zakázky ze zdroje do feedu. Vrací počty nalezeno/nových. */
+export async function syncMonitoring(
+  opts: { zdroj?: 'nen' | 'hlidac' | 'both'; q?: string } = {},
+): Promise<{ zdroj: string; nalezeno: number; novych: number; zdroje_pouzite: string[]; varovani?: string }> {
+  const res = await fetch(`${API_BASE}/monitoring/sync`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Synchronizace selhala');
+  }
+  return res.json();
+}
+
+export async function getMonitoringFeed(stav: MonitoringStav = 'nova'): Promise<MonitoringFeedItem[]> {
+  return fetchJson(`/monitoring/feed?stav=${encodeURIComponent(stav)}`);
+}
+
+export async function prevzitMonitoring(id: string): Promise<{ tender_id: string; alreadyTaken?: boolean }> {
+  const res = await fetch(`${API_BASE}/monitoring/${id}/prevzit`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Převzetí selhalo');
+  }
+  return res.json();
+}
+
+export async function ignorovatMonitoring(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/monitoring/${id}/ignorovat`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (res.status === 401) { clearAuth(); window.location.reload(); throw new Error('Session expired'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Akce selhala');
+  }
+}
+
+// Schvalovací inbox — jedna řádka na zakázku, která čeká na akci operátora.
+export interface InboxEntry {
+  tender_id: string;
+  nazev: string;
+  crm_stav: string | null;
+  nepotvrzene_ceny: number;
+  hard_flagy: number;
+  validation_fails: number;
+  ready_to_submit: boolean;
+  celkova_cena_s_dph: number | null;
+  data_error: boolean;
+  data_error_files: string[];
+}
+
+export async function getInbox(): Promise<InboxEntry[]> {
+  return fetchJson('/inbox');
 }
 
 /**
@@ -484,9 +596,7 @@ export async function deleteTender(id: string): Promise<{ success: boolean }> {
 }
 
 export function getDocumentDownloadUrl(id: string, filename: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/documents/${encodeURIComponent(filename)}`;
 }
 
 // Attachments (qualification documents)
@@ -509,9 +619,7 @@ export async function deleteAttachment(id: string, filename: string): Promise<{ 
 }
 
 export function getAttachmentDownloadUrl(id: string, filename: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/attachments/${encodeURIComponent(filename)}`;
 }
 
 // --- Generation meta + field validation ---
@@ -1144,15 +1252,11 @@ export async function getCost(id: string): Promise<CostSummary> {
 // --- ZIP downloads ---
 
 export function getDocumentsZipUrl(id: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/download/documents`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/download/documents`;
 }
 
 export function getBundleZipUrl(id: string): string {
-  const token = getTokenParam();
-  const base = `${API_BASE}/tenders/${id}/download/bundle`;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  return `${API_BASE}/tenders/${id}/download/bundle`;
 }
 
 // --- Parts (části zakázky) API ---

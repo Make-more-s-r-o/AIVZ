@@ -11,6 +11,7 @@ import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
@@ -64,11 +65,21 @@ import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from 
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
+import { fetchNenTenders } from './lib/monitoring/nen-client.js';
+import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
+import {
+  upsertFeed, listFeed, getFeedItem, setFeedStav,
+  type MonitoringStav,
+} from './lib/monitoring/monitoring-store.js';
+import { scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
+import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
 import {
   RUN_ALL_STEPS,
   advanceRunAllChain,
   loadPipelineJobs,
   savePipelineJobs,
+  selectJobsToStart,
   type PipelineJob as Job,
   type PipelineStep,
 } from './lib/pipeline-job-state.js';
@@ -146,8 +157,10 @@ app.use((req, res, next) => {
     if (API_TOKEN && token === API_TOKEN) return next();
   }
 
-  // 2. Support ?token= query param (for download links in <a href> a jiná GET stažení,
-  //    kde prohlížeč neumí poslat Authorization hlavičku).
+  // 2. Support ?token= query param — zpětná kompatibilita pro curl/skripty a staré odkazy.
+  //    FE (apps/web) už tuto cestu NEPOUŽÍVÁ (viz downloadWithAuth v apps/web/src/lib/api.ts —
+  //    stahování jde přes fetch + Authorization hlavičku, aby token neunikal do nginx access
+  //    logů). Plné odstranění query-token akceptace na BE je follow-up, ne součást této změny.
   if (req.query.token) {
     const qToken = req.query.token as string;
     const jwtPayload = verifyToken(qToken);
@@ -204,7 +217,14 @@ app.use(async (req, res, next) => {
 // --- Async Job Queue ---
 
 const jobs = new Map<string, Job>();
-let currentJob: string | null = null;
+// Souběžná fronta: místo jednoho slotu držíme množinu právě běžících úloh. Limit řídí
+// PIPELINE_MAX_CONCURRENT (default 2). Plánovač (selectJobsToStart) navíc zaručuje per-tender
+// serializaci — nikdy dvě úlohy téže zakázky současně (sdílí soubory v output/<tenderId>).
+const runningJobs = new Set<string>();
+const PIPELINE_MAX_CONCURRENT = (() => {
+  const raw = Number(process.env.PIPELINE_MAX_CONCURRENT);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2;
+})();
 const jobQueue: string[] = [];
 let persistTimer: NodeJS.Timeout | null = null;
 let persistDirty = false;
@@ -301,18 +321,47 @@ function appendJobLogs(job: Job, lines: string[]) {
   scheduleJobsPersist();
 }
 
-function processQueue() {
-  if (currentJob) return;
-  const nextId = jobQueue.shift();
-  if (!nextId) return;
+/** Zakázky, které mají právě běžící úlohu (per-tender lock pro plánovač). */
+function runningTenderIds(): string[] {
+  const ids: string[] = [];
+  for (const jobId of runningJobs) {
+    const running = jobs.get(jobId);
+    if (running) ids.push(running.tenderId);
+  }
+  return ids;
+}
 
-  const job = jobs.get(nextId);
-  if (!job) {
-    processQueue();
-    return;
+/**
+ * Naplánuje a odstartuje způsobilé úlohy z fronty až do limitu souběhu. Vybírá čistá funkce
+ * selectJobsToStart (FIFO + per-tender lock); zde jen provedeme mutace (odebrání z fronty, spawn).
+ */
+function processQueue() {
+  // Vyřaď z fronty úlohy, které už mezitím zmizely z mapy (cleanup), ať plánovač počítá s realitou.
+  for (let i = jobQueue.length - 1; i >= 0; i--) {
+    if (!jobs.has(jobQueue[i])) jobQueue.splice(i, 1);
   }
 
-  currentJob = nextId;
+  const queueJobs = jobQueue.map((id) => jobs.get(id)!);
+  const toStart = selectJobsToStart(
+    queueJobs.map((j) => ({ id: j.id, tenderId: j.tenderId })),
+    runningTenderIds(),
+    PIPELINE_MAX_CONCURRENT,
+  );
+  if (toStart.length === 0) return;
+
+  const toStartSet = new Set(toStart);
+  // Odeber vybrané úlohy z fronty (zbytek zůstává ve FIFO pořadí).
+  for (let i = jobQueue.length - 1; i >= 0; i--) {
+    if (toStartSet.has(jobQueue[i])) jobQueue.splice(i, 1);
+  }
+  for (const jobId of toStart) {
+    const job = jobs.get(jobId);
+    if (job) startJob(job);
+  }
+}
+
+function startJob(job: Job) {
+  runningJobs.add(job.id);
   job.status = 'running';
   if (job.parentJobId) {
     const parent = jobs.get(job.parentJobId);
@@ -328,7 +377,7 @@ function processQueue() {
     job.status = 'error';
     job.error = `Unknown step: ${job.step}`;
     job.finishedAt = new Date().toISOString();
-    currentJob = null;
+    runningJobs.delete(job.id);
     scheduleJobsPersist();
     processQueue();
     return;
@@ -414,7 +463,7 @@ function processQueue() {
     job.status = status;
     if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
-    currentJob = null;
+    runningJobs.delete(job.id);
     scheduleJobsPersist();
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
@@ -595,7 +644,8 @@ function requireJwt(req: express.Request, res: express.Response, next: express.N
       return next();
     }
   }
-  // Also check query token (for GET routes that need auth)
+  // Also check query token (zpětná kompatibilita pro curl/skripty — FE už ?token= neposílá,
+  // viz downloadWithAuth v apps/web/src/lib/api.ts; plné odstranění je follow-up)
   if (req.query.token) {
     const payload = verifyToken(req.query.token as string);
     if (payload) {
@@ -734,6 +784,118 @@ app.post('/api/auth/change-password', requireJwt, async (req, res) => {
 
 // GET /api/monitoring/hlidac - živý feed z Hlídače státu (jen admin).
 app.get('/api/monitoring/hlidac', requireJwt, requireRole('admin'), monitoringHlidacHandler);
+
+// POST /api/monitoring/sync - natáhne nové zakázky ze zdroje do tabulky monitoring_zakazky.
+// Idempotentní: opakovaný běh nové jen doplní, stav dřív převzatých/ignorovaných nechá.
+// zdroj: 'nen' (default, bez tokenu) | 'hlidac' (vyžaduje HLIDAC_TOKEN) | 'both'.
+app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
+  try {
+    const zdroj = (typeof req.body?.zdroj === 'string' ? req.body.zdroj : 'nen') as MonitoringSource;
+    const q = typeof req.body?.q === 'string' ? req.body.q : '';
+    if (!['nen', 'hlidac', 'both'].includes(zdroj)) {
+      return res.status(400).json({ error: 'Neplatný zdroj monitoringu.' });
+    }
+
+    const sync = await collectMonitoringInputs(zdroj, q, Boolean(process.env.HLIDAC_TOKEN), {
+      fetchNen: fetchNenTenders,
+      fetchHlidac: fetchNewTenders,
+    });
+
+    // Bez DB nelze feed perzistovat → 503 (ne pád). S DB uloží a vrátí počty.
+    const inserted = await upsertFeed(sync.inputs);
+    res.json({
+      zdroj,
+      nalezeno: sync.inputs.length,
+      novych: inserted,
+      zdroje_pouzite: sync.zdroje_pouzite,
+      ...(sync.varovani ? { varovani: sync.varovani } : {}),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná — feed nelze uložit.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/monitoring/feed?stav=nova - feed s dopočítaným quick go/no-go skóre.
+app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
+  try {
+    const stavParam = typeof req.query.stav === 'string' ? req.query.stav : 'nova';
+    const stav = (['nova', 'prevzata', 'ignorovana'].includes(stavParam)
+      ? stavParam
+      : undefined) as MonitoringStav | undefined;
+
+    const items = await listFeed(stav);
+    // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
+    const company = await getCompany('default');
+    const now = new Date();
+    const withScore = items.map((item) => ({
+      ...item,
+      go_no_go: scoreFeedItem(item, company ?? undefined, now),
+    }));
+    res.json(withScore);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/monitoring/:id/prevzit - založí z feed položky zakázku (složka input/ + CRM stav).
+// Dokumenty ZD nahraje operátor ručně (stažení příloh zde neřešíme).
+app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
+  const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
+  const actor = (req as any).user?.sub ?? null;
+  try {
+    const item = await getFeedItem(id);
+    if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
+    if (item.stav === 'prevzata' && item.tender_id) {
+      return res.json({ tender_id: item.tender_id, alreadyTaken: true });
+    }
+
+    // Atomická rezervace input složky; cizí output metadata se nikdy nepřepisují.
+    let baseSlug = slugifyTender(item.nazev, `zakazka-${id}`);
+    if (!isSafePath(baseSlug)) baseSlug = `zakazka-${id}`;
+    await mkdir(INPUT_DIR, { recursive: true });
+    const tenderId = await reserveMonitoringTender(INPUT_DIR, OUTPUT_DIR, baseSlug, id, {
+      name: item.nazev,
+      created_at: new Date().toISOString(),
+      source: {
+        zdroj: item.zdroj,
+        zdroj_id: item.zdroj_id,
+        url: item.url,
+        zadavatel: item.zadavatel,
+        predpokladana_hodnota: item.predpokladana_hodnota,
+        lhuta_nabidek: item.lhuta_nabidek,
+      },
+    });
+
+    // CRM stav 'nova' + zápis do feedu (stav 'prevzata', vazba tender_id). Bez DB → 503.
+    await setStatus(tenderId, 'nova');
+    await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
+    await setFeedStav(id, 'prevzata', tenderId);
+
+    res.json({ tender_id: tenderId });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná — zakázku nelze převzít.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/monitoring/:id/ignorovat - skryje položku z feedu (stav 'ignorovana').
+app.post('/api/monitoring/:id/ignorovat', requireJwt, async (req, res) => {
+  try {
+    const updated = await setFeedStav(String(req.params.id), 'ignorovana');
+    if (!updated) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'db_unavailable') {
+      return res.status(503).json({ error: 'Databáze není dostupná.' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // GET /api/users - list all users
 app.get('/api/users', requireJwt, async (_req, res) => {
@@ -879,6 +1041,42 @@ app.get('/api/tenders', async (req, res) => {
         })
     );
     res.json(tenders);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/inbox - schvalovací inbox napříč zakázkami.
+// Agreguje "co ode mě čeká akci": nepotvrzené ceny, HARD sanity flagy, počet fail
+// checků z validace a CRM stav. Vrací jen zakázky, kde je akce potřeba (řazeno
+// nejnaléhavější první). Chybějící soubor je legitimní prázdný vstup, poškozený JSON
+// ale zůstane viditelný jako blokující chyba dat.
+app.get('/api/inbox', async (req, res) => {
+  try {
+    await mkdir(INPUT_DIR, { recursive: true });
+    const dirs = (await readdir(INPUT_DIR)).filter((d) => !d.startsWith('.'));
+    const crmStatuses = await getAllStatuses();
+
+    const inputs: InboxTenderInput[] = await Promise.all(
+      dirs.map(async (tenderId) => {
+        const [analysis, productMatch, validation] = await Promise.all([
+          readInboxJson(OUTPUT_DIR, tenderId, 'analysis.json'),
+          readInboxJson(OUTPUT_DIR, tenderId, 'product-match.json'),
+          readInboxJson(OUTPUT_DIR, tenderId, 'validation-report.json'),
+        ]);
+        const reads = [analysis, productMatch, validation];
+        return {
+          tenderId,
+          analysis: analysis.state === 'ok' ? analysis.data : null,
+          productMatch: productMatch.state === 'ok' ? productMatch.data : null,
+          validation: validation.state === 'ok' ? validation.data : null,
+          dataErrors: reads.filter((read) => read.state === 'corrupt').map((read) => read.filename),
+          crmStav: crmStatuses.get(tenderId)?.status ?? null,
+        };
+      }),
+    );
+
+    res.json(buildInbox(inputs));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

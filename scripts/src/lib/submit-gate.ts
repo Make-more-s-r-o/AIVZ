@@ -14,6 +14,11 @@ import { join } from 'path';
 import type { ProductMatch, PolozkaMatch } from './types.js';
 import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
+import {
+  assertPartsSelectionUnchanged,
+  hasPartsSelectionSnapshot,
+  readPartsSelectionSnapshot,
+} from './parts-selection-guard.js';
 
 export interface SubmitGateResult {
   ready: boolean;
@@ -68,6 +73,15 @@ export async function computeSubmitGate(outputDir: string): Promise<SubmitGateRe
       return { ready: false, problems: [`Nelze načíst cenová data (product-match.json je poškozený): ${err}`], warnings };
     }
     const allItems = pm.polozky_match || [];
+    if (hasPartsSelectionSnapshot(pm)) {
+      try {
+        const current = await readPartsSelectionSnapshot(outputDir);
+        const allPartIds = [...new Set(allItems.map((item) => item.cast_id).filter((id): id is string => Boolean(id)))];
+        assertPartsSelectionUnchanged(pm, current, allPartIds);
+      } catch (error) {
+        problems.push(error instanceof Error ? error.message : String(error));
+      }
+    }
     // Filtruj jen položky vybraných částí — u vícečástových zakázek se podává jedna část
     // a položky ostatních částí zůstanou nepotvrzené (jinak by gate byl navždy ready=false).
     const items = filterBySelectedParts(allItems, await loadSelectedPartIds(outputDir, allItems));

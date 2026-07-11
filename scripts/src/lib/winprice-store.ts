@@ -14,7 +14,33 @@ import { getPool } from './db.js';
 // ============================================================
 
 /** Heuristické komoditní kategorie (bez AI). */
-export type KomoditaKategorie = 'it_av' | 'naradi_dilna' | 'kancelar' | 'ostatni';
+export type KomoditaKategorie =
+  | 'it_av'
+  | 'naradi_dilna'
+  | 'zdravotnicke'
+  | 'vozidla'
+  | 'stavebni_prace'
+  | 'potraviny'
+  | 'energie'
+  | 'nabytek'
+  | 'kancelar'
+  | 'sluzby'
+  | 'ostatni';
+
+/** Všechny kategorie kromě fallbacku 'ostatni' — pro validaci vstupů (API, CLI). */
+export const KOMODITA_KATEGORIE_VALUES: KomoditaKategorie[] = [
+  'it_av',
+  'naradi_dilna',
+  'zdravotnicke',
+  'vozidla',
+  'stavebni_prace',
+  'potraviny',
+  'energie',
+  'nabytek',
+  'kancelar',
+  'sluzby',
+  'ostatni',
+];
 
 export interface WinPriceRecord {
   zdroj: string; // 'registr_smluv' | 'vvz' | 'ted'
@@ -38,44 +64,147 @@ export interface WinPriceRecord {
 // Kategorizace komodit — heuristika klíčovými slovy (BEZ AI)
 // ============================================================
 
-// Pořadí = priorita. Jakmile předmět matchne kategorii, končíme.
+/**
+ * Odstraní diakritiku a sjednotí bílé znaky, text orámuje mezerami. Díky tomu
+ * stačí v klíčových slovech níže jediný ascii tvar kořene (žádné duplicitní
+ * páry "tiskárn"/"tiskarn") a krátká/generická slova (" it ", " cnc ") lze
+ * bezpečně vymezit mezerami, aby nechytala shody uvnitř jiných slov (např.
+ * " nas " ⊄ "nástroj").
+ */
+function normalizeForMatch(text: string): string {
+  const stripped = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  return ` ${stripped} `;
+}
+
+/**
+ * Vysoce specifické fráze vyhodnocené PŘED obecnými pravidly níže — řeší kolize,
+ * kdy obecnější kořen slova z jiné (dříve v pořadí vyhodnocované) kategorie by
+ * jinak vyhrál nad specifičtějším případem. Např. "3D tiskárna" by bez tohoto
+ * override spadla do it_av přes kořen "tiskarn" (laserová/inkoustová tiskárna),
+ * přestože jde o dílenské/výukové zařízení.
+ */
+const PRIORITY_OVERRIDES: Array<{ kat: KomoditaKategorie; slova: string[] }> = [
+  { kat: 'naradi_dilna', slova: ['3d tisk'] },
+  {
+    kat: 'zdravotnicke',
+    slova: [
+      'monitor pacient', 'operacni stul', 'operacni sal', 'nemocnicni luzko',
+      'sanitni vozidl', 'sanitk', 'ambulantni vozidl',
+    ],
+  },
+];
+
+// Pořadí = priorita mezi kategoriemi. Jakmile předmět matchne kategorii, končíme —
+// proto jsou dřív kategorie s významově specifičtějšími/užšími klíčovými slovy
+// (zdravotnické, vozidla, ...) a až na konci obecné/průřezové (kancelář, služby).
 const CATEGORY_KEYWORDS: Array<{ kat: KomoditaKategorie; slova: string[] }> = [
   {
     kat: 'it_av',
     slova: [
-      'server', 'notebook', 'laptop', 'počítač', 'pocitac', 'monitor', 'projektor',
-      'dataprojektor', 'tiskárn', 'tiskarn', 'switch', 'router', 'firewall', 'kamera',
-      'software', 'licence', 'licenc', 'operační systém', 'network', 'síťov', 'sitov',
-      'výpočet', 'vypocet', 'datov', 'ssd', 'harddisk', 'pevný disk', 'procesor',
-      'tablet', 'chytrý telefon', 'skener', 'scanner', 'ozvučen', 'ozvucen', 'audio',
-      'video', 'interaktivní', 'interaktivni', 'workstation', 'pracovní stanic',
-      'diskové pole', 'úložiště', 'uloziste', 'záložní zdroj', 'ups ', 'informační systém',
-      'informacni system', 'wifi', 'wi-fi', 'access point', 'ict', ' it ', 'hardware',
+      'server', 'notebook', 'laptop', 'pocitac', 'monitor', 'projektor', 'dataprojektor',
+      'tiskarn', 'kopirk', 'multifunkcni zarizeni', 'plotr', 'plotter', 'switch', 'router',
+      'firewall', 'kamer', 'cctv', 'software', 'licenc', 'operacni system', 'sitov',
+      'vypocetni technik', 'datove uloziste', 'uloziste dat', 'ssd', 'harddisk',
+      'pevny disk', 'procesor', 'tablet', 'mobilni telefon', 'chytry telefon', 'skener',
+      'scanner', 'ozvucen', 'audio', 'video technik', 'interaktivni tabul',
+      'interaktivni displej', 'workstation', 'pracovni stanic', 'diskove pole',
+      'uloziste', 'zalozni zdroj', ' ups ', 'informacni system', 'wifi', 'wi-fi',
+      'access point', ' ict ', ' it ', 'hardware', 'telefonni ustredn', 'pobockova ustredn',
+      'videokonferenc', ' nas ', 'cloudov',
     ],
   },
   {
     kat: 'naradi_dilna',
     slova: [
-      'nářadí', 'naradi', 'vrtačk', 'vrtack', 'brusk', 'pil', 'svářeč', 'svarec',
-      'svařov', 'svarov', 'kompresor', 'frézk', 'frezk', 'soustruh', 'dílensk', 'dilensk',
-      'ruční nářadí', 'elektrocentrál', 'generátor', 'generator', 'šroubovák', 'sroubovak',
-      'kladivo', 'aku ', 'akumulátorov', 'akumulatorov', 'stavební strojní', 'obráběc', 'obrabec',
-      'lis ', 'vakuov', 'laser', '3d tisk', 'cnc',
+      'naradi', 'vrtack', 'brusk', 'pil', 'svarec', 'svarov', 'kompresor', 'frezk',
+      'soustruh', 'dilensk', 'elektrocentral', 'generator', 'sroubovak', 'kladivo',
+      ' aku ', 'akumulatorov', 'obrabec', 'lis ', 'vakuov', 'laser', '3d tisk', 'cnc',
+      'hoblovk', 'paskova bruska', 'michack', 'sbijeck', 'ohyback', 'strihacka plechu',
+      'dilenske vybaveni', 'stavebni stroj',
+    ],
+  },
+  {
+    kat: 'zdravotnicke',
+    slova: [
+      'zdravotnick', 'rentgen', 'ultrazvuk', 'sonograf', 'defibrilator', 'ventilator',
+      'monitor pacient', 'operacni stul', 'operacni sal', 'nemocnicni luzko', 'sanitni vozidl',
+      'sanitk', 'ambulantni vozidl', 'laboratorni pristroj', 'diagnosticky pristroj',
+      'ct pristroj', 'magneticka rezonance', 'stomatologicka souprava', 'zubarske kreslo',
+      'infuzni pumpa', 'sterilizator', 'autoklav', 'lekarsk pristroj',
+    ],
+  },
+  {
+    kat: 'vozidla',
+    slova: [
+      'automobil', 'vozidl', 'autobus', 'traktor', 'privesn vozik', 'motocykl', 'skutr',
+      'elektromobil', 'hybridni vozidl', 'uzitkove vozidl', 'terenni vozidl', 'vozovy park',
+      'nakladni vuz', 'dodavkov automobil',
+    ],
+  },
+  {
+    kat: 'stavebni_prace',
+    slova: [
+      'stavebni prace', 'stavebni uprav', 'rekonstrukc', 'vystavba', 'novostavb',
+      'oprava strech', ' strech', 'fasad', 'zatepleni', 'hydroizolac', 'kanalizac',
+      'vodovodn', 'elektroinstalac', 'zemni prace', 'oprava komunikace', 'chodnik',
+      'silnice', 'mostni konstrukc', 'demolice', 'sanace budov', 'malirsk prace',
+      'zednick prace', 'pokladka', 'asfaltov', 'zateplovaci system',
+    ],
+  },
+  {
+    kat: 'potraviny',
+    slova: [
+      'potravin', 'peciv', 'mlecn', 'maso', 'masn', 'ovoce', 'zelenin', 'napoje',
+      'skolni strav', 'lahudk', 'pekaren',
+    ],
+  },
+  {
+    kat: 'energie',
+    slova: [
+      'elektricka energie', 'dodavka elektriny', 'elektrin', 'zemni plyn', ' plyn',
+      'pohonne hmoty', 'nafta', 'benzin', 'palivo', 'tepelna energie', ' teplo ', 'uhli',
+      'biomasa',
+    ],
+  },
+  {
+    kat: 'nabytek',
+    slova: [
+      'nabytek', 'zidl', ' stul', ' stoly', 'skrin', 'regal', 'pohovk', 'kreslo', 'postel',
+      'skrink', 'sedaci soupravu', 'konferencni stolek', 'psaci stul', 'skolni lavice',
+      'lavice', 'matrace', 'kancelarsky nabytek',
     ],
   },
   {
     kat: 'kancelar',
     slova: [
-      'kancelář', 'kancelar', 'papír', 'papir', 'toner', 'nábytek', 'nabytek', 'židl',
-      'zidl', 'stůl', 'kancelářsk', 'kancelarsk', 'psací', 'psaci', 'archivač', 'archivac',
-      'skříň', 'skrin', 'regál', 'regal', 'kancelářské potřeby', 'kancelarske potreby',
+      'kancelarsk potreb', 'kancelarske potreby', 'papir', 'toner', 'cartridge',
+      'psaci potreb', 'sesivac', 'desky na dokumenty', 'obalk', 'skartova', 'kalkulack',
+      'razitk', 'kancelar',
+    ],
+  },
+  {
+    kat: 'sluzby',
+    slova: [
+      'uklidov sluzb', ' uklid ', 'uklidove sluzby', 'ostraha', 'bezpecnostni sluzb',
+      'pravni sluzb', 'pravni poradenstvi', 'ucetni sluzb', 'audit sluzb', 'preklad sluzb',
+      'tlumocnick sluzb', 'poradensk sluzb', 'poradenstv', 'konzultacn sluzb', 'prepravni sluzb',
+      'doprava osob', 'stehovaci sluzb', 'stravovaci sluzb', 'pojistovaci sluzb',
+      'marketingov sluzb', ' sluzby', ' sluzeb',
     ],
   },
 ];
 
-/** Přiřadí komoditní kategorii dle klíčových slov v předmětu. */
+/** Přiřadí komoditní kategorii dle klíčových slov v předmětu (bez AI, bez diakritiky). */
 export function categorizeCommodity(predmet: string): KomoditaKategorie {
-  const p = predmet.toLowerCase();
+  const p = normalizeForMatch(predmet);
+  for (const { kat, slova } of PRIORITY_OVERRIDES) {
+    if (slova.some((s) => p.includes(s))) return kat;
+  }
   for (const { kat, slova } of CATEGORY_KEYWORDS) {
     if (slova.some((s) => p.includes(s))) return kat;
   }
