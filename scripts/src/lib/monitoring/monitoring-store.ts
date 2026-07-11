@@ -149,33 +149,47 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
 export async function listFeed(
   stav?: MonitoringStav,
   limit = 200,
-  options: { includeExpired?: boolean } = {},
+  options: { includeExpired?: boolean; category?: KomoditaKategorie } = {},
 ): Promise<FeedItem[]> {
   if (!dbReady()) return [];
   try {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    if (stav) {
-      params.push(stav);
-      conditions.push(`stav = $${params.length}`);
-    }
-    if (!options.includeExpired) {
-      conditions.push('(lhuta_nabidek IS NULL OR lhuta_nabidek >= CURRENT_DATE)');
-    }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    params.push(limit);
-    const r = await query<FeedDbRow>(
-      `SELECT ${FEED_COLS} FROM monitoring_zakazky ${where}
-       ORDER BY (lhuta_nabidek IS NULL), lhuta_nabidek ASC, created_at DESC
-       LIMIT $${params.length}`,
-      params,
-    );
+    const built = buildListFeedQuery(stav, limit, options);
+    const r = await query<FeedDbRow>(built.sql, built.params);
     const items = r.rows.map(normalizeFeedRow);
     await backfillMissingCategories(r.rows, items);
     return items;
   } catch {
     return [];
   }
+}
+
+/** Sestavení SQL je oddělené, aby šlo regresně ověřit pořadí filtrů před LIMIT. */
+export function buildListFeedQuery(
+  stav?: MonitoringStav,
+  limit = 200,
+  options: { includeExpired?: boolean; category?: KomoditaKategorie } = {},
+): { sql: string; params: unknown[] } {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (stav) {
+      params.push(stav);
+      conditions.push(`stav = $${params.length}`);
+    }
+    if (options.category) {
+      params.push(options.category);
+      conditions.push(`kategorie = $${params.length}`);
+    }
+    if (!options.includeExpired) {
+      conditions.push('(lhuta_nabidek IS NULL OR lhuta_nabidek >= CURRENT_DATE)');
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit);
+    return {
+      sql: `SELECT ${FEED_COLS} FROM monitoring_zakazky ${where}
+       ORDER BY (lhuta_nabidek IS NULL), lhuta_nabidek ASC, created_at DESC
+       LIMIT $${params.length}`,
+      params,
+    };
 }
 
 export async function getFeedItem(id: string): Promise<FeedItem | null> {

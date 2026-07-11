@@ -16,6 +16,7 @@ import {
   buildChecklistItem,
   type DocManifest,
 } from '../src/lib/doc-slots.js';
+import { selectCompanyDocsToCopy } from '../src/lib/company-store.js';
 
 // Pevné „nyní" pro deterministické testy: 2026-07-11 (poledne, aby na časovém pásmu nezáleželo).
 const NOW = new Date('2026-07-11T12:00:00.000Z');
@@ -66,6 +67,24 @@ test('daysUntilExpiry: počítá kalendářní dny nezávisle na čase', () => {
   assert.equal(daysUntilExpiry(isoOffset(-5), NOW), -5);
   assert.equal(daysUntilExpiry(null, NOW), null);
   assert.equal(daysUntilExpiry('nonsense', NOW), null);
+});
+
+test('daysUntilExpiry používá kalendářní den Europe/Prague kolem půlnoci', () => {
+  // V létě je Praha UTC+2: ve 22:30 UTC už je následující český den.
+  assert.equal(daysUntilExpiry('2026-07-12', new Date('2026-07-11T21:59:59Z')), 1);
+  assert.equal(daysUntilExpiry('2026-07-12', new Date('2026-07-11T22:00:00Z')), 0);
+  // V zimě je Praha UTC+1.
+  assert.equal(daysUntilExpiry('2026-01-02', new Date('2026-01-01T22:59:59Z')), 1);
+  assert.equal(daysUntilExpiry('2026-01-02', new Date('2026-01-01T23:00:00Z')), 0);
+});
+
+test('docExpiryStatus respektuje pražský den při přechodu DST', () => {
+  // Noc před začátkem letního času (stále UTC+1).
+  assert.equal(docExpiryStatus('2026-03-28', new Date('2026-03-28T23:30:00Z')), 'expirovany');
+  assert.equal(docExpiryStatus('2026-03-29', new Date('2026-03-28T23:30:00Z')), 'expiruje');
+  // Noc před koncem letního času (ještě UTC+2).
+  assert.equal(docExpiryStatus('2026-10-24', new Date('2026-10-24T22:30:00Z')), 'expirovany');
+  assert.equal(docExpiryStatus('2026-10-25', new Date('2026-10-24T22:30:00Z')), 'expiruje');
 });
 
 // --- isValidIsoDateString ---
@@ -141,6 +160,16 @@ test('buildChecklistItem: příloha zakázky má přednost (zdroj=zakazka)', () 
   assert.equal(item.status, 'nahrano');
   assert.equal(item.zdroj, 'zakazka');
   assert.equal(item.filename, 'zakazka.pdf');
+});
+
+test('kopírovací plán přeskočí expirovaný doklad, vrátí varování a označí slot jako chybějící', () => {
+  const selection = selectCompanyDocsToCopy([
+    { slot: 'vypis_or', filename: 'stary-vypis.pdf', uploadedAt: NOW.toISOString(), platnost_do: '2026-07-10' },
+    { slot: 'potvrzeni_fu', filename: 'fu.pdf', uploadedAt: NOW.toISOString(), platnost_do: '2026-08-31' },
+  ], ['vypis_or', 'potvrzeni_fu'], NOW);
+  assert.deepEqual(selection.entries.map((entry) => entry.filename), ['fu.pdf']);
+  assert.deepEqual(selection.missing, ['vypis_or']);
+  assert.deepEqual(selection.warnings, ['Doklad „stary-vypis.pdf" je po platnosti — nebyl zkopírován.']);
 });
 
 // --- Zpětná kompatibilita manifestu (staré entries bez platnost_do) ---

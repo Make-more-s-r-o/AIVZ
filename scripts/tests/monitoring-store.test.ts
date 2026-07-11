@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseNenListing, parseCzechDate, fetchNenTenders, type NenTenderCandidate } from '../src/lib/monitoring/nen-client.js';
 import {
   toNenFeedInput, toHlidacFeedInput, toIsoDate,
-  listFeed, getFeedItem, upsertFeed, setFeedStav, normalizeFeedRow,
+  listFeed, getFeedItem, upsertFeed, setFeedStav, normalizeFeedRow, buildListFeedQuery,
 } from '../src/lib/monitoring/monitoring-store.js';
 import { collectMonitoringInputs } from '../src/lib/monitoring/monitoring-sync.js';
 import { closePool } from '../src/lib/db.js';
@@ -218,6 +218,14 @@ test('normalizeFeedRow líně dopočítá chybějící kategorii ze starého ř�
     stav: 'nova', tender_id: null, created_at: '2026-07-11T00:00:00Z', kategorie: null,
   });
   assert.equal(row.kategorie, 'it_av');
+});
+
+test('feed SQL aplikuje stav a kategorii před interním LIMIT 1000', () => {
+  const built = buildListFeedQuery('nova', 1000, { category: 'it_av' });
+  assert.deepEqual(built.params, ['nova', 'it_av', 1000]);
+  assert.match(built.sql, /WHERE stav = \$1 AND kategorie = \$2 AND/);
+  assert.match(built.sql, /LIMIT \$3/);
+  assert.ok(built.sql.indexOf('kategorie = $2') < built.sql.indexOf('LIMIT $3'));
 });
 
 // --- Quick go/no-go skóre feed položky ---

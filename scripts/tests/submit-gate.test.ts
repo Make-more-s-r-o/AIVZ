@@ -48,6 +48,8 @@ async function makeCase(files: {
   productMatch?: unknown;
   fieldValidation?: unknown;
   partsSelection?: unknown;
+  analysis?: unknown;
+  tenderMeta?: unknown;
 }): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'vz-submit-gate-'));
   tempDirs.push(dir);
@@ -59,6 +61,12 @@ async function makeCase(files: {
   }
   if (files.partsSelection !== undefined) {
     await writeFile(join(dir, 'parts-selection.json'), JSON.stringify(files.partsSelection), 'utf-8');
+  }
+  if (files.analysis !== undefined) {
+    await writeFile(join(dir, 'analysis.json'), JSON.stringify(files.analysis), 'utf-8');
+  }
+  if (files.tenderMeta !== undefined) {
+    await writeFile(join(dir, 'tender-meta.json'), JSON.stringify(files.tenderMeta), 'utf-8');
   }
   return dir;
 }
@@ -103,6 +111,52 @@ async function run(): Promise<void> {
     const res = await computeSubmitGate(dir);
     assert.equal(res.ready, true);
     assert.deepEqual(res.problems, []);
+  });
+
+  await test('expirovaný firemní doklad v požadovaném checklist slotu blokuje submit-gate', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] },
+      fieldValidation: PASS_TWICE,
+      analysis: {
+        kvalifikace: [{ typ: 'profesní kvalifikace', popis: 'výpis z obchodního rejstříku' }],
+      },
+      tenderMeta: { company_id: 'firma-1' },
+    });
+    const res = await computeSubmitGate(dir, {
+      now: new Date('2026-07-11T12:00:00Z'),
+      getCompanyManifest: async () => ({
+        version: 1,
+        entries: [{
+          slot: 'vypis_or',
+          filename: 'vypis.pdf',
+          uploadedAt: '2026-01-01T00:00:00Z',
+          platnost_do: '2026-07-10',
+        }],
+      }),
+    });
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.includes('Doklad Výpis z obchodního rejstříku („vypis.pdf") je po platnosti.'));
+  });
+
+  await test('platný firemní doklad v požadovaném slotu submit-gate neblokuje', async () => {
+    const dir = await makeCase({
+      productMatch: { polozky_match: [item(0, null, 1000)] },
+      fieldValidation: PASS_TWICE,
+      analysis: { kvalifikace: [{ typ: 'profesní', popis: 'obchodní rejstřík' }] },
+      tenderMeta: { company_id: 'firma-1' },
+    });
+    const res = await computeSubmitGate(dir, {
+      now: new Date('2026-07-11T12:00:00Z'),
+      getCompanyManifest: async () => ({
+        version: 1,
+        entries: [{
+          slot: 'vypis_or', filename: 'vypis.pdf', uploadedAt: '2026-01-01T00:00:00Z', platnost_do: '2026-12-31',
+        }, {
+          slot: 'profesni_opravneni', filename: 'opravneni.pdf', uploadedAt: '2026-01-01T00:00:00Z', platnost_do: '2026-12-31',
+        }],
+      }),
+    });
+    assert.equal(res.ready, true, `problems: ${res.problems.join(' | ')}`);
   });
 
   await test('změna ceny po generování → stale dokumenty blokují submit-gate', async () => {

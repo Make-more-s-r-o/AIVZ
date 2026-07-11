@@ -13,7 +13,49 @@ const NEN_BASE_URL = 'https://nen.nipez.cz';
 const NEN_LIST_PATH = '/verejne-zakazky';
 const NEN_REQUEST_TIMEOUT_MS = 20_000;
 const NEN_PAGE_DELAY_MS = 300;
+const MAX_NEN_REDIRECTS = 3;
 export const DEFAULT_MAX_NEN_PAGES = 5;
+
+/**
+ * SSRF pojistka pro všechny URL, které pocházejí z HTML/DB. NEN smí být osloven
+ * pouze přes HTTPS, přesně na produkčním hostname a bez nestandardního portu.
+ */
+export function isAllowedNenUrl(value: string | URL): boolean {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    return url.protocol === 'https:'
+      && url.hostname === 'nen.nipez.cz'
+      && url.port === ''
+      && url.username === ''
+      && url.password === '';
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch s ručně ověřenými redirecty; automatické následování by obcházelo SSRF allowlist. */
+export async function fetchAllowedNenUrl(
+  initialUrl: string,
+  fetchFn: typeof fetch,
+  init: RequestInit = {},
+): Promise<Response> {
+  let currentUrl = initialUrl;
+  for (let redirects = 0; ; redirects += 1) {
+    if (!isAllowedNenUrl(currentUrl)) {
+      throw new Error(`nepovolená NEN URL: ${currentUrl}`);
+    }
+    const response = await fetchFn(currentUrl, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    // Tělo redirect odpovědi nepotřebujeme; zrušení uvolní spojení před dalším hopem.
+    await response.body?.cancel().catch(() => {});
+    if (redirects >= MAX_NEN_REDIRECTS) {
+      throw new Error(`překročen limit ${MAX_NEN_REDIRECTS} přesměrování`);
+    }
+    const location = response.headers.get('location');
+    if (!location) throw new Error('redirect neobsahuje hlavičku Location');
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+}
 
 function envMaxPages(value: string | undefined): number {
   const parsed = Number(value);
@@ -201,7 +243,7 @@ export async function fetchNenAttachments(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetchFn(url, {
+    const response = await fetchAllowedNenUrl(url, fetchFn, {
       headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
       signal: controller.signal,
     });

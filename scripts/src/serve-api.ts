@@ -92,7 +92,9 @@ import {
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
-import { downloadNenAttachments } from './lib/monitoring/zd-download.js';
+import {
+  downloadNenAttachments, incompleteDownloadWarning, shouldAutoStartDownloadedPipeline,
+} from './lib/monitoring/zd-download.js';
 import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
 import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
@@ -986,19 +988,24 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
     if (categoryParam && !KOMODITA_KATEGORIE_VALUES.includes(categoryParam as any)) {
       return res.status(400).json({ error: 'Neplatná kategorie monitoringu.' });
     }
-    const items = await listFeed(stav, undefined, { includeExpired: includeAll });
+    // Stav i kategorie se filtrují v SQL před interním limitem. Vyloučená slova a
+    // skóre potřebují širší množinu kandidátů; veřejná odpověď zůstává max. 200 řádků.
+    const items = await listFeed(stav, 1000, {
+      includeExpired: includeAll,
+      category: categoryParam ? categoryParam as (typeof KOMODITA_KATEGORIE_VALUES)[number] : undefined,
+    });
     // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
     const company = await getCompany('default');
     const monitoringConfig = await getMonitoringConfig();
     const now = new Date();
     const withScore = items
-      .filter((item) => !categoryParam || item.kategorie === categoryParam)
-      .filter((item) => includeAll || !isFeedItemExcluded(item, monitoringConfig))
+      .filter((item) => !isFeedItemExcluded(item, monitoringConfig))
       .map((item) => ({
         ...item,
         go_no_go: scoreFeedItem(item, company ?? undefined, now, monitoringConfig),
       }))
-      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || b.created_at.localeCompare(a.created_at));
+      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || b.created_at.localeCompare(a.created_at))
+      .slice(0, 200);
     res.json(withScore);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -1048,6 +1055,7 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     // takže selhání stahování NIKDY neshodí převzetí — jen doplní varování do odpovědi.
     const varovani: string[] = [];
     let pocetStazenych = 0;
+    let pocetNalezenych = 0;
     let spusteno = false;
     let jobId: string | null = null;
 
@@ -1056,6 +1064,7 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
         varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN — nahrajte dokumenty ručně.');
       } else {
         const attachments = await fetchNenAttachments(item.url);
+        pocetNalezenych = attachments.length;
         if (attachments.length === 0) {
           varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
         } else {
@@ -1070,11 +1079,13 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     }
 
     if (spustit) {
-      if (pocetStazenych > 0) {
+      if (shouldAutoStartDownloadedPipeline(pocetNalezenych, pocetStazenych, varovani)) {
         const { job, created } = enqueueRunAllPipeline(tenderId);
         spusteno = true;
         jobId = job.id;
         if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
+      } else if (pocetNalezenych > 0) {
+        varovani.push(incompleteDownloadWarning(pocetStazenych, pocetNalezenych));
       } else {
         varovani.push('Pipeline nebyl spuštěn — nejsou k dispozici žádné vstupní dokumenty.');
       }
@@ -2507,8 +2518,14 @@ app.put('/api/tenders/:id/company', async (req, res) => {
     } catch {}
 
     // Copy company docs to prilohy (selective if we have kvalifikace info)
-    const { copied, missing } = await copyCompanyDocsToTender(company_id, id, requiredSlots);
-    res.json({ success: true, company_id, copied_documents: copied, missing_documents: missing });
+    const { copied, missing, warnings } = await copyCompanyDocsToTender(company_id, id, requiredSlots);
+    res.json({
+      success: true,
+      company_id,
+      copied_documents: copied,
+      missing_documents: missing,
+      warnings,
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

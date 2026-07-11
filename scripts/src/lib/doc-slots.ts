@@ -75,7 +75,17 @@ export function daysUntilExpiry(
 ): number | null {
   const p = parseCivilDate(platnostDo);
   if (!p) return null;
-  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  // Server může běžet v UTC nebo jiném systémovém TZ. Právní platnost dokladu se
+  // vyhodnocuje podle českého kalendářního dne, včetně přechodů letní/zimní čas.
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Prague',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((item) => item.type === type)?.value);
+  const today = Date.UTC(part('year'), part('month') - 1, part('day'));
   const exp = Date.UTC(p.y, p.m - 1, p.d);
   return Math.round((exp - today) / 86_400_000);
 }
