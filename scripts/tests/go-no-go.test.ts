@@ -1,7 +1,12 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-import { BID_BELOW_MARKET_PENALTY, scoreGoNoGo, scoreBid } from '../src/lib/go-no-go.js';
+import {
+  BID_BELOW_MARKET_PENALTY,
+  BID_NONEXISTENT_CANDIDATE_PENALTY,
+  scoreGoNoGo,
+  scoreBid,
+} from '../src/lib/go-no-go.js';
 import { TenderAnalysisSchema, type ProductMatch, type TenderAnalysis } from '../src/lib/types.js';
 import type { PriceBand } from '../src/lib/winprice-query.js';
 
@@ -127,6 +132,7 @@ function pricedItem(overrides: {
   hardFlag?: boolean;
   staleHardFlag?: boolean;
   belowMarketFlag?: boolean;
+  candidateNonexistent?: boolean;
 } = {}) {
   const nakupni = overrides.nakupni ?? 100_000;
   const nabidkova = overrides.nabidkova ?? 130_000;
@@ -163,16 +169,17 @@ function pricedItem(overrides: {
         ? [{ polozka_index: overrides.index ?? 0, level: 'hard' as const, code: 'zero_price' as const, message: 'Nulová cena' }]
         : []),
     ],
-    ...(overrides.belowMarketFlag ? {
+    ...(overrides.belowMarketFlag || overrides.candidateNonexistent ? {
       overeni_ceny: {
         stav: 'nalezeno' as const,
         overeno_at: '2026-07-11T10:00:00.000Z',
-        zdroje: [{
+        kandidat_neexistuje: overrides.candidateNonexistent === true,
+        ...(overrides.belowMarketFlag ? { zdroje: [{
           url: 'https://shop.cz/produkt', dodavatel: 'Shop',
           cena_bez_dph: nabidkova + 10_000, cena_s_dph: (nabidkova + 10_000) * 1.21,
           cena_baleni_s_dph: (nabidkova + 10_000) * 1.21, baleni_ks: 1,
           mena: 'CZK' as const, sazba_dph: 21, dostupnost: 'skladem' as const, poznamka: null,
-        }],
+        }] } : {}),
       },
     } : {}),
   };
@@ -260,6 +267,24 @@ test('M2: zastaralý uložený HARD flag bez aktuálního nálezu skóre neotrá
   const result = scoreBid(analysis(), match, { default_marze_procent: 10 }, winBand(2_000_000));
   assert.equal(result.doporuceni, 'GO');
   assert.equal(result.duvody.some((reason) => /HARD/.test(reason)), false);
+});
+
+test('scoreBid: každý webem vyvrácený AI kandidát snižuje kvalitu shod', () => {
+  const safe = bidMatch([
+    pricedItem({ index: 0 }),
+    pricedItem({ index: 1 }),
+    pricedItem({ index: 2 }),
+  ]);
+  const disproved = bidMatch([
+    pricedItem({ index: 0, candidateNonexistent: true }),
+    pricedItem({ index: 1, candidateNonexistent: true }),
+    pricedItem({ index: 2 }),
+  ]);
+
+  const safeResult = scoreBid(analysis(), safe, { default_marze_procent: 10 }, undefined);
+  const disprovedResult = scoreBid(analysis(), disproved, { default_marze_procent: 10 }, undefined);
+  assert.equal(safeResult.score - disprovedResult.score, 2 * BID_NONEXISTENT_CANDIDATE_PENALTY);
+  assert.ok(disprovedResult.duvody.some((reason) => /2× AI navržený produkt.*srážka 10 bodů/.test(reason)));
 });
 
 test('scoreBid: naše cena nad P75 → srážka za win-price', () => {

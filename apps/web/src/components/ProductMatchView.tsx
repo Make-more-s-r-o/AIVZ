@@ -261,13 +261,17 @@ interface OvereniCenyChipProps {
 }
 
 function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
-  if (overeni.stav === 'nalezeno' || overeni.stav === 'ekvivalent') {
+  if (overeni.stav === 'nalezeno' || overeni.stav === 'ekvivalent' || overeni.stav === 'orientacni') {
     const cenaSdph = overeni.web_cena_s_dph
       ?? (overeni.web_cena_bez_dph != null ? calculateItemPrice(overeni.web_cena_bez_dph, 0).nakupni_cena_s_dph : undefined);
     return (
       <div className={cn(
         'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-xs',
-        overeni.prekracuje_strop ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'
+        overeni.prekracuje_strop
+          ? 'border-red-200 bg-red-50'
+          : overeni.stav === 'orientacni'
+            ? 'border-violet-200 bg-violet-50'
+            : 'border-emerald-200 bg-emerald-50'
       )}>
         <Globe className="h-3.5 w-3.5 shrink-0 text-gray-500" />
         <span className="font-medium text-gray-800">
@@ -275,6 +279,11 @@ function OvereniCenyChip({ overeni, onUse }: OvereniCenyChipProps) {
         </span>
         {overeni.shoda_typ === 'ekvivalent' && (
           <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">EKVIVALENT</span>
+        )}
+        {overeni.stav === 'orientacni' && (
+          <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800">
+            ORIENTAČNÍ — OVĚŘTE PARAMETRY
+          </span>
         )}
         {overeni.dodavatel && <span className="text-gray-500">· {overeni.dodavatel}</span>}
         {overeni.dostupnost && <span className="text-gray-500">· {overeni.dostupnost}</span>}
@@ -363,6 +372,13 @@ function SingleItemView({ match, tenderId, budget, queryClient, historySubject, 
       {match.oduvodneni_vyberu && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
           <span className="font-medium">Odůvodnění výběru:</span> {match.oduvodneni_vyberu}
+        </div>
+      )}
+
+      {overeni?.kandidat_neexistuje === true && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+          <AlertTriangle className="mr-2 inline h-4 w-4" />
+          AI navržený produkt pravděpodobně neexistuje — vyberte ekvivalent níže.
         </div>
       )}
 
@@ -811,6 +827,12 @@ function MultiItemView({ match, tenderId, budget, queryClient, casti, defaultMar
                           {finding.level === 'hard' ? 'BLOKUJE' : 'ZKONTROLUJTE'}: {finding.message}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {pm.overeni_ceny?.kandidat_neexistuje === true && (
+                    <div className="mt-1 inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                      <AlertTriangle className="h-3 w-3" />
+                      AI navržený produkt pravděpodobně neexistuje — vyberte ekvivalent níže
                     </div>
                   )}
                 </div>

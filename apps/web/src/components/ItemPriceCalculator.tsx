@@ -104,7 +104,10 @@ export default function ItemPriceCalculator({
   const nabidkovaCenaSdph = calculatedPrice.nabidkova_cena_s_dph;
   const nakupniCenaSdph = calculatedPrice.nakupni_cena_s_dph;
   const hasZeroMargin = nakupniCena > 0 && nabidkovaCenaBezDph === roundCurrency(nakupniCena);
-  const realUnitCost = overeniCeny?.realita?.nejlevnejsi_bez_dph ?? null;
+  const onlyOrientationalSources = (overeniCeny?.zdroje?.length ?? 0) > 0
+    && overeniCeny!.zdroje!.every((source) => source.orientacni === true);
+  // Defense-in-depth: ani starší uložená `realita` nesmí z orientačního zdroje udělat blokaci.
+  const realUnitCost = onlyOrientationalSources ? null : overeniCeny?.realita?.nejlevnejsi_bez_dph ?? null;
   const needsLossOverride = realUnitCost != null && realUnitCost > 0 && nabidkovaCenaBezDph < realUnitCost;
   const lossOverrideValid = !needsLossOverride || (overrideLoss && overrideReason.trim().length >= 10);
 
@@ -145,6 +148,9 @@ export default function ItemPriceCalculator({
   }, [historyOpen, normalizedHistorySubject, historyQuery]);
 
   const handleUseWebSource = useCallback((source: WebPriceSource) => {
+    if (source.orientacni === true && !window.confirm(
+      'Parametry tohoto produktu nejsou doložené. Před použitím ceny ověřte, že produkt splňuje zadání. Chcete cenu přesto převzít?',
+    )) return;
     // Sdílený převod s legacy chipem, ale s právě nastavenou marží operátora.
     const draft = applyWebSource(source, marzeProcent, onSourceApplied, mnozstvi ?? 1);
     setNakupniCena(draft.nakupni_cena_bez_dph);
@@ -294,6 +300,11 @@ export default function ItemPriceCalculator({
                       ekvivalent
                     </span>
                   )}
+                  {source.orientacni === true && (
+                    <span className="rounded-full border border-violet-300 bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-800">
+                      orientační — ověřte parametry
+                    </span>
+                  )}
                   <span>· {source.dodavatel || 'Neznámý dodavatel'}</span>
                   <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH za balení` : 'cena neuvedena'}</span>
                   <span>· {source.baleni_ks != null ? `${source.baleni_ks} ks v balení` : 'počet v balení neověřen'}</span>
@@ -308,14 +319,22 @@ export default function ItemPriceCalculator({
                       odkaz <ExternalLink className="h-3 w-3" />
                     </a>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => handleUseWebSource(source)}
-                    disabled={!lzePouzit}
-                    className="ml-auto rounded border border-emerald-300 bg-white px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Použít cenu
-                  </button>
+                  <div className="ml-auto flex flex-col items-end gap-0.5">
+                    {source.orientacni === true && (
+                      <span className="max-w-48 text-right text-[9px] font-medium text-violet-800">
+                        Pozor: parametry nejsou doložené.
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleUseWebSource(source)}
+                      disabled={!lzePouzit}
+                      title={source.orientacni === true ? 'Parametry nejsou doložené — před použitím cenu i produkt ověřte.' : undefined}
+                      className="rounded border border-emerald-300 bg-white px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Použít cenu
+                    </button>
+                  </div>
                 </div>
               );
             })}

@@ -25,6 +25,7 @@ function item(
     marketWithoutVat?: number;
     aiBelowMarket?: boolean;
     lossOverride?: boolean;
+    orientationalMarket?: boolean;
   } = {},
 ): PolozkaMatch {
   const priceWithoutVat = options.offerWithoutVat ?? priceWithVat / 1.21;
@@ -83,6 +84,7 @@ function item(
         sazba_dph: 21,
         dostupnost: 'skladem',
         poznamka: null,
+        ...(options.orientationalMarket ? { orientacni: true } : {}),
       }],
       realita: {
         nejlevnejsi_bez_dph: options.marketWithoutVat,
@@ -162,6 +164,22 @@ test('H1: auditovaný override s dostatečným důvodem ztrátový gate propust�
     item(4, 121, { offerWithoutVat: 100, purchaseWithoutVat: 80, marketWithoutVat: 120, lossOverride: true }),
   ]);
   assert.equal(findings.some((candidate) => candidate.code === 'cena_pod_nakupem'), false);
+});
+
+test('orientační cena nad nabídkou vytvoří jen WARN a nikdy HARD cena_pod_nakupem', () => {
+  const findings = checkPriceSanity([
+    item(4, 121, {
+      offerWithoutVat: 100,
+      purchaseWithoutVat: 80,
+      marketWithoutVat: 150,
+      orientationalMarket: true,
+    }),
+  ]);
+
+  assert.equal(findings.some((finding) => finding.code === 'cena_pod_nakupem'), false);
+  const warning = findings.find((finding) => finding.code === 'orientacni_cena_nad_nabidkou');
+  assert.equal(warning?.level, 'warn');
+  assert.match(warning?.message ?? '', /Parametry produktu nejsou doložené/);
 });
 
 test('bid_share: přes 40 % se varuje jen u více než tří položek', () => {

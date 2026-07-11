@@ -48,7 +48,7 @@ function findingsFromResults(
   results: ItemVerification[],
 ): WebFindingInput[] {
   return results.flatMap((result) => {
-    if (result.overeni_ceny.stav !== 'nalezeno' && result.overeni_ceny.stav !== 'ekvivalent') return [];
+    if (!['nalezeno', 'ekvivalent', 'orientacni'].includes(result.overeni_ceny.stav)) return [];
     const candidate = selectedCandidate(matchData, result.polozka_index);
     const produkt = candidate ? `${candidate.vyrobce} ${candidate.model}`.trim() : null;
     const sources = result.overeni_ceny.zdroje?.length
@@ -159,7 +159,7 @@ async function main(): Promise<void> {
   // Souhrn
   console.log('\n--- Souhrn ---');
   console.log(`  Ověřeno položek: ${summary.total}`);
-  console.log(`  Nalezeno: ${summary.nalezeno}  |  Nenalezeno: ${summary.nenalezeno}  |  Chyba: ${summary.chyba}`);
+  console.log(`  Nalezeno: ${summary.nalezeno}  |  Orientační: ${summary.orientacni}  |  Nenalezeno: ${summary.nenalezeno}  |  Chyba: ${summary.chyba}`);
   console.log(`  Fáze 1 hit: ${summary.faze1_nalezeno}  |  Fáze 2 hit: ${summary.faze2_nalezeno}  |  Nenalezeno: ${summary.nenalezeno}`);
   console.log(
     `  Reálný nákup vyšší než AI odhad: ${summary.realny_nakup_vyssi_nez_ai}` +

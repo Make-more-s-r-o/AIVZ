@@ -1,11 +1,14 @@
 import type { PolozkaMatch, PriceSanityFlag } from './types.js';
-import { compareAiVsMarket } from './price-reality.js';
+import { compareAiVsMarket, informationalCostForQuantity } from './price-reality.js';
 
 // Položka nad 40 % celkové nabídky vyžaduje kontrolu u nabídek s více než třemi položkami.
 export const BID_SHARE_THRESHOLD = 0.40;
 
 // Položka nad 10 % nabídky vyžaduje kontrolu, pokud má vybraný kandidát nízkou spolehlivost ceny.
 export const LOW_CONFIDENCE_BIG_THRESHOLD = 0.10;
+
+// Orientační nákup nad nabídkou varuje až od 20% rozdílu; nikdy nejde o HARD gate.
+export const ORIENTATIONAL_PRICE_WARN_RATIO = 1.20;
 
 // Jednotková cena nad padesátinásobkem mediánu ostatních položek je podezřelá odchylka.
 export const OUTLIER_VS_BATCH_MULTIPLIER = 50;
@@ -165,6 +168,27 @@ export function checkPriceSanity(
         level: 'hard',
         code: 'cena_pod_nakupem',
         message: `Nabídková cena ${formatPrice(price.unitWithoutVat)} Kč bez DPH je nižší než reálný jednotkový nákupní náklad ${formatPrice(realMarketPrice)} Kč pro množství ${formatPrice(price.quantity)} (zdroj: ${currentReality.nejlevnejsi_dodavatel ?? currentReality.nejlevnejsi_zdroj_url ?? 'neznámý dodavatel'}). Bez auditované výjimky nelze cenu potvrdit ani nabídku podat.`,
+      });
+    }
+
+    const orientationalUnitPrices = (item.overeni_ceny?.zdroje ?? [])
+      .filter((source) => source.orientacni === true)
+      .map((source) => informationalCostForQuantity(source, price.quantity))
+      .filter((cost): cost is number => cost !== null)
+      .map((cost) => cost / price.quantity);
+    const cheapestOrientational = orientationalUnitPrices.length > 0
+      ? Math.min(...orientationalUnitPrices)
+      : null;
+    if (
+      cheapestOrientational !== null
+      && price.unitWithoutVat > 0
+      && cheapestOrientational >= price.unitWithoutVat * ORIENTATIONAL_PRICE_WARN_RATIO
+    ) {
+      addFinding({
+        polozka_index: item.polozka_index,
+        level: 'warn',
+        code: 'orientacni_cena_nad_nabidkou',
+        message: `Orientační nákupní cena ${formatPrice(cheapestOrientational)} Kč bez DPH je výrazně nad nabídkovou cenou ${formatPrice(price.unitWithoutVat)} Kč. Parametry produktu nejsou doložené; zdroj ručně ověřte.`,
       });
     }
 
