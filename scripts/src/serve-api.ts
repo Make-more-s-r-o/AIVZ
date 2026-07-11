@@ -826,7 +826,10 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
       ? stavParam
       : undefined) as MonitoringStav | undefined;
 
-    const items = await listFeed(stav);
+    // NEN drží zakázky po lhůtě dál jako „Neukončen" → prošlé lhůty defaultně skryjeme
+    // (nedá se do nich podat; jen zaplevelí feed). ?vse=1 je vrátí (audit/přehled).
+    const includeExpired = req.query.vse === '1';
+    const items = await listFeed(stav, undefined, { includeExpired });
     // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
     const company = await getCompany('default');
     const now = new Date();
