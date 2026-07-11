@@ -260,6 +260,8 @@ export interface InboxEntry {
   celkova_cena_s_dph: number | null;
   data_error: boolean;
   data_error_files: string[];
+  deadline_alarm: boolean;
+  hodin_do_lhuty: number | null;
 }
 
 export async function getInbox(): Promise<InboxEntry[]> {
@@ -725,12 +727,53 @@ export async function setTenderAssignee(
   return res.json();
 }
 
+// --- Submission cockpit (balík podání + evidence) ---
+
+export interface SubmissionManifestFile {
+  name: string;
+  sha256: string;
+  size: number;
+}
+
+export interface SubmissionManifest {
+  version: number;
+  content_hash: string;
+  created_at: string;
+  zip_filename: string;
+  files: SubmissionManifestFile[];
+  celkova_cena_s_dph: number | null;
+  vybrane_casti: string[] | null;
+}
+
+export interface SubmissionEvidence {
+  portal: string;
+  cas_podani: string;
+  evidencni_cislo?: string;
+  poznamka?: string;
+  zaznamenano: string;
+  manifest_version: number;
+  manifest_content_hash: string;
+}
+
+export interface PodaniState {
+  manifest: SubmissionManifest | null;
+  evidence: SubmissionEvidence | null;
+}
+
+export interface EvidenceInput {
+  portal: string;
+  cas_podani: string; // ISO
+  evidencni_cislo?: string;
+  poznamka?: string;
+}
+
 /**
- * Finalizace nabídky — gate na kompletní podatelný balík, pak přechod pripravena→odeslana.
- * Na nepřipravenou nabídku (409) vyhodí Error s výčtem problémů (pro toast).
- * Po úspěchu FE stáhne kompletní balík přes getBundleZipUrl.
+ * Finalizace nabídky — gate na kompletní podatelný balík. Vytvoří IMMUTABILNÍ balík podání
+ * (ZIP + manifest se sha256) a přepne zakázku maximálně na 'pripravena'. NEPŘEPÍNÁ na
+ * 'odeslana' — to dělá až recordPodano se skutečnou evidencí. Na nepřipravenou nabídku
+ * (409) vyhodí Error s výčtem problémů (pro toast).
  */
-export async function finalizeTender(id: string): Promise<{ success: boolean; status: StageKey }> {
+export async function finalizeTender(id: string): Promise<{ success: boolean; status: StageKey; reused: boolean; manifest: SubmissionManifest }> {
   const res = await fetch(`${API_BASE}/tenders/${id}/finalize`, {
     method: 'POST',
     headers: authHeaders(),
@@ -739,6 +782,28 @@ export async function finalizeTender(id: string): Promise<{ success: boolean; st
     const err = await res.json().catch(() => ({ error: res.statusText }));
     const problems = Array.isArray(err.problems) && err.problems.length ? ' · ' + err.problems.join(' · ') : '';
     throw new Error((err.reason || err.error || 'Finalizace selhala') + problems);
+  }
+  return res.json();
+}
+
+export async function getPodani(id: string): Promise<PodaniState> {
+  return fetchJson(`/tenders/${id}/podani`);
+}
+
+export function getPodaniDownloadUrl(id: string): string {
+  return `${API_BASE}/tenders/${id}/podani/download`;
+}
+
+/** Zaznamená podání (portál, čas, evidenční číslo) → přepne zakázku na 'odeslana'. */
+export async function recordPodano(id: string, input: EvidenceInput): Promise<{ success: boolean; status: StageKey; evidence: SubmissionEvidence }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/podano`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.reason || err.error || 'Zaznamenání podání selhalo');
   }
   return res.json();
 }

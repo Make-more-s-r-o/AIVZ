@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { CheckCircle2, AlertTriangle, Coins, ClipboardCheck } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Coins, ClipboardCheck, Clock } from 'lucide-react';
 import { getInbox, type InboxEntry } from '../lib/api';
 import { fmtCZK } from '../lib/format';
 import { STAGE_LABELS, type StageKey } from '../lib/stages';
@@ -106,6 +106,14 @@ export default function InboxPage({ onOpen }: InboxPageProps) {
   );
 }
 
+// Text alarmu blížící se lhůty: „za X h" / „za <1 h" / „po lhůtě".
+function alarmLabel(hodin: number | null): string {
+  if (hodin == null) return 'Připraveno, nepodáno';
+  if (hodin < 0) return `Připraveno, nepodáno, ${Math.abs(hodin)} h po lhůtě`;
+  if (hodin < 1) return 'Připraveno, nepodáno, lhůta za <1 h';
+  return `Připraveno, nepodáno, lhůta za ${hodin} h`;
+}
+
 function InboxRow({ entry, onOpen }: { entry: InboxEntry; onOpen?: (id: string) => void }) {
   const stavLabel = entry.crm_stav ? (STAGE_LABELS[entry.crm_stav as StageKey] ?? entry.crm_stav) : '—';
   return (
@@ -114,7 +122,10 @@ function InboxRow({ entry, onOpen }: { entry: InboxEntry; onOpen?: (id: string) 
       style={{
         display: 'grid', gridTemplateColumns: GRID, alignItems: 'center', gap: 12,
         padding: '0 16px', minHeight: 52, width: '100%',
-        background: 'transparent', border: 'none', borderBottom: '1px solid var(--border-subtle, var(--border-default))',
+        background: entry.deadline_alarm ? 'var(--danger-bg, #fef2f2)' : 'transparent',
+        border: 'none',
+        borderLeft: entry.deadline_alarm ? '3px solid var(--danger-fg, #dc2626)' : '3px solid transparent',
+        borderBottom: '1px solid var(--border-subtle, var(--border-default))',
         cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
       }}
     >
@@ -129,6 +140,16 @@ function InboxRow({ entry, onOpen }: { entry: InboxEntry; onOpen?: (id: string) 
           {entry.nazev}
         </span>
         <span style={{ fontSize: 'var(--font-size-2xs)', color: 'var(--text-tertiary)' }}>{entry.tender_id}</span>
+        {entry.deadline_alarm && (
+          <span title="Balík je připraven, ale podání nebylo zaznamenáno a lhůta se blíží.">
+            <Badge tone="danger" size="sm">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Clock size={12} />
+                {alarmLabel(entry.hodin_do_lhuty)}
+              </span>
+            </Badge>
+          </span>
+        )}
         {entry.data_error && (
           <span title={`Vadné soubory: ${entry.data_error_files.join(', ')}`}>
             <Badge tone="danger" size="sm">Vadná data</Badge>
