@@ -156,6 +156,10 @@ export const PriceOverrideSchema = z.object({
   nabidkova_cena_s_dph: z.number(),
   potvrzeno: z.boolean().default(false),
   poznamka: z.string().optional(),
+  zdroj_nakupu: z.object({
+    url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
+    dodavatel: z.string().nullable(),
+  }).optional(),
 });
 
 export const PriceSanityFlagSchema = z.object({
@@ -173,6 +177,32 @@ export const PriceSanityFlagSchema = z.object({
   message: z.string(),
 });
 
+// Jeden konkrétní nákupní nález z webového ověření ceny. Pole `zdroje` je na
+// `overeni_ceny` volitelné, aby dál prošly i starší product-match.json soubory,
+// které obsahují pouze jeden zdroj v top-level polích.
+export const WebPriceSourceSchema = z.object({
+  url: z.string().refine((value) => /^https?:\/\//i.test(value), 'URL musí používat HTTP(S)'),
+  dodavatel: z.string().nullable(),
+  cena_bez_dph: z.number().nullable(),
+  cena_s_dph: z.number().nullable(),
+  dostupnost: z.string().nullable(),
+  poznamka: z.string().nullable(),
+});
+
+export const OvereniCenySchema = z.object({
+  stav: z.enum(['nalezeno', 'nenalezeno', 'chyba']),
+  web_cena_bez_dph: z.number().optional(),
+  web_cena_s_dph: z.number().optional(),
+  mena: z.string().optional(),
+  zdroj_url: z.string().optional(),
+  dodavatel: z.string().optional(),
+  dostupnost: z.string().optional(),
+  poznamka: z.string().optional(),
+  overeno_at: z.string().datetime(),
+  prekracuje_strop: z.boolean().optional(),
+  zdroje: z.array(WebPriceSourceSchema).max(3).optional(),
+});
+
 export const PolozkaMatchSchema = z.object({
   polozka_nazev: z.string(),
   polozka_index: z.number(),
@@ -187,6 +217,7 @@ export const PolozkaMatchSchema = z.object({
   oduvodneni_vyberu: z.string(),
   cenova_uprava: PriceOverrideSchema.optional(),
   sanity_flags: z.array(PriceSanityFlagSchema).optional(),
+  overeni_ceny: OvereniCenySchema.optional(),
 });
 
 export const ProductMatchSchema = z.object({
@@ -200,6 +231,7 @@ export const ProductMatchSchema = z.object({
   vybrany_index: z.preprocess(parseAiNumber, z.number().optional()),
   oduvodneni_vyberu: z.string().optional(),
   cenova_uprava: PriceOverrideSchema.optional(),
+  overeni_ceny: OvereniCenySchema.optional(),
   // Multi-product fields
   polozky_match: z.array(PolozkaMatchSchema).optional(),
   // Profit-aware bid skóre počítané PO nacenění (viz go-no-go.ts scoreBid).
@@ -260,6 +292,8 @@ export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
 export type PriceOverride = z.infer<typeof PriceOverrideSchema>;
 export type PriceSanityFlag = z.infer<typeof PriceSanityFlagSchema>;
+export type WebPriceSource = z.infer<typeof WebPriceSourceSchema>;
+export type OvereniCeny = z.infer<typeof OvereniCenySchema>;
 export type PolozkaMatch = z.infer<typeof PolozkaMatchSchema>;
 export type ProductMatch = z.infer<typeof ProductMatchSchema>;
 export type ValidationCheck = z.infer<typeof ValidationCheckSchema>;

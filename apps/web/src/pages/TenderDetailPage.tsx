@@ -13,6 +13,9 @@ import {
   Plus,
   Trash2,
   Trophy,
+  ShoppingCart,
+  ExternalLink,
+  StickyNote,
   X,
 } from 'lucide-react';
 import {
@@ -43,6 +46,9 @@ import {
   getOutcome,
   saveOutcome,
   getProductMatch,
+  getNakupy,
+  seedNakupy,
+  updateNakup,
   getParts,
   getBidScore,
   type BidScore,
@@ -55,12 +61,15 @@ import {
   type CreateTaskInput,
   type Termin,
   type Comment,
+  type NakupItem,
 } from '../lib/api';
+import { nakupySeedAction } from '../lib/nakupy-ui';
 import { getStoredUser } from '../lib/auth';
 import { effectiveStage, stepperCurrent, normalizeDecision } from '../lib/crm-adapters';
 import { allowedNextStages } from '../lib/stage-machine';
 import { STAGE_LABELS, type StageKey } from '../lib/stages';
 import { fmtCZK } from '../lib/format';
+import { safeHttpUrl } from '../lib/url';
 import type { TenderAnalysis, ProductMatch } from '../types/tender';
 import {
   StageBadge,
@@ -96,6 +105,7 @@ const TABS = [
   { value: 'ukoly', label: 'Úkoly' },
   { value: 'terminy', label: 'Termíny' },
   { value: 'vysledek', label: 'Výsledek' },
+  { value: 'nakup', label: 'NÁKUP' },
   { value: 'historie', label: 'Historie' },
   { value: 'komentare', label: 'Komentáře' },
 ] as const;
@@ -322,6 +332,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             {tab === 'ukoly' && <UkolyTab tenderId={tenderId} />}
             {tab === 'terminy' && <TerminyTab tenderId={tenderId} />}
             {tab === 'vysledek' && <VysledekTab tenderId={tenderId} />}
+            {tab === 'nakup' && <NakupTab tenderId={tenderId} crmVyhrano={currentStage === 'vyhrano'} />}
             {tab === 'historie' && <HistorieTab tenderId={tenderId} />}
             {tab === 'komentare' && <CommentsTab tenderId={tenderId} />}
           </div>
@@ -832,6 +843,209 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
         </Button>
       </div>
     </Card>
+  );
+}
+
+// --- Nákupní seznam po výhře ------------------------------------------------
+
+/** Řádkový náklad; bez množství počítáme jeden kus stejně jako v Ocenění. */
+function nakupRowTotal(item: NakupItem): number {
+  return (item.nakupni_cena_bez_dph ?? 0) * (item.mnozstvi ?? 1);
+}
+
+function NakupTab({ tenderId, crmVyhrano }: { tenderId: string; crmVyhrano: boolean }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const queryKey = ['nakupy', tenderId] as const;
+  const { data: nakupy = [], isLoading } = useQuery({
+    queryKey,
+    queryFn: () => getNakupy(tenderId),
+  });
+  const { data: outcome } = useQuery({
+    queryKey: ['outcome', tenderId],
+    queryFn: () => getOutcome(tenderId),
+  });
+  const [seeding, setSeeding] = useState(false);
+  const [savingIndexes, setSavingIndexes] = useState<Set<number>>(new Set());
+
+  const total = nakupy.reduce((sum, item) => sum + nakupRowTotal(item), 0);
+  const orderedTotal = nakupy.reduce((sum, item) => sum + (item.objednano ? nakupRowTotal(item) : 0), 0);
+  const vyhrano = crmVyhrano || outcome?.vysledek === 'vyhra';
+  const seedAction = nakupySeedAction(nakupy.length);
+
+  async function handleSeed() {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const result = await seedNakupy(tenderId);
+      qc.setQueryData(queryKey, result.nakupy);
+      const skipped = result.vynechane_nepotvrzene > 0
+        ? `, ${result.vynechane_nepotvrzene} nepotvrzených vynecháno`
+        : '';
+      toast(result.seeded > 0
+        ? `Nákupní seznam aktualizován (${result.seeded} položek${skipped})`
+        : `Nákupní seznam je aktuální${skipped}`,
+      'success');
+    } catch (e) {
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function handleUpdate(item: NakupItem, objednano: boolean, poznamka?: string | null) {
+    if (savingIndexes.has(item.polozka_index)) return;
+    const previous = qc.getQueryData<NakupItem[]>(queryKey) ?? nakupy;
+    const optimistic = previous.map((row) => row.polozka_index === item.polozka_index
+      ? { ...row, objednano, ...(poznamka !== undefined ? { poznamka } : {}) }
+      : row);
+    qc.setQueryData(queryKey, optimistic);
+    setSavingIndexes((current) => new Set(current).add(item.polozka_index));
+    try {
+      const updated = await updateNakup(tenderId, item.polozka_index, { objednano, poznamka });
+      qc.setQueryData<NakupItem[]>(queryKey, (current = []) => current.map((row) => (
+        row.polozka_index === updated.polozka_index ? updated : row
+      )));
+      await qc.invalidateQueries({ queryKey });
+    } catch (e) {
+      qc.setQueryData(queryKey, previous);
+      toast(statusErrorMessage(e), 'danger');
+    } finally {
+      setSavingIndexes((current) => {
+        const next = new Set(current);
+        next.delete(item.polozka_index);
+        return next;
+      });
+    }
+  }
+
+  function editNote(item: NakupItem) {
+    const value = window.prompt('Poznámka k nákupní položce:', item.poznamka ?? '');
+    if (value === null) return;
+    void handleUpdate(item, item.objednano, value.trim() || null);
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {vyhrano && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px',
+          border: '1px solid var(--green-200)', borderRadius: 'var(--radius-lg)',
+          background: 'var(--success-bg)', color: 'var(--success-fg)',
+          fontSize: 'var(--font-size-sm)', fontWeight: 'var(--weight-semibold)',
+        }}>
+          <Trophy size={18} />
+          Vyhráno — objednejte položky
+        </div>
+      )}
+
+      <Card
+        title="Nákupní seznam"
+        padding={nakupy.length > 0 ? 0 : 16}
+        action={!isLoading ? (
+          <Button
+            size="sm"
+            variant={seedAction.variant}
+            iconLeft={<ShoppingCart size={15} />}
+            onClick={() => void handleSeed()}
+            disabled={seeding}
+          >
+            {seeding ? 'Sestavuji…' : seedAction.label}
+          </Button>
+        ) : undefined}
+      >
+        {isLoading ? (
+          <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--font-size-sm)' }}>
+            Načítám nákupní seznam…
+          </p>
+        ) : nakupy.length === 0 ? (
+          <EmptyState
+            icon={<ShoppingCart size={28} />}
+            title="Nákupní seznam je prázdný"
+            hint="Sestavte jej z položek, u kterých byla v Ocenění potvrzena nákupní cena. Opakované sestavení ruční stav objednání nepřepíše."
+          />
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--font-size-sm)' }}>
+              <thead>
+                <tr style={{ background: 'var(--surface-sunken)', color: 'var(--text-secondary)', textAlign: 'left' }}>
+                  {['Položka', 'Množství', 'Nákupní cena bez DPH', 'Σ řádku', 'Dodavatel', 'Odkaz', 'Objednáno', 'Poznámka'].map((label) => (
+                    <th key={label} style={{ padding: '9px 10px', borderBottom: '1px solid var(--border-default)', whiteSpace: 'nowrap', fontWeight: 'var(--weight-semibold)' }}>
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {nakupy.map((item) => {
+                  const href = safeHttpUrl(item.url);
+                  const saving = savingIndexes.has(item.polozka_index);
+                  return (
+                    <tr key={item.polozka_index} style={{ opacity: item.objednano ? 0.68 : 1 }}>
+                      <td style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', minWidth: 180, color: 'var(--text-primary)', fontWeight: 'var(--weight-medium)' }}>
+                        {item.polozka_nazev || `Položka ${item.polozka_index + 1}`}
+                      </td>
+                      <td className="tnum" style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', whiteSpace: 'nowrap' }}>
+                        {item.mnozstvi != null ? item.mnozstvi.toLocaleString('cs-CZ') : '—'} {item.jednotka ?? ''}
+                      </td>
+                      <td className="tnum" style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', whiteSpace: 'nowrap' }}>
+                        {fmtCZK(item.nakupni_cena_bez_dph)}
+                      </td>
+                      <td className="tnum" style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', whiteSpace: 'nowrap', fontWeight: 'var(--weight-semibold)' }}>
+                        {fmtCZK(nakupRowTotal(item))}
+                      </td>
+                      <td style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', minWidth: 110 }}>
+                        {item.dodavatel || '—'}
+                      </td>
+                      <td style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)' }}>
+                        {href ? (
+                          <a href={href} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)' }}>
+                            Koupit <ExternalLink size={13} />
+                          </a>
+                        ) : '—'}
+                      </td>
+                      <td style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', textAlign: 'center' }}>
+                        <Checkbox
+                          checked={item.objednano}
+                          disabled={saving}
+                          onChange={(checked) => void handleUpdate(item, checked)}
+                        />
+                      </td>
+                      <td style={{ padding: '10px', borderBottom: '1px solid var(--border-subtle)', minWidth: 130 }}>
+                        <Button variant="ghost" size="sm" iconLeft={<StickyNote size={13} />} disabled={saving} onClick={() => editNote(item)}>
+                          {item.poznamka ? 'Upravit' : 'Přidat'}
+                        </Button>
+                        {item.poznamka && (
+                          <div title={item.poznamka} style={{ maxWidth: 150, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-tertiary)', fontSize: 'var(--font-size-xs)' }}>
+                            {item.poznamka}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: 'var(--surface-sunken)', fontWeight: 'var(--weight-semibold)' }}>
+                  <td colSpan={3} style={{ padding: '11px 10px', borderTop: '1px solid var(--border-default)' }}>
+                    Nákupní náklad celkem
+                  </td>
+                  <td className="tnum" style={{ padding: '11px 10px', borderTop: '1px solid var(--border-default)', whiteSpace: 'nowrap' }}>
+                    {fmtCZK(total)}
+                  </td>
+                  <td colSpan={2} style={{ padding: '11px 10px', borderTop: '1px solid var(--border-default)', textAlign: 'right' }}>
+                    Objednáno
+                  </td>
+                  <td colSpan={2} className="tnum" style={{ padding: '11px 10px', borderTop: '1px solid var(--border-default)', whiteSpace: 'nowrap' }}>
+                    {fmtCZK(orderedTotal)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
   );
 }
 

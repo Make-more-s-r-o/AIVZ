@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, ExternalLink, History, Loader2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ExternalLink, History, Loader2, ShoppingCart } from 'lucide-react';
 import { getWinPriceBand, type PriceOverrideData, type WinPriceBand } from '../lib/api';
-import type { ProductCandidate, PriceOverride } from '../types/tender';
+import type { OvereniCeny, ProductCandidate, PriceOverride, WebPriceSource } from '../types/tender';
 import { getErrorMessage } from '../types/tender';
 import { Input } from './ui';
 import { calculateItemPrice, roundCurrency } from '../lib/price-calculator';
 import { safeHttpUrl } from '../lib/url';
+import { applyWebSource, webPriceGross } from '../lib/web-price';
 
 const CONFIDENCE_LABELS: Record<string, { label: string; bg: string; fg: string }> = {
   vysoka: { label: 'Vysoká', bg: 'var(--success-bg)', fg: 'var(--success-fg)' },
@@ -27,6 +28,10 @@ interface ItemPriceCalculatorProps {
   onWinPriceBandLoaded?: (cacheKey: string, subject: string, band: WinPriceBand) => void;
   /** Výchozí marže (%) z nastavení firmy — předvyplní se místo dřívější nuly. */
   defaultMarzeProcent: number;
+  /** Aktuální nákupní nálezy z webového ověření ceny. */
+  overeniCeny?: OvereniCeny;
+  /** Předá zvolený webový zdroj rodiči jako autoritativní draft pro jednotlivé i hromadné potvrzení. */
+  onSourceApplied?: (draft: PriceOverride) => void;
 }
 
 export default function ItemPriceCalculator({
@@ -41,10 +46,13 @@ export default function ItemPriceCalculator({
   historyCacheKey,
   onWinPriceBandLoaded,
   defaultMarzeProcent,
+  overeniCeny,
+  onSourceApplied,
 }: ItemPriceCalculatorProps) {
   const [nakupniCena, setNakupniCena] = useState<number>(0);
   const [marzeProcent, setMarzeProcent] = useState<number>(0);
   const [poznamka, setPoznamka] = useState<string>('');
+  const [zdrojNakupu, setZdrojNakupu] = useState<PriceOverride['zdroj_nakupu']>();
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -72,10 +80,12 @@ export default function ItemPriceCalculator({
           : existingOverride.marze_procent,
       );
       setPoznamka(existingOverride.poznamka || '');
+      setZdrojNakupu(existingOverride.zdroj_nakupu);
       setIsConfirmed(existingOverride.potvrzeno);
     } else if (selectedProduct) {
       setNakupniCena(selectedProduct.cena_bez_dph);
       setMarzeProcent(defaultMarzeProcent);
+      setZdrojNakupu(undefined);
     }
   }, [existingOverride, selectedProduct, defaultMarzeProcent]);
 
@@ -103,6 +113,7 @@ export default function ItemPriceCalculator({
         nabidkova_cena_s_dph: nabidkovaCenaSdph,
         potvrzeno: true,
         poznamka: poznamka || undefined,
+        zdroj_nakupu: zdrojNakupu,
       });
       setIsConfirmed(true);
     } catch (err: unknown) {
@@ -110,7 +121,7 @@ export default function ItemPriceCalculator({
     } finally {
       setIsSaving(false);
     }
-  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, onConfirm]);
+  }, [nakupniCena, nakupniCenaSdph, marzeProcent, nabidkovaCenaBezDph, nabidkovaCenaSdph, poznamka, zdrojNakupu, onConfirm]);
 
   const handleHistoryToggle = useCallback(() => {
     const nextOpen = !historyOpen;
@@ -119,6 +130,15 @@ export default function ItemPriceCalculator({
       void historyQuery.refetch();
     }
   }, [historyOpen, normalizedHistorySubject, historyQuery]);
+
+  const handleUseWebSource = useCallback((source: WebPriceSource) => {
+    // Sdílený převod s legacy chipem, ale s právě nastavenou marží operátora.
+    const draft = applyWebSource(source, marzeProcent, onSourceApplied);
+    setNakupniCena(draft.nakupni_cena_bez_dph);
+    setPoznamka(draft.poznamka ?? '');
+    setZdrojNakupu(draft.zdroj_nakupu);
+    setIsConfirmed(false);
+  }, [marzeProcent, onSourceApplied]);
 
   return (
     <div
@@ -238,6 +258,50 @@ export default function ItemPriceCalculator({
           </div>
         )}
       </div>
+
+      {overeniCeny?.zdroje && overeniCeny.zdroje.length > 0 && (
+        <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-emerald-900">
+            <ShoppingCart className="h-3.5 w-3.5" />
+            Kde nakoupit
+          </div>
+          <div className="divide-y divide-emerald-200">
+            {overeniCeny.zdroje.slice(0, 3).map((source, index) => {
+              const safeUrl = safeHttpUrl(source.url);
+              const cenaSdph = webPriceGross(source);
+              const lzePouzit = source.cena_bez_dph != null || source.cena_s_dph != null;
+              return (
+                <div
+                  key={`${source.url}-${index}`}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 text-[11px] text-emerald-950"
+                >
+                  <span className="font-medium">{source.dodavatel || 'Neznámý dodavatel'}</span>
+                  <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH` : 'cena neuvedena'}</span>
+                  {source.dostupnost && <span>· {source.dostupnost}</span>}
+                  {safeUrl && (
+                    <a
+                      href={safeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-0.5 text-blue-700 hover:underline"
+                    >
+                      odkaz <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleUseWebSource(source)}
+                    disabled={!lzePouzit}
+                    className="ml-auto rounded border border-emerald-300 bg-white px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Použít cenu
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Price inputs */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-3">

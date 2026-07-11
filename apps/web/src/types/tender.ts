@@ -56,6 +56,10 @@ export interface PriceOverride {
   nabidkova_cena_s_dph: number;
   potvrzeno: boolean;
   poznamka?: string;
+  zdroj_nakupu?: {
+    url: string;
+    dodavatel: string | null;
+  };
 }
 
 export interface PriceSanityFlag {
@@ -69,6 +73,15 @@ export interface PriceSanityFlag {
 // NIKDY nepřepisuje cenova_uprava; slouží jen jako podklad, který uživatel ručně potvrdí.
 // (Strukturálně shodné s OvereniCeny v lib/api.ts — držíme lokálně, aby tento typový
 // modul nezáležel na api vrstvě.)
+export interface WebPriceSource {
+  url: string;
+  dodavatel: string | null;
+  cena_bez_dph: number | null;
+  cena_s_dph: number | null;
+  dostupnost: string | null;
+  poznamka: string | null;
+}
+
 export interface OvereniCeny {
   stav: 'nalezeno' | 'nenalezeno' | 'chyba';
   web_cena_bez_dph?: number;
@@ -80,6 +93,7 @@ export interface OvereniCeny {
   poznamka?: string;
   overeno_at: string;
   prekracuje_strop?: boolean;
+  zdroje?: WebPriceSource[];
 }
 
 export interface PolozkaMatch {

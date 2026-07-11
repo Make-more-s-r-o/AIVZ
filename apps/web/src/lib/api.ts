@@ -462,6 +462,63 @@ export async function getOutcomeStats(): Promise<OutcomeStats> {
   }
 }
 
+// --- Nákupní seznam po výhře ---
+
+export interface NakupItem {
+  id: number;
+  tender_id: string;
+  polozka_index: number;
+  polozka_nazev: string | null;
+  mnozstvi: number | null;
+  jednotka: string | null;
+  nakupni_cena_bez_dph: number | null;
+  dodavatel: string | null;
+  url: string | null;
+  objednano: boolean;
+  objednano_at: string | null;
+  poznamka: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getNakupy(id: string): Promise<NakupItem[]> {
+  const response = await fetchJson<{ nakupy: NakupItem[] }>(`/tenders/${encodeURIComponent(id)}/nakupy`);
+  return response.nakupy;
+}
+
+export async function seedNakupy(id: string): Promise<{
+  nakupy: NakupItem[];
+  seeded: number;
+  vynechane_nepotvrzene: number;
+}> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/nakupy/seed`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.detail || err.error || 'Nepodařilo se sestavit nákupní seznam');
+  }
+  return res.json();
+}
+
+export async function updateNakup(
+  id: string,
+  polozkaIndex: number,
+  input: { objednano: boolean; poznamka?: string | null },
+): Promise<NakupItem> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/nakupy/${polozkaIndex}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.detail || err.error || 'Nepodařilo se upravit nákupní položku');
+  }
+  return (await res.json()).nakup;
+}
+
 export async function getDocuments(id: string): Promise<string[]> {
   return fetchJson(`/tenders/${id}/documents`);
 }
@@ -569,6 +626,10 @@ export interface PriceOverrideData {
   nabidkova_cena_s_dph: number;
   potvrzeno: boolean;
   poznamka?: string;
+  zdroj_nakupu?: {
+    url: string;
+    dodavatel: string | null;
+  };
 }
 
 export async function updatePriceOverride(id: string, data: PriceOverrideData): Promise<{ success: boolean }> {
@@ -1292,6 +1353,15 @@ export async function detachTag(id: string, stitekId: string): Promise<{ success
 // --- Ověření cen web-searchem + checklist příloh (followup b+d) ---
 
 /** Návrh ceny dohledaný web-searchem (NIKDY nepřepisuje cenova_uprava — potvrzuje uživatel). */
+export interface WebPriceSource {
+  url: string;
+  dodavatel: string | null;
+  cena_bez_dph: number | null;
+  cena_s_dph: number | null;
+  dostupnost: string | null;
+  poznamka: string | null;
+}
+
 export interface OvereniCeny {
   stav: 'nalezeno' | 'nenalezeno' | 'chyba';
   web_cena_bez_dph?: number;
@@ -1303,6 +1373,7 @@ export interface OvereniCeny {
   poznamka?: string;
   overeno_at: string;
   prekracuje_strop?: boolean;
+  zdroje?: WebPriceSource[];
 }
 
 /** Spustí background job ověření cen (web search) — vrací jobId pro polling přes getJobStatus. */

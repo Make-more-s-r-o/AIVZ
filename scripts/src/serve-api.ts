@@ -10,7 +10,7 @@ import { spawn } from 'child_process';
 import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
-import { PriceOverrideSchema, ProductMatchSchema } from './lib/types.js';
+import { PriceOverrideSchema, ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
 import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
@@ -80,6 +80,9 @@ import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
+import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
+import { buildNakupySeedPlan } from './lib/nakupy-seed.js';
+import { listFindings } from './lib/web-findings-store.js';
 import { upsertWinPrices, deleteWinPrice, categorizeCommodity } from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
@@ -3511,6 +3514,116 @@ app.put('/api/tenders/:id/outcome', async (req, res) => {
 app.get('/api/outcomes/stats', async (_req, res) => {
   try {
     res.json(await getOutcomeStats());
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Nákupní seznam po výhře -----------------------------------------------
+// Auth/RBAC zajišťují stejné globální middleware jako u endpointů Výsledku:
+// přihlášený uživatel může číst, role viewer nesmí POST/PUT mutace.
+
+const NakupUpdateSchema = z.object({
+  objednano: z.boolean(),
+  poznamka: z.string().trim().max(5000).nullable().optional(),
+}).strict();
+
+// GET seznam zakázky — bez DB graceful vrací prázdné pole.
+app.get('/api/tenders/:id/nakupy', async (req, res) => {
+  try {
+    res.json({ nakupy: await listNakupy(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST idempotentně sestaví seznam z potvrzených cen v product-match.json.
+app.post('/api/tenders/:id/nakupy/seed', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+
+  try {
+    const raw = await readFile(join(OUTPUT_DIR, id, 'product-match.json'), 'utf-8');
+    const parsedMatch = ProductMatchSchema.safeParse(JSON.parse(raw));
+    if (!parsedMatch.success) {
+      return res.status(422).json({
+        error: 'invalid_product_match',
+        detail: parsedMatch.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '),
+      });
+    }
+
+    const [findings, rawAnalysis] = await Promise.all([
+      listFindings(id),
+      readFile(join(OUTPUT_DIR, id, 'analysis.json'), 'utf-8').catch(() => null),
+    ]);
+    let parsedAnalysis: ReturnType<typeof TenderAnalysisSchema.safeParse> | null = null;
+    if (rawAnalysis) {
+      try {
+        parsedAnalysis = TenderAnalysisSchema.safeParse(JSON.parse(rawAnalysis));
+      } catch {
+        // Nákupní seed umí pro legacy řádek použít kandidáta; poškozená analýza jej nesmí zablokovat.
+      }
+    }
+    const plan = buildNakupySeedPlan(
+      parsedMatch.data,
+      findings,
+      parsedAnalysis?.success ? parsedAnalysis.data : undefined,
+    );
+    const seeded = await upsertNakupy(id, plan.items);
+    const nakupy = await listNakupy(id);
+    await logActivity(id, 'nakupni_seznam_sestaven', (req as any).user?.sub ?? null, {
+      seeded,
+      celkem: nakupy.length,
+      vynechane_nepotvrzene: plan.vynechane_nepotvrzene,
+      actor_name: (req as any).user?.name ?? null,
+    });
+    res.json({ nakupy, seeded, vynechane_nepotvrzene: plan.vynechane_nepotvrzene });
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      return res.status(404).json({ error: 'product_match_not_found' });
+    }
+    if (err instanceof SyntaxError) {
+      return res.status(422).json({ error: 'invalid_product_match' });
+    }
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT stav objednání a volitelná poznámka konkrétní položky.
+app.put('/api/tenders/:id/nakupy/:polozkaIndex', async (req, res) => {
+  const { id } = req.params;
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const parsedIndex = z.coerce.number().int().nonnegative().safeParse(req.params.polozkaIndex);
+  const parsedBody = NakupUpdateSchema.safeParse(req.body ?? {});
+  if (!parsedIndex.success || !parsedBody.success) {
+    let detail = 'Neplatná data nákupní položky';
+    if (!parsedIndex.success) {
+      detail = 'polozkaIndex musí být nezáporné celé číslo';
+    } else if (!parsedBody.success) {
+      detail = parsedBody.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
+    }
+    return res.status(400).json({
+      error: 'invalid_nakup_update',
+      detail,
+    });
+  }
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+
+  try {
+    const nakup = await setObjednano(
+      id,
+      parsedIndex.data,
+      parsedBody.data.objednano,
+      parsedBody.data.poznamka,
+    );
+    if (!nakup) return res.status(404).json({ error: 'nakup_not_found' });
+    await logActivity(id, 'nakup_aktualizovan', (req as any).user?.sub ?? null, {
+      polozka_index: nakup.polozka_index,
+      objednano: nakup.objednano,
+      actor_name: (req as any).user?.name ?? null,
+    });
+    res.json({ nakup });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

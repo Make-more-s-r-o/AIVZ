@@ -1,0 +1,2 @@
+{"nalezeno": true, "cena_bez_dph": "2 000 Kč", "cena_s_dph": null, "mena": "CZK", "zdroj_url": "https://legacy-shop.cz/model-y", "dodavatel": "Legacy Shop", "dostupnost": "skladem", "poznamka": "starý kontrakt"}
+
