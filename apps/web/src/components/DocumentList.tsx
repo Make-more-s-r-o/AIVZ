@@ -20,10 +20,13 @@ import {
 } from '../lib/api';
 import { FileText, Download, Upload, Trash2, Paperclip, Archive, ChevronDown, ChevronRight, ShieldCheck, ShieldAlert, Send } from 'lucide-react';
 import { Button, Card, Badge, useToast } from './ui';
-import { FINALIZED_DOWNLOAD_ERROR, finalizeWithInvalidation } from '../lib/finalize-flow';
+import { finalizeWithInvalidation } from '../lib/finalize-flow';
+import SubmissionCockpit from './SubmissionCockpit';
 
 interface DocumentListProps {
   tenderId: string;
+  /** Vygenerované dokumenty jsou starší než poslední změna/potvrzení ceny. */
+  stale?: boolean;
 }
 
 const DOC_LABELS: Record<string, string> = {
@@ -137,7 +140,7 @@ function PrilohaChecklistRow({ item }: { item: PrilohaChecklistItem }) {
   );
 }
 
-export default function DocumentList({ tenderId }: DocumentListProps) {
+export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -229,20 +232,20 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
       try {
         await finalizeWithInvalidation({
           finalize: () => finalizeTender(tenderId),
-          invalidate: () => { void queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] }); },
+          invalidate: () => {
+            void queryClient.invalidateQueries({ queryKey: ['tender-status', tenderId] });
+            void queryClient.invalidateQueries({ queryKey: ['podani', tenderId] });
+            void queryClient.invalidateQueries({ queryKey: ['inbox'] });
+          },
         });
       } catch (err) {
         // Zpráva z API obsahuje výčet problémů brány (cenový strop, placeholdery, ceny).
         toast((err as Error).message, 'danger');
         return;
       }
-
-      try {
-        await downloadWithAuth(getBundleZipUrl(tenderId), `kompletni_nabidka_${tenderId}.zip`);
-        toast('Nabídka označena jako odeslaná', 'success');
-      } catch {
-        toast(FINALIZED_DOWNLOAD_ERROR, 'danger');
-      }
+      // Finalize už NEoznačuje zakázku jako odeslanou — jen vytvoří immutable balík.
+      // Podání se zaznamená níže v sekci „Podání" (teprve to přepne stav na Odesláno).
+      toast('Balík podání připraven — stáhněte jej a zaznamenejte podání níže.', 'success');
     } finally {
       setFinalizing(false);
     }
@@ -271,6 +274,14 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{actionError}</div>
       )}
 
+      {/* Ceny se po vygenerování dokumentů změnily/potvrdily — dokumenty jsou zastaralé. */}
+      {stale && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span>Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování.</span>
+        </div>
+      )}
+
       {/* Overall status banner */}
       {hasValidation && (
         <div className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
@@ -285,7 +296,8 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
         </div>
       )}
 
-      {/* Finalizace — brána na kompletní podatelný balík, pak označení zakázky jako odeslané */}
+      {/* Finalizace — brána na kompletní podatelný balík; vytvoří immutable balík podání.
+          NEoznačuje zakázku jako odeslanou — to se děje až zaznamenáním podání v sekci Podání. */}
       {documents && documents.length > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-white px-4 py-3">
           <Button
@@ -294,7 +306,7 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
             disabled={!readyToSubmit || finalizing}
             onClick={handleFinalize}
           >
-            {finalizing ? 'Odesílám...' : 'Označit odeslanou a stáhnout kompletní nabídku'}
+            {finalizing ? 'Připravuji balík...' : 'Připravit balík k podání'}
           </Button>
           {!readyToSubmit && (
             <span className="text-xs text-gray-500">
@@ -303,6 +315,9 @@ export default function DocumentList({ tenderId }: DocumentListProps) {
           )}
         </div>
       )}
+
+      {/* Submission cockpit — pravdivý stav podání (zobrazí se, jakmile existuje balík). */}
+      <SubmissionCockpit tenderId={tenderId} />
 
       {/* Generated documents */}
       {documents && documents.length > 0 && (

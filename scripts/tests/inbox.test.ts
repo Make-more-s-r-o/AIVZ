@@ -158,6 +158,118 @@ test('corrupt product-match.json zůstane v inboxu jako Vadná data', async () =
   }
 });
 
+// --- Deadline alarm (submission cockpit) ---
+
+const NOW = Date.parse('2026-07-11T12:00:00.000Z');
+
+test('deadline_alarm: připravený nepodaný balík s lhůtou do 48 h', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm1',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: true,
+    evidenceExistuje: false,
+    lhutaNabidek: '2026-07-12T12:00:00.000Z', // za 24 h
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, true);
+  assert.equal(e.hodin_do_lhuty, 24);
+  assert.equal(needsAction(e), true);
+});
+
+test('deadline_alarm: lhůta dál než 48 h → bez alarmu', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm2',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: true,
+    evidenceExistuje: false,
+    lhutaNabidek: '2026-07-20T12:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, false);
+  assert.equal(needsAction(e), false);
+});
+
+test('deadline_alarm: zaznamenané podání (evidence) → bez alarmu', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm3',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'odeslana',
+    balikExistuje: true,
+    evidenceExistuje: true,
+    lhutaNabidek: '2026-07-12T00:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, false);
+});
+
+test('deadline_alarm: osiřelá evidence bez CRM stavu Odeslaná alarm nevypne', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm-orphan',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: true,
+    evidenceExistuje: true,
+    lhutaNabidek: '2026-07-12T00:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, true);
+});
+
+test('deadline_alarm: evidence zůstává platná v pozdějším výsledkovém stavu', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm-result',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'vyhrano',
+    balikExistuje: true,
+    evidenceExistuje: true,
+    lhutaNabidek: '2026-07-12T00:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, false);
+});
+
+test('deadline_alarm: bez balíku → bez alarmu i s blízkou lhůtou', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm4',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: false,
+    evidenceExistuje: false,
+    lhutaNabidek: '2026-07-11T18:00:00.000Z',
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, false);
+});
+
+test('deadline_alarm: po lhůtě (záporné hodiny) stále alarmuje', () => {
+  const e = computeInboxEntry({
+    tenderId: 'alarm5',
+    productMatch: { polozky_match: [item()] },
+    crmStav: 'pripravena',
+    balikExistuje: true,
+    evidenceExistuje: false,
+    lhutaNabidek: '2026-07-11T06:00:00.000Z', // 6 h po lhůtě
+    nowMs: NOW,
+  });
+  assert.equal(e.deadline_alarm, true);
+  assert.equal(e.hodin_do_lhuty, -6);
+});
+
+test('buildInbox: deadline_alarm má přednost v řazení', () => {
+  const inputs: InboxTenderInput[] = [
+    { tenderId: 'hard', productMatch: { polozky_match: [item({ sanity_flags: [{ level: 'hard' }] })] } },
+    {
+      tenderId: 'alarm', productMatch: { polozky_match: [item()] },
+      crmStav: 'pripravena', balikExistuje: true, evidenceExistuje: false,
+      lhutaNabidek: '2026-07-12T00:00:00.000Z', nowMs: NOW,
+    },
+  ];
+  const out = buildInbox(inputs);
+  assert.equal(out[0].tender_id, 'alarm');
+});
+
 test('buildInbox: filtruje čisté a řadí nejnaléhavější první', () => {
   const inputs: InboxTenderInput[] = [
     { tenderId: 'clean', productMatch: { polozky_match: [item()] }, validation: { ready_to_submit: true, checks: [] } },

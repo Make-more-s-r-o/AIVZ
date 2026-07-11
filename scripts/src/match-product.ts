@@ -10,6 +10,9 @@ import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricing
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
 import { getCompany, getTenderCompanyId, resolveDefaultMarzeProcent } from './lib/company-store.js';
 import { applyPricePrefill } from './lib/price-prefill.js';
+import { scoreBid } from './lib/go-no-go.js';
+import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
+import { closePool } from './lib/db.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -807,6 +810,17 @@ async function main() {
   }
   const productMatch = finalParse.data;
 
+  // Profit-aware bid skóre: počítá se PO nacenění z reálných cen a uloží se do
+  // product-match.json. Historické cenové pásmo je volitelné — bez DB se vynechá.
+  let winBand: PriceBand | undefined;
+  try {
+    winBand = await priceBandForSubject(analysis.zakazka.predmet);
+  } catch {
+    console.warn('  Win-price historie není dostupná — bid skóre ji vynechá.');
+  }
+  productMatch.bid_score = scoreBid(analysis, productMatch, company, winBand);
+  console.log(`  Bid skóre: ${productMatch.bid_score.score}/100 (${productMatch.bid_score.doporuceni}), zisk ${Math.round(productMatch.bid_score.zisk_kc).toLocaleString('cs-CZ')} Kč, přirážka ${productMatch.bid_score.marze_procent} %`);
+
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');
 
@@ -831,7 +845,14 @@ async function main() {
   console.log(`\nReview product-match.json and adjust prices before generating documents!`);
 }
 
-main().catch((err) => {
-  console.error('Product matching failed:', err);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    // priceBandForSubject/getCompany otevřou pooled DB spojení; bez zavření drží
+    // event loop ~30 s (idleTimeoutMillis) → match krok by končil o 30 s později.
+    await closePool();
+  })
+  .catch(async (err) => {
+    console.error('Product matching failed:', err);
+    await closePool();
+    process.exit(1);
+  });

@@ -105,6 +105,22 @@ async function run(): Promise<void> {
     assert.deepEqual(res.problems, []);
   });
 
+  await test('změna ceny po generování → stale dokumenty blokují submit-gate', async () => {
+    const dir = await makeCase({
+      productMatch: {
+        prices_updated_at: '2099-01-01T00:00:00.000Z',
+        polozky_match: [item(0, null, 1000)],
+      },
+      fieldValidation: PASS_TWICE,
+    });
+    await writeFile(join(dir, 'cenova_nabidka.pdf'), 'stará cena', 'utf-8');
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.includes(
+      'Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování a Kontrolu.',
+    ));
+  });
+
   // 1b) Nepotvrzená cena → ready=false (kryje i scénář „přepnutí kandidáta smazalo
   // potvrzení, dokumenty zůstaly stale" — sanity fallback na cenu kandidáta nesmí stačit).
   await test('unconfirmed → ready=false, problém zmiňuje "potvrzenou cenu"', async () => {

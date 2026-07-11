@@ -262,7 +262,7 @@ export default function ItemPriceCalculator({
 
         <div>
           <label className="block text-[10px] font-medium mb-0.5" style={{ color: 'var(--text-secondary)' }}>
-            Marže (%)
+            Přirážka k nákupu (%)
           </label>
           <Input
             type="number"
@@ -325,7 +325,7 @@ export default function ItemPriceCalculator({
           style={{ border: '1px solid var(--warning-bg)', background: 'var(--warning-soft-bg)', color: 'var(--warning-fg)' }}
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>Marže 0 % — nabídka bez zisku</span>
+          <span>Přirážka 0 % — nabídka bez zisku</span>
         </div>
       )}
 

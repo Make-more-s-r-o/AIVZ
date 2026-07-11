@@ -4,7 +4,19 @@ import { dirname } from 'path';
 export const RUN_ALL_STEPS = ['extract', 'analyze', 'match', 'generate', 'validate'] as const;
 
 export type PipelineStep = typeof RUN_ALL_STEPS[number];
-export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted';
+export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval';
+
+/**
+ * Signál z run-all řetězce, že další krok (generate) narazil na lidský money-gate —
+ * nepotvrzené ceny. Není to chyba: řetězec se PAUZNE (waiting_approval), ne error.
+ * Nese počet cen čekajících na potvrzení pro hlášku uživateli.
+ */
+export class ApprovalRequiredError extends Error {
+  constructor(public readonly pendingCount: number, message: string) {
+    super(message);
+    this.name = 'ApprovalRequiredError';
+  }
+}
 
 export interface PipelineJob {
   id: string;
@@ -19,6 +31,30 @@ export interface PipelineJob {
   parentJobId?: string;
   currentStep?: PipelineStep;
   failedStep?: PipelineStep;
+}
+
+/**
+ * Synchronně rezervuje pauznutý parent job pro jediný resume požadavek.
+ * Volající mezi nalezením jobu a touto změnou nesmí provést await; v jednom Node procesu
+ * tak druhý souběžný request už neuvidí waiting_approval a nezařadí druhý generate.
+ */
+export function claimWaitingApproval(job: PipelineJob): boolean {
+  if (job.kind !== 'pipeline' || job.status !== 'waiting_approval') return false;
+  job.status = 'running';
+  job.currentStep = 'generate';
+  job.error = undefined;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+  return true;
+}
+
+/** Vrátí neúspěšně ověřený claim do stavu, ve kterém ho může operátor opravit a zopakovat. */
+export function restoreWaitingApproval(job: PipelineJob, error: string): void {
+  job.status = 'waiting_approval';
+  job.currentStep = 'generate';
+  job.error = error;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
 }
 
 interface PersistedJobFile {
@@ -119,6 +155,8 @@ export async function loadPipelineJobs(
   for (const rawJob of rawJobs) {
     if (!isPipelineJob(rawJob)) continue;
     const job: PipelineJob = { ...rawJob, logs: [...rawJob.logs] };
+    // waiting_approval NENÍ 'running' → restart ho ZACHOVÁ (řetězec zůstane pauznutý na
+    // money-gate, po restartu ho lze pořád resumnout). Neflipuje se na interrupted.
     if (job.status === 'running') {
       job.status = 'interrupted';
       job.finishedAt = now;
@@ -182,6 +220,17 @@ export async function advanceRunAllChain(
   try {
     await startStep(nextStep);
   } catch (err) {
+    // Lidský money-gate (nepotvrzené ceny před generate) NENÍ chyba — řetězec se pauzne
+    // ve waiting_approval a čeká na potvrzení cen + explicitní resume. Bez finishedAt,
+    // aby restore snapshot nepovažoval job za dokončený.
+    if (err instanceof ApprovalRequiredError) {
+      parent.status = 'waiting_approval';
+      parent.currentStep = nextStep;
+      parent.failedStep = undefined;
+      parent.error = err.message;
+      parent.finishedAt = undefined;
+      return;
+    }
     parent.status = 'error';
     parent.failedStep = nextStep;
     parent.error = err instanceof Error ? err.message : String(err);

@@ -4,14 +4,33 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  ApprovalRequiredError,
   advanceRunAllChain,
+  claimWaitingApproval,
   loadPipelineJobs,
   savePipelineJobs,
   selectJobsToStart,
+  restoreWaitingApproval,
   type PipelineJob,
   type PipelineStep,
   type SchedulableJob,
 } from '../src/lib/pipeline-job-state.js';
+
+test('resume claim: waiting_approval lze synchronně rezervovat jen jednou', () => {
+  const parent = job({ kind: 'pipeline', status: 'waiting_approval', currentStep: 'generate', error: 'čeká' });
+  assert.equal(claimWaitingApproval(parent), true);
+  assert.equal(parent.status, 'running');
+  assert.equal(claimWaitingApproval(parent), false);
+});
+
+test('resume claim: neúspěšné ověření vrátí parent do waiting_approval', () => {
+  const parent = job({ kind: 'pipeline', status: 'waiting_approval', currentStep: 'generate' });
+  assert.equal(claimWaitingApproval(parent), true);
+  restoreWaitingApproval(parent, 'Ceny nelze ověřit.');
+  assert.equal(parent.status, 'waiting_approval');
+  assert.equal(parent.currentStep, 'generate');
+  assert.equal(parent.error, 'Ceny nelze ověřit.');
+});
 
 function job(overrides: Partial<PipelineJob>): PipelineJob {
   return {
@@ -129,6 +148,78 @@ test('run-all po posledním kroku označí pipeline jako done', async () => {
 
   assert.deepEqual(started, []);
   assert.equal(parent.status, 'done');
+});
+
+test('run-all: money-gate před generate pauzne řetězec do waiting_approval (ne error)', async () => {
+  const parent = job({
+    id: 'pipeline-1',
+    step: 'all',
+    status: 'running',
+    kind: 'pipeline',
+    currentStep: 'match',
+  });
+  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id });
+  const started: PipelineStep[] = [];
+
+  await advanceRunAllChain(parent, doneChild, (step) => {
+    if (step === 'generate') throw new ApprovalRequiredError(3, 'Čeká na potvrzení cen (3).');
+    started.push(step);
+  });
+
+  // Generate se NEzařadil (čeká na potvrzení), řetězec je pauznutý, ne chybný.
+  assert.deepEqual(started, []);
+  assert.equal(parent.status, 'waiting_approval');
+  assert.equal(parent.currentStep, 'generate');
+  assert.equal(parent.failedStep, undefined);
+  assert.equal(parent.finishedAt, undefined, 'waiting_approval nesmí mít finishedAt (není dokončen)');
+  assert.match(parent.error ?? '', /\(3\)/);
+});
+
+test('run-all: jiná chyba při startu generate zůstává tvrdou chybou řetězce', async () => {
+  const parent = job({
+    id: 'pipeline-1',
+    step: 'all',
+    status: 'running',
+    kind: 'pipeline',
+    currentStep: 'match',
+  });
+  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id });
+
+  await advanceRunAllChain(parent, doneChild, () => {
+    throw new Error('generate-bid selhal');
+  }, '2026-07-10T12:00:00.000Z');
+
+  assert.equal(parent.status, 'error');
+  assert.equal(parent.failedStep, 'generate');
+  assert.equal(parent.finishedAt, '2026-07-10T12:00:00.000Z');
+});
+
+test('restore: waiting_approval pipeline job přežije restart (neflipuje na interrupted)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vz-pipeline-jobs-'));
+  const filePath = join(dir, '.jobs.json');
+  try {
+    const parent = job({
+      id: 'pipeline-wait',
+      step: 'all',
+      status: 'waiting_approval',
+      kind: 'pipeline',
+      currentStep: 'generate',
+      error: 'Čeká na potvrzení cen (2).',
+    });
+    const doneMatch = job({ id: 'child-match', step: 'match', status: 'done', parentJobId: parent.id });
+    await savePipelineJobs(filePath, [parent, doneMatch]);
+
+    const restored = await loadPipelineJobs(filePath, '2026-07-10T11:00:00.000Z');
+
+    // Pauznutý řetězec zůstává waiting_approval — dá se pořád resumnout.
+    assert.equal(restored.jobs.get('pipeline-wait')?.status, 'waiting_approval');
+    assert.equal(restored.jobs.get('pipeline-wait')?.currentStep, 'generate');
+    assert.equal(restored.jobs.get('pipeline-wait')?.finishedAt, undefined);
+    assert.equal(restored.interruptedCount, 0);
+    assert.deepEqual(restored.queuedJobIds, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('restore: přerušený pipeline řetězec zastaví i navazující queued krok', async () => {

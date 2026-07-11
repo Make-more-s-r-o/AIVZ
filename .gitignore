@@ -37,6 +37,10 @@ LuDone/
 miniMVP/
 
 # Temporary tender uploads
+# Vstupní zadávací dokumentace obsahuje REÁLNÉ dokumenty zakázek (vč. osobních
+# údajů) — do gitu NIKDY. Trackované zůstávají jen dřív commitnuté ukázky.
+input/*
+!input/.gitkeep
 input/tender-*/
 
 # Pracovní složka pro rozbalené ZIPy vstupní dokumentace (input-discovery.ts)

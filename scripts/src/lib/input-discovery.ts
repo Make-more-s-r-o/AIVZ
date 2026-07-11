@@ -1,6 +1,7 @@
 import { readdir, readFile, mkdir, writeFile, rm, stat } from 'fs/promises';
 import { join, extname, basename, sep, relative, resolve } from 'path';
 import PizZip from 'pizzip';
+import { ZIP_PEEK_SIZE_LIMIT_BYTES } from './upload-limits.js';
 
 /**
  * Robustní discovery vstupních souborů zakázky.
@@ -231,6 +232,35 @@ async function walk(dir: string, depth: number, zipDepth: number, ctx: Ctx): Pro
       fromZip: zipDepth > 0,
     });
   }
+}
+
+/**
+ * Rychlý náhled obsahu ZIPu BEZ rozbalení na disk — pro okamžitou UI odezvu po uploadu
+ * ("archiv obsahuje N souborů"). Skutečné rozbalení (se zip-slip ochranou a cappem na
+ * velikost) dělá až extract krok přes discoverInputFiles/extractZipBuffer výše.
+ * Vrací null, když ZIP nejde otevřít (poškozený soubor) — volající to bere jako "neznámo".
+ */
+export function peekZipFileCount(buffer: Buffer): number | null {
+  if (!shouldPeekZipFile(buffer.length)) return null;
+  try {
+    const zip = new PizZip(buffer);
+    let count = 0;
+    for (const entryName of Object.keys(zip.files)) {
+      const entry = zip.files[entryName];
+      if (entry.dir) continue;
+      const base = basename(entryName);
+      if (entryName.split('/').some((seg) => isNoiseName(seg)) || isNoiseName(base)) continue;
+      count++;
+    }
+    return count;
+  } catch {
+    return null;
+  }
+}
+
+/** Informativní ZIP náhled nad tímto limitem přeskočíme ještě před readFile. */
+export function shouldPeekZipFile(sizeBytes: number): boolean {
+  return Number.isFinite(sizeBytes) && sizeBytes >= 0 && sizeBytes <= ZIP_PEEK_SIZE_LIMIT_BYTES;
 }
 
 /**

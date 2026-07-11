@@ -27,6 +27,7 @@ import {
   hasPartsSelectionSnapshot,
   readPartsSelectionSnapshot,
 } from './lib/parts-selection-guard.js';
+import { findUnconfirmedPrices } from './lib/price-confirmation.js';
 
 // Re-export for backward compatibility
 export type { DocMode, GenerationMeta } from './lib/data-resolver.js';
@@ -100,6 +101,24 @@ async function main() {
     );
   }
 
+  // Tvrdý money-gate i pro přímé/ruční spuštění skriptu. Musí proběhnout před
+  // smazáním starých dokumentů a respektovat pouze části, které se skutečně podávají.
+  let generationPartIds: Set<string> | null = null;
+  if (analysis.casti && analysis.casti.length > 1) {
+    try {
+      const selection = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
+      generationPartIds = new Set<string>(selection.selected_parts || []);
+    } catch {
+      generationPartIds = new Set(analysis.casti.map((cast) => cast.id));
+    }
+  }
+  const unconfirmed = findUnconfirmedPrices(productMatch, generationPartIds);
+  if (unconfirmed.count > 0) {
+    throw new Error(
+      `Generování nelze spustit nad nepotvrzenými cenami (${unconfirmed.count}): ${unconfirmed.names.join(', ')}.`,
+    );
+  }
+
   // Vyčistit staré vygenerované soubory (ponechat data z předchozích kroků pipeline)
   const KEEP_FILES = new Set([
     'analysis.json', 'extracted-text.json', 'product-match.json',
@@ -134,17 +153,10 @@ async function main() {
   const isMultiProduct = !!productMatch.polozky_match;
 
   // Read parts selection for multi-part tenders
-  let selectedPartIds: Set<string> | null = null;
+  let selectedPartIds: Set<string> | null = generationPartIds;
   const hasParts = analysis.casti && analysis.casti.length > 1;
   if (hasParts) {
-    try {
-      const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
-      selectedPartIds = new Set(sel.selected_parts || []);
-      console.log(`  Parts selection: ${[...selectedPartIds].join(', ')}`);
-    } catch {
-      selectedPartIds = new Set(analysis.casti.map((c: any) => c.id));
-      console.log(`  No parts selection — using all parts`);
-    }
+    console.log(`  Parts selection: ${[...selectedPartIds!].join(', ')}`);
   }
 
   // Resolve products and prices for both paths
@@ -209,15 +221,7 @@ async function main() {
   const totalSdph = round2(lineTotals.reduce((s, l) => s + l.sdph, 0));
   const dphAmount = round2(totalSdph - totalBezDph);
 
-  const allConfirmed = isMultiProduct
-    ? productMatch.polozky_match!.every(pm => pm.cenova_uprava?.potvrzeno)
-    : productMatch.cenova_uprava?.potvrzeno;
-
-  if (allConfirmed) {
-    console.log(`  Using confirmed prices: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH`);
-  } else {
-    console.log(`  Warning: Using AI-estimated prices (not confirmed by user)`);
-  }
+  console.log(`  Using confirmed prices: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH`);
 
   // Shared tenderData for templates
   const tenderData = {
