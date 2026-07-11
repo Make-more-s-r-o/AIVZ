@@ -24,6 +24,16 @@ Pro každý produkt uveď:
 Seřaď kandidáty od NEJLEVNĚJŠÍHO. vybrany_index = index nejlevnějšího produktu, který splňuje VŠECHNY povinné požadavky.
 U veřejných zakázek je nejčastější hodnotící kritérium NEJNIŽŠÍ NABÍDKOVÁ CENA — proto preferuj levnější produkt, pokud splňuje všechny povinné požadavky.
 
+MĚŘÍTKO A JEDNOTKA POLOŽKY (KRITICKÉ):
+- Cena kandidáta = cena za JEDNU jednotku položky (viz množství/jednotka).
+- Kandidát musí rozsahem odpovídat přesně položce — pokud je položka drobný díl (redukce, adaptér, kabel, bit, náhradní díl), navrhni právě ten díl.
+- NIKDY nenavrhuj sadu/kufr/komplet, jehož je díl součástí. Sadu navrhni JEN pokud ji položka výslovně požaduje.
+
+KDYŽ NENAJDEŠ REÁLNÝ PRODUKT:
+- Nevymýšlej náhradu jiného rozsahu ani neodhaduj cenu.
+- Vrať kandidáta s "zadna_shoda": true, "cena_bez_dph": 0, "cena_s_dph": 0, "cena_spolehlivost": "nizka" a v "popis" stručně uveď, co jsi hledal a proč shoda chybí.
+- Takovou položku nacení operátor ručně.
+
 KRITICKÉ PRAVIDLO PRO PŘESNÉ PARAMETRY:
 - Pokud požadavek uvádí KONKRÉTNÍ hodnotu (např. "DDR5 5600 MHz", "PCIe Gen4 NVMe", "min. 16GB"), vybraný produkt MUSÍ mít PŘESNĚ tuto nebo vyšší hodnotu
 - DDR5 5600 MHz ≠ DDR5 5200 MHz (5200 NESPLŇUJE požadavek 5600!)
@@ -100,7 +110,8 @@ Navrhni ${candidateCount} konkrétní produkty ve formátu:
       "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
       "katalogove_cislo": "ABC-12345",
       "dodavatele": ["dodavatel1", "dodavatel2"],
-      "dostupnost": "skladem / 2-3 týdny"
+      "dostupnost": "skladem / 2-3 týdny",
+      "zadna_shoda": false  // volitelné — uveď true POUZE když jsi nenašel reálný odpovídající produkt (pak ceny = 0)
     }
   ],
   "vybrany_index": 0,
@@ -151,7 +162,8 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
           "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
           "katalogove_cislo": "ABC-12345",
           "dodavatele": ["dodavatel1", "dodavatel2"],
-          "dostupnost": "skladem / 2-3 týdny"
+          "dostupnost": "skladem / 2-3 týdny",
+          "zadna_shoda": false  // volitelné — uveď true POUZE když jsi nenašel reálný odpovídající produkt (pak ceny = 0)
         }
       ],
       "vybrany_index": 0,
