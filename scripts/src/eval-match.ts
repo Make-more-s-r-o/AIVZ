@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { basename, join } from 'node:path';
 import { calculateEvalMetrics, calculateMetricsDelta, METRICS_VERSION, type EvalItem, type EvalMetrics, type GoldenItem } from './lib/eval-metrics.js';
+import { buildFillReport, type FillDocumentReport } from './lib/fill-report.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const FIXTURES = join(ROOT, 'scripts/tests/fixtures/golden-set');
@@ -18,6 +19,7 @@ interface EvalReport {
   golden_items: number;
   metrics: EvalMetrics;
   delta_vs_previous: Partial<Record<keyof EvalMetrics, number>> | null;
+  fill_miss_rate?: number;
 }
 
 async function loadGolden(): Promise<GoldenItem[]> {
@@ -34,6 +36,17 @@ async function loadTenderItems(tender: string): Promise<EvalItem[]> {
     return match.polozky_match.map((item: any) => ({ ...item, id: `${basename(tender)}:${item.polozka_index}` }));
   }
   return [{ ...match, id: `${basename(tender)}:-1` }];
+}
+
+async function loadFillMetric(tenders: string[]): Promise<number | undefined> {
+  const documents: FillDocumentReport[] = [];
+  for (const tender of tenders) {
+    const path = join(ROOT, 'output', basename(tender), 'fill-report.json');
+    if (!existsSync(path)) continue;
+    const report = JSON.parse(await readFile(path, 'utf8'));
+    documents.push(...(report.dokumenty ?? []));
+  }
+  return documents.length ? buildFillReport(documents).celkem.miss_rate : undefined;
 }
 
 function run(command: string, args: string[]): Promise<void> {
@@ -117,12 +130,14 @@ async function main(): Promise<void> {
   }
   if (!items.length) throw new Error('Nebyl nalezen žádný aktuální product-match.json pro vyhodnocení.');
   const metrics = calculateEvalMetrics(items, golden);
+  const fillMissRate = await loadFillMetric(tenders);
   const previous = await previousReport();
   const delta: EvalReport['delta_vs_previous'] = previous ? {} : null;
   if (delta) Object.assign(delta, calculateMetricsDelta(metrics, previous!.metrics, METRICS_VERSION, previous!.metrics_version));
   const generated = new Date().toISOString();
-  const report: EvalReport = { metrics_version: METRICS_VERSION, generated_at: generated, mode: live ? 'live' : 'offline', tenders, golden_items: golden.length, metrics, delta_vs_previous: delta };
+  const report: EvalReport = { metrics_version: METRICS_VERSION, generated_at: generated, mode: live ? 'live' : 'offline', tenders, golden_items: golden.length, metrics, delta_vs_previous: delta, ...(fillMissRate === undefined ? {} : { fill_miss_rate: fillMissRate }) };
   printMetrics(metrics);
+  if (fillMissRate !== undefined) console.log(`Fill miss-rate: ${(fillMissRate * 100).toFixed(2)} %`);
   if (previous) {
     console.log('Delta proti předchozímu reportu:', delta);
     if (previous.metrics_version !== METRICS_VERSION) console.log('hit-rate: nová definice metriky, delta nedostupná');

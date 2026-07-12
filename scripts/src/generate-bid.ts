@@ -28,6 +28,13 @@ import {
   readPartsSelectionSnapshot,
 } from './lib/parts-selection-guard.js';
 import { findUnconfirmedPrices } from './lib/price-confirmation.js';
+import {
+  buildDocumentFillReport,
+  buildFillReport,
+  inferFillKey,
+  type FillAttempt,
+  type FillDocumentReport,
+} from './lib/fill-report.js';
 
 // Re-export for backward compatibility
 export type { DocMode, GenerationMeta } from './lib/data-resolver.js';
@@ -272,6 +279,16 @@ async function main() {
   console.log('\n4B: Generating DOCX documents...');
   const docData = await resolveDocumentData(tenderId);
   const generationMeta: GenerationMeta = {};
+  const fillDocuments: FillDocumentReport[] = [];
+
+  const programmaticAttempts = (): FillAttempt[] => [
+    { klic: 'nazev_firmy', original: 'Název firmy', hodnota: docData.nazev, vyplneno: Boolean(docData.nazev) },
+    { klic: 'ico', original: 'IČO', hodnota: docData.ico, vyplneno: Boolean(docData.ico) },
+    { klic: 'dic', original: 'DIČ', hodnota: docData.dic, vyplneno: Boolean(docData.dic) },
+    { klic: 'cena', original: 'Celková cena', hodnota: String(docData.celkova_cena_bez_dph), vyplneno: Number.isFinite(docData.celkova_cena_bez_dph) },
+    { klic: 'datum', original: 'Datum', hodnota: docData.datum, vyplneno: Boolean(docData.datum) },
+    { klic: 'podpis', original: 'Podpis oprávněné osoby', hodnota: docData.jednajici_osoba, vyplneno: Boolean(docData.jednajici_osoba) },
+  ];
 
   // Load document-modes.json overrides (if exists)
   let modeOverrides: Record<string, DocMode> = {};
@@ -289,6 +306,7 @@ async function main() {
   );
   await writeFile(join(outputDir, 'technicky_navrh.docx'), techNavrh);
   generationMeta['technicky_navrh.docx'] = { mode: 'fill', source: 'programmatic', cost_czk: technicalResult.costCZK };
+  fillDocuments.push(buildDocumentFillReport('technicky_navrh.docx', programmaticAttempts().filter((a) => a.klic !== 'cena' && a.klic !== 'podpis')));
 
   // 2. Cenová nabídka
   console.log('  - cenova_nabidka.docx');
@@ -306,6 +324,7 @@ async function main() {
   }
   await writeFile(join(outputDir, 'cenova_nabidka.docx'), cenovaNabidka);
   generationMeta['cenova_nabidka.docx'] = { mode: 'clean', source: 'programmatic', cost_czk: 0 };
+  fillDocuments.push(buildDocumentFillReport('cenova_nabidka.docx', programmaticAttempts()));
 
   // 3. Template-based documents
   console.log('\n4C: Discovering and filling templates...');
@@ -370,6 +389,7 @@ async function main() {
         const cleanOutputName = `${baseName}${suffix}.docx`;
         await writeFile(join(outputDir, cleanOutputName), buffer);
         generationMeta[cleanOutputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
+        fillDocuments.push(buildDocumentFillReport(cleanOutputName, programmaticAttempts()));
         console.log(`    Clean builder: 0 CZK`);
         continue;
       }
@@ -384,6 +404,17 @@ async function main() {
             await logCost(tenderId, `generate-template-${outputName}`, 'reconstruct', 0, 0, result.costCZK);
           }
           generationMeta[outputName] = { mode: 'reconstruct', source: 'reconstruct-engine', cost_czk: result.costCZK, template_source: template.filename };
+          const attempts: FillAttempt[] = result.structure.sections.flatMap((section) => [
+            ...(section.fields ?? []).map((field) => ({
+              klic: inferFillKey(`${field.label} ${field.value_type}`), original: field.label,
+              hodnota: result.resolvedValues[field.value_type] ?? '', vyplneno: Boolean(result.resolvedValues[field.value_type]),
+            })),
+            ...Array.from(section.template_string?.matchAll(/\{([a-z_]+)\}/g) ?? []).map((match) => ({
+              klic: inferFillKey(match[1]), original: section.template_string ?? match[0],
+              hodnota: result.resolvedValues[match[1]] ?? '', vyplneno: Boolean(result.resolvedValues[match[1]]),
+            })),
+          ]);
+          fillDocuments.push(buildDocumentFillReport(outputName, attempts));
           console.log(`    Reconstruct: ${result.costCZK.toFixed(2)} CZK`);
           continue;
         } catch (err) {
@@ -401,6 +432,10 @@ async function main() {
           await logCost(tenderId, `generate-template-${outputName}`, 'excel-ai', 0, 0, result.costCZK);
         }
         generationMeta[outputName] = { mode: 'fill', source: 'excel-ai', cost_czk: result.costCZK, template_source: template.filename };
+        fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
+          original: rep.original, hodnota: rep.replacement,
+          vyplneno: Boolean(rep.replacement?.trim()),
+        }))));
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace(ext, '_replacements.json');
@@ -419,6 +454,10 @@ async function main() {
           await logCost(tenderId, `generate-template-${outputName}`, 'docx-ai', 0, 0, result.costCZK);
         }
         generationMeta[outputName] = { mode: 'fill', source: 'ai-fill', cost_czk: result.costCZK, template_source: template.filename };
+        fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
+          original: rep.original, hodnota: rep.replacement,
+          vyplneno: Boolean(rep.replacement.trim()) && rep.strategy !== 'not-found',
+        }))));
 
         if (result.replacements.length > 0) {
           const logName = outputName.replace('.docx', '_replacements.json');
@@ -534,11 +573,16 @@ async function main() {
     'utf-8'
   );
 
+  const fillReport = buildFillReport(fillDocuments);
+  await writeFile(join(outputDir, 'fill-report.json'), JSON.stringify(fillReport, null, 2), 'utf-8');
+
   console.log(`\nGeneration complete!`);
   console.log(`  Total price: ${totalBezDph.toLocaleString('cs-CZ')} Kč bez DPH / ${totalSdph.toLocaleString('cs-CZ')} Kč s DPH`);
   console.log(`  AI cost: ${totalCostCZK.toFixed(2)} CZK`);
   const modeStats = Object.values(generationMeta).reduce((acc, m) => { acc[m.mode] = (acc[m.mode] || 0) + 1; return acc; }, {} as Record<string, number>);
   console.log(`  Modes: ${Object.entries(modeStats).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+  console.log(`  Fill miss-rate: ${(fillReport.celkem.miss_rate * 100).toFixed(2)} % (${fillReport.celkem.nevyplneno}/${fillReport.celkem.slotu_celkem})`);
+  for (const doc of fillReport.dokumenty) console.log(`    ${doc.dokument}: ${(doc.miss_rate * 100).toFixed(2)} % (${doc.nevyplneno}/${doc.slotu_celkem})`);
   console.log(`  Output: ${outputDir}/`);
 }
 

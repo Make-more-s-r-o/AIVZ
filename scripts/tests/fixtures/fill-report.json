@@ -1,0 +1,13 @@
+{
+  "dokumenty": [
+    {
+      "dokument": "nabidka.docx",
+      "slotu_celkem": 2,
+      "vyplneno": 1,
+      "nevyplneno": 1,
+      "miss_rate": 0.5,
+      "nevyplnene_sloty": [{ "klic": "telefon", "kontext": "Kontaktní telefon: doplní účastník", "povinny": false }]
+    }
+  ],
+  "celkem": { "slotu_celkem": 2, "vyplneno": 1, "nevyplneno": 1, "miss_rate": 0.5 }
+}

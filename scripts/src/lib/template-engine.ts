@@ -189,13 +189,13 @@ type ReplacementStrategy =
   | 'retry-pass'
   | 'not-found';
 
-interface TemplateReplacement {
+export interface TemplateReplacement {
   original: string;
   replacement: string;
   strategy?: ReplacementStrategy;
 }
 
-interface FillTemplateWithAIResult {
+export interface FillTemplateWithAIResult {
   buffer: Buffer;
   replacements: TemplateReplacement[];
   costCZK: number;

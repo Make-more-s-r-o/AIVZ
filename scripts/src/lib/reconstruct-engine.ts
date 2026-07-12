@@ -38,7 +38,7 @@ const thinBorder = { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA' };
 const borders = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
 
 // Value type → DocumentData field mapping
-function resolveValue(valueType: string, data: DocumentData): string {
+export function resolveValue(valueType: string, data: DocumentData): string {
   const map: Record<string, string> = {
     company_name: data.nazev,
     ico: data.ico,
@@ -88,6 +88,7 @@ export interface ReconstructResult {
   buffer: Buffer;
   costCZK: number;
   structure: TemplateStructure;
+  resolvedValues: Record<string, string>;
 }
 
 /**
@@ -290,5 +291,12 @@ export async function reconstructDocument(
   });
 
   const buffer = Buffer.from(await Packer.toBuffer(doc));
-  return { buffer, costCZK, structure };
+  const valueTypes = new Set<string>();
+  for (const section of structure.sections) {
+    for (const field of section.fields ?? []) valueTypes.add(field.value_type);
+    for (const match of section.template_string?.matchAll(/\{([a-z_]+)\}/g) ?? []) valueTypes.add(match[1]);
+    for (const valueType of section.table?.row_value_types ?? []) valueTypes.add(valueType);
+  }
+  const resolvedValues = Object.fromEntries([...valueTypes].map((valueType) => [valueType, resolveValue(valueType, data)]));
+  return { buffer, costCZK, structure, resolvedValues };
 }

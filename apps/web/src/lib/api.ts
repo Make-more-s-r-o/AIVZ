@@ -862,6 +862,13 @@ export interface GenerationMetaEntry {
 
 export type GenerationMeta = Record<string, GenerationMetaEntry>;
 
+export interface FillMissingSlot { klic: string; kontext: string; povinny?: boolean }
+export interface FillDocumentReport {
+  dokument: string; slotu_celkem: number; vyplneno: number; nevyplneno: number; miss_rate: number;
+  nevyplnene_sloty: FillMissingSlot[];
+}
+export interface FillReport { dokumenty: FillDocumentReport[]; celkem: Omit<FillDocumentReport, 'dokument' | 'nevyplnene_sloty'> }
+
 export interface FieldValidationCheck {
   field: string;
   expected: string;
@@ -879,6 +886,10 @@ export interface FieldValidationResult {
 
 export async function getGenerationMeta(id: string): Promise<GenerationMeta> {
   return fetchJson(`/tenders/${id}/generation-meta`);
+}
+
+export async function getFillReport(id: string): Promise<FillReport | null> {
+  return fetchJson(`/tenders/${id}/fill-report`);
 }
 
 export async function getFieldValidation(id: string): Promise<FieldValidationResult[]> {

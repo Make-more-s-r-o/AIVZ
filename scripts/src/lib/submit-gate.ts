@@ -15,6 +15,7 @@ import { join } from 'path';
 import type { ProductMatch, PolozkaMatch } from './types.js';
 import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
+import { splitFillProblems, type FillReport } from './fill-report.js';
 import { isStale } from './stale-check.js';
 import {
   assertPartsSelectionUnchanged,
@@ -282,9 +283,17 @@ export async function computeSubmitGate(
     problems.push('Chybí field-validace dokumentů — spusťte krok Validace.');
   }
 
-  // Zbytkové placeholdery ve vygenerovaných .docx.
+  let structuredFillReport: FillReport | null = null;
   try {
-    const docx = (await readdir(outputDir)).filter((f) => f.toLowerCase().endsWith('.docx'));
+    structuredFillReport = JSON.parse(await readFile(join(outputDir, 'fill-report.json'), 'utf-8')) as FillReport;
+  } catch {
+    // Starý výstup: níže použijeme původní obecnou kontrolu placeholderů.
+  }
+
+  // Zbytkové placeholdery ve vygenerovaných .docx. U nového strukturovaného
+  // reportu rozhoduje klasifikace povinný/volitelný, aby volitelné pole neblokovalo.
+  try {
+    const docx = structuredFillReport ? [] : (await readdir(outputDir)).filter((f) => f.toLowerCase().endsWith('.docx'));
     const withPlaceholders: string[] = [];
     for (const f of docx) {
       if (await docHasResidualPlaceholders(join(outputDir, f))) withPlaceholders.push(f);
@@ -294,6 +303,18 @@ export async function computeSubmitGate(
     }
   } catch {
     // Nelze číst output — ostatní kontroly platí.
+  }
+
+  // Strukturovaný report rozlišuje povinná a volitelná pole. Pokud u starého
+  // výstupu neexistuje, zachováme původní kontroly výše beze změny.
+  if (structuredFillReport) {
+    const fillProblems = splitFillProblems(structuredFillReport);
+    if (fillProblems.required.length) {
+      problems.push(`Nevyplněná povinná pole: ${fillProblems.required.map((slot) => `${slot.dokument}: ${slot.klic}`).join(', ')}`);
+    }
+    if (fillProblems.optional.length) {
+      warnings.push(`Nevyplněná volitelná pole: ${fillProblems.optional.map((slot) => `${slot.dokument}: ${slot.klic}`).join(', ')}`);
+    }
   }
 
   return { ready: problems.length === 0, problems, warnings };
