@@ -51,9 +51,10 @@ Rozpad dimenzí (report 2026-07-11): průchodnost 68, kvalita 68, UX 60, provoz 
   (halucinace 280 000 Kč za adaptér byla zablokována; po root-cause fixech správná cena 280 Kč).
 - **Marže**: company default (10 % fallback) jednotně ve všech cestách (panel, bulk, web-cena);
   nepotvrzená nula se přepisuje, potvrzená nula operátora se respektuje.
-- **Per-item attestace potvrzení cen (PR #63):** každé potvrzení nese serverovou auditní
-  stopu (kdo/kdy), bulk potvrzuje POUZE explicitně attestované položky, slepé „Potvrdit vše"
-  odstraněno, změna produktu/ceny potvrzení automaticky ruší.
+- **Per-item attestace potvrzení cen (PR #63, živě ověřeno na prod):** každé potvrzení
+  nese serverovou auditní stopu (kdo/kdy z JWT — klientské hodnoty se ignorují), bulk
+  potvrzuje POUZE explicitně attestované položky, slepé „Potvrdit vše" odstraněno,
+  potvrzení se ruší při změně produktu/ceny i při HARD flagu `cena_pod_nakupem`.
 - **Win-price pásma**: migrace 011/013, ~10 000 záznamů z Registru smluv, 11 kategorií,
   hygiena dat (dopočet bez DPH, vadné datumy), pásma v UI Ocenění + faktor v go/no-go.
 - **Web-verify cen** (`price-verifier.ts`, Anthropic web_search): reálné nákupní zdroje, až 3
@@ -88,6 +89,10 @@ Rozpad dimenzí (report 2026-07-11): průchodnost 68, kvalita 68, UX 60, provoz 
 - **Outcome vrstva existuje** (migrace 012 `crm_vysledky`, `outcomes-store.ts`, tab Výsledek,
   `/api/outcomes/stats`, win-rate widget, propis vítězných cen do win_prices) — ale je **prázdná**
   (0 podaných nabídek).
+- **Governance kill-switch (PR #65):** `config/governance.json` — přepínače per doména
+  (ingest / ai_jobs / generate / finalize / submission) + denní strop AI nákladů (default
+  2 000 Kč), serverové guardy 503, admin API, sekce v Nastavení, chip „Provoz omezen"
+  v hlavičce, audit kdo/kdy.
 - **AI náklady** per zakázka (`cost-tracker.ts`), denní pg_dump zálohy, health/billing watchdog
   → Slack, JWT mimo FE query string, e2e auto-confirm už neobchází money-gate
   (`E2E_UNSAFE_AUTOCONFIRM` explicitní), `.gitignore` kryje `input/`.
@@ -102,7 +107,8 @@ Rozpad dimenzí (report 2026-07-11): průchodnost 68, kvalita 68, UX 60, provoz 
    čísly, která web-search nezná) — mainstream značky nachází, long-tail ne.
 4. **Jediný zdroj monitoringu = NEN scrape** (HTML, křehké); Hlídač fallback čeká na token.
 5. Fronta = 2 sloty v jednom procesu; „desítky denně" neutáhne (deploy navíc zabíjí běžící joby).
-6. Cost tracking je per zakázka; chybí agregace, stropy, throughput metriky.
+6. Cost tracking je per zakázka; chybí agregace a throughput metriky (denní strop AI
+   nákladů už nasazen — PR #65; chybí varování při 80 % a šetrná pauza jobů, 03 C-03b).
 7. Výsledky zakázek se nedohledávají automaticky (žádný outcome watcher).
 
 ---
@@ -316,7 +322,7 @@ rozhodnutí o zdrojích monitoringu (Hlídač licence, TED).
 | 5.3 | **API podání kde existuje**: prověřit E-ZAK/Tender arena/Josephine možnosti; kde API není, zůstává 5.2 | L–XL | Pokrytí portálů rozhodne, kolik % podání jde plně automatizovat. |
 | 5.4 | **Auto-triáž go/no-go**: skóre nad kalibrovaným prahem → auto-příprava celého balíku; člověk schvaluje frontu „připraveno k podání" místo jednotlivých kroků | M | Bezpečné až s kalibrací z Fáze 3; jinak mašina plýtvá na špatné zakázky. |
 | 5.5 | **Nákupní automatizace**: z `crm_nakupy` objednávkové podklady (košíky/poptávky), člověk schvaluje nákup jedním klikem | M | Druhý lidský checkpoint dle cíle. Kód tabu Nákup existuje, chybí generování podkladů. |
-| 5.6 | **Governance a fail-safe**: audit log, denní/týdenní limity (Kč, počet podání), alarm při anomálii (např. cena 2σ mimo pásmo prošla). **Základní kill-switch existuje už od vlny B (03 B-00 — předsunuto po oponentuře, protože auto-run-all a bulk cesty vznikají dřív); tady se rozšiřuje** | M | Podmínka důvěry — autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone money-path). |
+| 5.6 | **Governance a fail-safe**: audit log autonomních akcí, denní/týdenní limity (Kč, počet podání), alarm při anomálii (např. cena 2σ mimo pásmo prošla). **Základní kill-switch per doména + denní AI strop jsou NASAZENÉ (PR #65 — předsunuto po oponentuře, protože auto-run-all a bulk cesty vznikají dřív); tady se vrstva rozšiřuje** | M | Podmínka důvěry — autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone money-path). |
 
 ### Rizika
 - **Právní/reputační**: formálně vadné automatické podání poškozuje jméno firmy u zadavatelů;
@@ -359,15 +365,16 @@ fáze „na řadě":
    běží paralelně s vlastním pilotem (neblokují se).
 3. **Pilotní podání (F1.1–1.6)** — 1 podání → retrospektiva → další 2; provoz, ne kód.
    Kódová podpora jen 1.3 (hard completeness gate).
-4. **Základní kill-switch (03 B-00)** — PŘED auto-run-all a jakoukoli další automatizací
-   money-path (předsunuto z fáze 5 po oponentuře).
+4. **Základní kill-switch — HOTOVO (PR #65, nasazeno):** governance přepínače per doména
+   + denní AI strop 2 000 Kč; podmínka pro auto-run-all a bulk cesty je splněna.
 5. **HLIDAC_TOKEN (F1.7)** — jednorázové rozhodnutí Dana, odblokuje stabilitu vstupu.
 6. **Logování feature vektorů go/no-go (F2.5)** — S, udělat hned; zpětně data nevzniknou.
 7. **Outcome watcher (F3.1) předběžně** — začít sbírat výsledky co nejdřív kvůli latenci
    zveřejňování; stačí minimální verze (VVZ award notice podle ev. čísla).
 8. **Verify hit-rate + kvalita matchingu (F2.1, 2.2)** — hlavní kódová práce nejbližších týdnů;
    podmínka ziskovosti (odhady −42 % pod trhem) i podmínka 5–10/den.
-9. **Auto-run-all po převzetí (F2.3)** — S, checkpoint je fail-closed; až po kill-switchi (4).
+9. **Auto-run-all po převzetí (F2.3)** — S, checkpoint je fail-closed; kill-switch
+   podmínka splněna (PR #65).
 10. **Inbox zbytek (F2.4 — generate/finalize; potvrzení s attestací HOTOVO PR #63)**
     + **cost/throughput observabilita (F2.6)** — poloautomat UX.
 11. **Právní konzultace (F5.1 + GDPR/data okruh)** — externí, dlouhá latence → zadat hned;
