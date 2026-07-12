@@ -143,3 +143,9 @@ Pozn. k nálezu „48 % vs. 40 % single-bidder": číslo opraveno na 40 % (EU Si
 Scoreboard 2024) s poznámkou o metodice (TED báze); v 01 ponechána jedna věta
 vysvětlující, odkud se vzalo starší ~48 % (jiná báze/období) — aby se při příštím
 researchi čísla znovu nesmíchala. Není to obhajoba původní hodnoty.
+
+Pozn. k nálezu „kill-switch až ve vlně F" (MEDIUM): nejenom zapracován, ale mezitím
+VYŘEŠEN nasazením — PR #65 (`config/governance.json`: přepínače ingest / ai_jobs /
+generate / finalize / submission + denní strop AI nákladů, serverové 503 guardy,
+admin API, audit kdo/kdy). V plánu veden jako hotový fakt (03 B-00, C-03); F-01
+na vrstvě staví limity podání, audit log autonomních akcí a anomálie.

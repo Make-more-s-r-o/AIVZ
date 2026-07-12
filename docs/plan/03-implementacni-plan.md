@@ -230,24 +230,20 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
 
 ### Tasky
 
-- [ ] **B-00 — Základní kill-switch vrstva (předsunuto z F-01 po oponentuře)** · **MONEY-PATH — adversariální oponentura povinná**
-  - **Proč:** oponentura MEDIUM — B-05 a bulk cesty automatizují drahé a závazné části
-    workflow dřív, než by ve vlně F vznikla governance; společný stop mechanismus musí
-    existovat PŘED nimi, ne po nich. Dimenze: provoz, autonomie.
-  - **Soubory:** nový `scripts/src/lib/kill-switch.ts` (env přepínače per doména:
-    `KS_INGEST`, `KS_AI_JOBS`, `KS_GENERATE`, `KS_FINALIZE`, `KS_SUBMISSION` — vypnutá
-    doména = 503 s čitelným důvodem, **NIKDY tichý fallback na provedení**); integrace do
-    `scripts/src/lib/monitoring/monitoring-sync.ts`, `scripts/src/lib/pipeline-job-state.ts`
-    (run-all), generate a `scripts/src/lib/podani.ts` cest v `scripts/src/serve-api.ts`;
-    Slack alert při flipu přes existující watchdog; test `scripts/tests/kill-switch.test.ts`.
-  - **Akceptace:** flip každého přepínače zastaví příslušnou doménu (test per doména);
-    běžící checkpointované joby dokončí krok a pauznou; UI ukazuje „zastaveno kill-switchem"
-    místo generické chyby.
-  - **Závislosti:** žádné — záměrně PRVNÍ task vlny B; **B-05, C-01b a jakákoli další
-    automatizace na něm závisí**. **Velikost:** S–M. **Kdo:** Opus, Fable oponentura.
-  - **Pozn.:** F-01 na této vrstvě staví (přidává limity, audit log, anomálie) — nezaniká.
+- [x] **B-00 — Základní kill-switch vrstva (předsunuto z F-01 po oponentuře)** · **MONEY-PATH** — **HOTOVO (PR #65, nasazeno)**
+  - Nález oponentury („kill-switch až ve vlně F, zatímco bulk/auto money-path vzniká
+    dřív") je VYŘEŠEN nasazením: `config/governance.json` s přepínači per doména
+    (`ingest`, `ai_jobs`, `generate`, `finalize`, `submission`) + **denní strop AI
+    nákladů (default 2 000 Kč)**; serverové guardy vrací 503 (**nikdy tichý fallback
+    na provedení**), admin API pro přepínání, sekce v Nastavení, chip „Provoz omezen"
+    v hlavičce, audit kdo/kdy.
+  - **Trvalé pravidlo pro navazující tasky:** každá nová automatizace (B-05, C-01b,
+    E-*, F-*) musí respektovat příslušný governance přepínač — adversariální oponentura
+    to u každého diffu kontroluje.
+  - **Pozn.:** F-01 na této vrstvě staví (přidává limity počtu podání/Kč, append-only
+    audit log autonomních akcí, anomálie) — nezaniká.
 
-- [ ] **B-01 — Povinná identifikace kandidáta (výrobce + model / katalogové číslo)** · **MONEY-PATH — adversariální oponentura povinná**
+- [x] **B-01 — Povinná identifikace kandidáta (výrobce + model / katalogové číslo)** · **MONEY-PATH** — **HOTOVO (PR #71, nasazeno)**. Živě přeměřeno: AI přestala vymýšlet katalogová čísla (dřív 100 % kandidátů mělo číslo — všechna smyšlená; teď 29 % skutečných). Verify hit-rate se ale NEZLEPŠIL (9→8 ověřených z 14) — v mezích šumu.
   - **Proč:** F2.1; živý test 0/4 verify nálezů byl způsoben vágními kandidáty bez skutečných
     katalogových čísel — verify je jen tak dobrý, jak dobrá jsou identifikační data. Dimenze: kvalita.
   - **Soubory:** `scripts/src/prompts/` (product-match prompt: povinná pole `vyrobce`, `model`,
@@ -281,7 +277,7 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
   - **Rizika:** web_search náklady rostou s délkou řetězu → cap 2–3 dotazy/položka; ekvivalentní
     produkt může nesplňovat spec zadání → propojit se spec-compliance výstupem (advisory flag).
 
-- [ ] **B-03 — Zlatý set + měření match precision a verify hit-rate**
+- [x] **B-03 — Zlatý set + měření match precision a verify hit-rate** — **HOTOVO (PR #70, nasazeno)**. `npm run eval` (offline, zdarma). Baseline: katalogové číslo 20,97 %, MAPE 14,93 %, 33 % položek pod trhem, p90 chyby 62,96 %.
   - **Proč:** F2.1 měřicí část; bez čísla se B-01/B-02 nedají přijmout ani regresně hlídat. Dimenze: kvalita, provoz.
   - **Soubory:** nový `scripts/tests/fixtures/golden-set/` (20–40 položek z pilotů a historických
     zakázek s ručně ověřeným správným kandidátem + reálnou nákupní cenou — čerpat z A-07/A-08);
@@ -298,7 +294,7 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
   - **Rizika:** eval běhy stojí AI peníze (~des. Kč/běh) → spouštět ručně, ne v CI; malý set
     = šum → interpretovat směr, ne desetiny procent.
 
-- [ ] **B-04 — Web-findings jako řízená cache**
+- [x] **B-04 — Web-findings jako řízená cache** — **HOTOVO (PR #72, nasazeno)**. POZOR: staré nálezy nemají identifikaci (migrace 019 ji přidala) → cache začne šetřit až od dalších verify běhů, retroaktivně nefunguje.
   - **Proč:** F2.2 doplněk; opakované verify téže položky (re-run, podobné zakázky) nemá platit
     znovu. Dimenze: provoz (náklady), kvalita.
   - **Soubory:** `scripts/src/lib/web-findings-store.ts` (lookup podle katalogové číslo/
@@ -321,9 +317,9 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
     default ON); test `scripts/tests/monitoring-tender-allocation.test.ts` (rozšířit).
   - **Akceptace:** převzetí zakázky z feedu bez dalšího kliknutí doběhne do `waiting_approval`
     (nepotvrzené ceny čekají na člověka); generate se BEZ potvrzení nespustí (existující hard
-    fail — regression test); `KS_AI_JOBS` kill-switch auto-spouštění zastaví; ověřeno na prod
-    na 1 živé zakázce.
-  - **Závislosti:** **B-00 (kill-switch)**. **Velikost:** S. **Kdo:** Codex, Fable smoke na prod.
+    fail — regression test); governance přepínač `ai_jobs` (PR #65) auto-spouštění zastaví;
+    ověřeno na prod na 1 živé zakázce.
+  - **Závislosti:** B-00 (splněno — PR #65). **Velikost:** S. **Kdo:** Codex, Fable smoke na prod.
   - **Rizika:** automaticky spuštěné joby žerou AI kredit na irelevantních zakázkách →
     spouštět jen při převzetí (lidské rozhodnutí), NE plošně na celý feed (to až F-04 po kalibraci).
 
@@ -344,10 +340,10 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
 ### Rozdělení práce vlny B
 | Kdo | Tasky |
 |---|---|
-| Opus (money-path impl.) | **B-00**, B-01, B-02 |
+| Opus (money-path impl.) | B-01, B-02 (B-00 hotovo — PR #65) |
 | Codex (bulk) | B-03 harness, B-04, B-05, B-06 engine |
 | Sonnet (UI/sběr) | B-02 badge, B-03 fixtures, B-06 UI |
-| Fable (oponentura + živá verifikace) | **B-00**, B-01, B-02, B-04 review; živé prod přeměření B-01/B-02 |
+| Fable (oponentura + živá verifikace) | B-01, B-02, B-04 review; živé prod přeměření B-01/B-02 |
 | Dan | dodá ručně ověřené ceny pilotů do zlatého setu (z A-07); rozhodne TTL cache a cap verify nákladů |
 
 ---
@@ -367,9 +363,12 @@ viditelné na jedné obrazovce.
 - [x] **C-01 — Potvrzení cen s per-item attestací** · **MONEY-PATH** — **HOTOVO (PR #63, nasazeno)**
   - Původní v1 znění („bulk potvrzení cen z inboxu jedním klikem") označila oponentura
     jako CRITICAL porušení invariantu. Task byl přepsán a implementován takto: každé
-    potvrzení ceny nese **serverovou auditní stopu (kdo/kdy)**, bulk operace potvrzuje
-    **pouze položky s explicitní per-item attestací**, slepé „Potvrdit vše" bylo
-    odstraněno, **změna produktu nebo ceny potvrzení automaticky ruší** (invalidace).
+    potvrzení ceny nese **serverovou auditní stopu (kdo/kdy z JWT — klientské hodnoty
+    se ignorují)**, bulk operace potvrzuje **pouze položky s explicitní per-item
+    attestací**, slepé „Potvrdit vše" bylo odstraněno, **potvrzení se automaticky ruší
+    při změně produktu/ceny i při HARD flagu `cena_pod_nakupem`** (invalidace).
+    **Živě ověřeno na produkci** (bez attestace se nepotvrdí nic; podvržená identita
+    ignorována).
   - **Trvalé pravidlo pro navazující tasky (C-01b, E-03):** žádné budoucí inbox/bulk UX
     per-item attestaci neobchází — adversariální oponentura to u každého diffu explicitně
     hledá.
@@ -385,7 +384,8 @@ viditelné na jedné obrazovce.
   - **Akceptace:** z inboxu lze spustit generate/finalize vybraných zakázek; zakázka
     s neattestovanou položkou nebo HARD flagem se z akce VYŘADÍ s viditelným důvodem
     (nikdy tichý průchod); E2E Playwright scénář.
-  - **Závislosti:** B-00 (kill-switch). **Velikost:** S–M. **Kdo:** Codex BE, Sonnet FE,
+  - **Závislosti:** B-00 (splněno — PR #65; bulk generate/finalize respektuje governance
+    přepínače `generate`/`finalize`). **Velikost:** S–M. **Kdo:** Codex BE, Sonnet FE,
     Fable review.
   - **Rizika:** známý bug-vzor „desync draftu s hromadným potvrzením" (PR #53) —
     regression test povinný.
@@ -400,18 +400,24 @@ viditelné na jedné obrazovce.
     s ručním součtem cost logů na prod.
   - **Závislosti:** žádné. **Velikost:** S–M. **Kdo:** Codex BE, Sonnet FE.
 
-- [ ] **C-03 — Denní AI strop s degradací**
-  - **Proč:** F2.6/F4.4 předběžně; vyčerpaný kredit už jednou tiše položil prod (audit). Dimenze: provoz.
-  - **Soubory:** `scripts/src/lib/cost-tracker.ts` (kontrola denního stropu z env
-    `AI_DAILY_BUDGET_CZK`); `scripts/src/lib/ai-client.ts` (guard před voláním: nad 80 % stropu
-    → Slack warn přes existující watchdog kanál, nad 100 % → nové joby se nezakládají,
-    běžící checkpointované doběhnou); `scripts/src/lib/pipeline-job-state.ts` (nový stav/důvod
-    `budget_paused`); test `scripts/tests/ai-budget.test.ts`.
-  - **Akceptace:** simulovaný přešvih stropu (nízký testovací budget) → nový run-all se
-    odmítne s čitelnou chybou v UI, Slack alert odešel; po půlnoci (reset) jde spustit.
-  - **Závislosti:** C-02 (agregace = zdroj čísla). **Velikost:** M. **Kdo:** Codex, review Fable (fail-closed sémantika).
-  - **Rizika:** strop nesmí zabít rozpracovaný job uprostřed match dávky → pauza na hranici
-    kroku, ne uprostřed.
+- [x] **C-03 — Denní AI strop** — **JÁDRO HOTOVO (PR #65, nasazeno)**
+  - Denní strop AI nákladů je součást governance vrstvy (B-00/PR #65): default 2 000 Kč
+    v `config/governance.json`, serverové guardy 503, admin API + sekce v Nastavení,
+    audit kdo/kdy. Vyčerpaný kredit už prod tiše nepoloží.
+
+- [ ] **C-03b — Strop: včasné varování + šetrná pauza (zbytek)**
+  - **Proč:** F2.6/F4.4; strop dnes tvrdě řeže (503) — chybí varování před nárazem a
+    šetrné pauznutí rozběhlé práce. Dimenze: provoz.
+  - **Soubory:** governance guard / `scripts/src/lib/cost-tracker.ts` (Slack warn při 80 %
+    stropu přes existující watchdog kanál); `scripts/src/lib/pipeline-job-state.ts` (nový
+    stav/důvod `budget_paused` — běžící checkpointovaný job dokončí krok a pauzne, ne
+    useknutí uprostřed match dávky; po půlnočním resetu jde resumnout); test
+    `scripts/tests/ai-budget.test.ts`.
+  - **Akceptace:** simulovaný přešvih (nízký testovací strop) → Slack alert při 80 %;
+    nad 100 % se nové joby nezakládají (existující guard) a běžící job pauzne na hranici
+    kroku se stavem `budget_paused`; po resetu jde resume.
+  - **Závislosti:** C-02 (agregace — sjednotit zdroj čísla s governance počítáním).
+    **Velikost:** S–M. **Kdo:** Codex, review Fable (fail-closed sémantika).
 
 - [ ] **C-04 — Latence per pipeline krok**
   - **Proč:** F2.6; hrdla pro 5–10/den potřebují číslo. Dimenze: provoz.
@@ -443,9 +449,9 @@ viditelné na jedné obrazovce.
 ### Rozdělení práce vlny C
 | Kdo | Tasky |
 |---|---|
-| Codex | C-01b BE, C-02, C-03, C-04, C-05 refactor, C-06 |
+| Codex | C-01b BE, C-02, C-03b, C-04, C-05 refactor, C-06 |
 | Sonnet | C-01b FE, C-02 widget |
-| Fable | C-01b review (attestace se neobchází), C-03 fail-closed review |
+| Fable | C-01b review (attestace se neobchází), C-03b fail-closed review |
 | Dan | C-05 revize vah; průběžný provoz 5–10/den (generuje data pro vlnu D) |
 
 ---
@@ -612,7 +618,7 @@ metriky vlny C drží ≥ 1 měsíc provozu; D-01 watcher běží; **rozhodnutí
     (spend per model); vyhodnocení na zlatém setu B-03, že levný model NEdegraduje match.
   - **Akceptace:** triáž nové zakázky stojí < 2 Kč; eval na zlatém setu beze změny precision
     u money-kroků (ty tiering nemění).
-  - **Závislosti:** B-03 (eval), C-02/C-03. **Velikost:** M. **Kdo:** Codex, Fable eval review.
+  - **Závislosti:** B-03 (eval), C-02/C-03b. **Velikost:** M. **Kdo:** Codex, Fable eval review.
   - **Rizika:** plíživá degradace kvality levným modelem → tiering NIKDY na match/pricing.
 
 - [ ] **E-05 — SLA/throughput dashboard**
@@ -648,11 +654,12 @@ throughput z vlny E. **Bez uzavřené právní otázky se F-02/F-03 NEZAČÍNÁ.
 
 ### Tasky
 
-- [ ] **F-01 — Governance a fail-safe vrstva (rozšíření B-00)** (stavět PRVNÍ ve vlně, před jakoukoli autonomní akcí) · **MONEY-PATH — adversariální oponentura povinná**
+- [ ] **F-01 — Governance a fail-safe vrstva (rozšíření governance z PR #65)** (stavět PRVNÍ ve vlně, před jakoukoli autonomní akcí) · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F5.6; autonomie bez brzd je u peněz nepřijatelná (stejný princip jako LuDone
-    money-path). **Základní kill-switch per doména existuje od vlny B (B-00)** — tady se
-    přidávají limity, audit a anomálie. Dimenze: provoz, autonomie.
-  - **Soubory:** rozšíření `scripts/src/lib/kill-switch.ts` (B-00) + nový
+    money-path). **Základní kill-switch per doména + denní AI strop jsou NASAZENÉ
+    (B-00/C-03, PR #65 — `config/governance.json`)** — tady se přidávají limity podání,
+    append-only audit log autonomních akcí a anomálie. Dimenze: provoz, autonomie.
+  - **Soubory:** rozšíření governance vrstvy z PR #65 + nový
     `scripts/src/lib/autonomy-guard.ts` (env `AUTONOMY_ENABLED`, denní limit počtu podání
     a součtu Kč bez schválení, anomálie alarm — cena mimo 2σ pásma prošla gatem); migrace
     `021_audit_log.sql` (append-only audit každé autonomní akce: kdo/co/kdy/vstupy);
@@ -661,7 +668,7 @@ throughput z vlny E. **Bez uzavřené právní otázky se F-02/F-03 NEZAČÍNÁ.
   - **Akceptace:** kill-switch flip → žádná autonomní akce neproběhne (503, NIKDY tichý
     fallback na provedení); limity vynuceny s testem; audit log neobsahuje mezery (každá
     akce F-02/F-04/F-05 zapisuje).
-  - **Závislosti:** B-00. **Velikost:** M. **Kdo:** Opus, Fable oponentura.
+  - **Závislosti:** B-00 (splněno — PR #65). **Velikost:** M. **Kdo:** Opus, Fable oponentura.
 
 - [ ] **F-02 — Asistované podání NEN (UI automatizace)** · **MONEY-PATH — adversariální oponentura povinná**
   - **Proč:** F5.2; NEN nemá veřejné podávací API → Playwright automatizace formuláře podle
@@ -828,7 +835,7 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
 ```
 A-00 (entita+dodávka, Dan) ─── BLOKUJE ──► provoz vlny A (A-06,07,08)
 
-VLNA A ──┬─ kód (A-01,03,04) ──► VLNA B (B-00 kill-switch PRVNÍ; verify/match) ──► VLNA C (poloautomat UX)
+VLNA A ──┬─ kód (A-01,03,04) ──► VLNA B (kill-switch HOTOVO — PR #65; verify/match) ──► VLNA C (poloautomat UX)
          │                                                                               │
          └─ provoz (A-06,07,08) ─── podané nabídky ──► výsledky ──► VLNA D (feedback) ◄──┘
               A-05 token ─────────────────────────────────► E-02
@@ -913,5 +920,5 @@ Souběžná provozní stopa mimo vlny: **placené concierge validace** (design p
    (dnes 10 % fallback — otevřeno z night2 §5.1).
 7. **E (vstup):** potvrzení OBCHODNÍHO kritéria škálování (opakovaná platba / contribution
    margin / kapacita dodat); zdroje feedu (TED, které profily zadavatelů); případný upsize
-   VPS pro worker kontejner; denní AI budget (C-03 env hodnota).
+   VPS pro worker kontejner; denní AI strop — default 2 000 Kč z PR #65 potvrdit/upravit.
 8. **F (vstup):** zapnutí auto-triáže (F-04) a režim podání (F-02) — výhradně Danovo go.
