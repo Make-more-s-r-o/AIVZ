@@ -202,7 +202,7 @@ test('genericky_kandidat: produkt bez modelu i katalogového čísla vytvoří W
   const findings = checkPriceSanity([generic]);
   const warning = findings.find((finding) => finding.code === 'genericky_kandidat');
   assert.equal(warning?.level, 'warn');
-  assert.equal(warning?.message, 'Kandidát není jednoznačně identifikován — cenu ověřte.');
+  assert.equal(warning?.message, 'Kandidát není jednoznačně identifikován — před potvrzením doplňte cenu z ověřeného zdroje nebo ručně.');
 });
 
 test('genericky_kandidat nevznikne s modelem, katalogovým číslem ani pro službu', () => {

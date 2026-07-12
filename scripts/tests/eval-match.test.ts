@@ -47,15 +47,26 @@ test('verify hit-rate používá jen ověřené položky a pokrytí počítá zv
   assert.equal(result.pokryti_verify_pct, 50);
 });
 
-test('delta počítá opravený hit-rate i pokrytí a snese starý report bez pokrytí', () => {
+test('delta hit-rate se počítá mezi reporty stejné verze', () => {
   const current = calculateEvalMetrics([
     { id: 'T:0', overeni_ceny: { overeno_at: '2026-07-11T10:00:00.000Z', stav: 'nalezeno', zdroj_url: 'https://shop.test/a' } },
     { id: 'T:1' },
   ], []);
-  const delta = calculateMetricsDelta(current, { hit_rate_pct: 25 });
+  const delta = calculateMetricsDelta(current, { hit_rate_pct: 25 }, 2, 2);
   assert.equal(delta.hit_rate_pct, 75);
   assert.equal(delta.pokryti_verify_pct, undefined);
-  assert.equal(calculateMetricsDelta(current, { hit_rate_pct: 25, pokryti_verify_pct: 10 }).pokryti_verify_pct, 40);
+  assert.equal(calculateMetricsDelta(current, { hit_rate_pct: 25, pokryti_verify_pct: 10 }, 2, 2).pokryti_verify_pct, 40);
+});
+
+test('delta hit-rate se při rozdílné nebo chybějící verzi vynechá, ostatní metriky zůstanou', () => {
+  const current = calculateEvalMetrics([
+    { id: 'T:0', overeni_ceny: { overeno_at: '2026-07-11T10:00:00.000Z', stav: 'nalezeno', zdroj_url: 'https://shop.test/a' } },
+    { id: 'T:1' },
+  ], []);
+  const previous = { hit_rate_pct: 25, pokryti_verify_pct: 10 };
+  assert.equal(calculateMetricsDelta(current, previous, 2, 1).hit_rate_pct, undefined);
+  assert.equal(calculateMetricsDelta(current, previous, 2, undefined).hit_rate_pct, undefined);
+  assert.equal(calculateMetricsDelta(current, previous, 2, 1).pokryti_verify_pct, 40);
 });
 
 test('generický kandidát zahrnuje placeholder i zadna_shoda', () => {

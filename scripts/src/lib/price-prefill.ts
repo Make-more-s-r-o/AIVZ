@@ -17,7 +17,8 @@ import { calculateItemPrice } from './price-calculator.js';
 // produktu). Kandidát bez reálného produktu NESMÍ dostat auto-předvyplněnou závaznou cenu k podání.
 export function isPlaceholderProductName(value: unknown): boolean {
   const v = String(value ?? '').trim().toLowerCase();
-  return v === '' || v === '-' || v === '–' || v === '—' || v === 'none' || v === 'null' || v === 'n/a';
+  return v === '' || v === '-' || v === '–' || v === '—' || v === 'none' || v === 'null' || v === 'n/a'
+    || /^(neuveden[ýy]?|nezn[aá]m[ýy]?|bez zna[čc]ky|generick[ýy])$/i.test(v);
 }
 
 // Reálný produkt = má smysluplný model NEBO popis. Samotný výrobce nestačí (služby mají
@@ -45,6 +46,9 @@ export function containsSadaKeyword(text: unknown): boolean {
 const NO_MATCH_POZNAMKA =
   'BEZ NALEZENÉ SHODY — cena nenalezena, nutné ruční nacenění (AI nenašla odpovídající reálný produkt).';
 
+const UNIDENTIFIED_CANDIDATE_POZNAMKA =
+  'Kandidát není jednoznačně identifikován (chybí model i katalogové číslo) — nacenění vyžaduje ověřený zdroj nebo ruční cenu.';
+
 const SCALE_MISMATCH_POZNAMKA =
   '⚠ Kandidát vypadá jako sada/komplet, ale položka je jednotlivý díl — zkontrolujte rozsah a cenu.';
 
@@ -63,6 +67,7 @@ export interface PrefillCandidate {
 
 export interface PrefillItem {
   polozka_nazev?: string;
+  typ?: string;
   kandidati?: PrefillCandidate[];
   vybrany_index?: number;
   cena_max_s_dph?: number | null;
@@ -113,7 +118,12 @@ export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: num
       selected.zadna_shoda === true ||
       !candidateHasRealProduct(selected) ||
       !((selected.cena_bez_dph as number) > 0);
-    if (noRealMatch) {
+    const unidentifiedProduct =
+      pm.typ !== 'sluzba' &&
+      isPlaceholderProductName(selected.model) &&
+      isPlaceholderProductName(selected.katalogove_cislo);
+    if (noRealMatch || unidentifiedProduct) {
+      const baseNote = unidentifiedProduct ? UNIDENTIFIED_CANDIDATE_POZNAMKA : NO_MATCH_POZNAMKA;
       pm.cenova_uprava = {
         nakupni_cena_bez_dph: 0,
         nakupni_cena_s_dph: 0,
@@ -121,9 +131,11 @@ export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: num
         nabidkova_cena_bez_dph: 0,
         nabidkova_cena_s_dph: 0,
         potvrzeno: false,
-        poznamka: scaleMismatch ? `${NO_MATCH_POZNAMKA} ${SCALE_MISMATCH_POZNAMKA}` : NO_MATCH_POZNAMKA,
+        poznamka: scaleMismatch ? `${baseNote} ${SCALE_MISMATCH_POZNAMKA}` : baseNote,
       };
-      console.warn(`  ⚠ Bez nalezené shody: "${pm.polozka_nazev}" — cena nenalezena, nutné ruční nacenění.`);
+      console.warn(unidentifiedProduct
+        ? `  ⚠ Neidentifikovaný kandidát: "${pm.polozka_nazev}" — chybí model i katalogové číslo, cenu je nutné doložit nebo zadat ručně.`
+        : `  ⚠ Bez nalezené shody: "${pm.polozka_nazev}" — cena nenalezena, nutné ruční nacenění.`);
       continue;
     }
 

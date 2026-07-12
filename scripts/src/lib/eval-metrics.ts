@@ -51,6 +51,8 @@ export interface EvalMetrics {
   shoda_ceny: number;
 }
 
+export const METRICS_VERSION = 2;
+
 export type EvalMetricsDelta = Partial<Record<keyof EvalMetrics, number>>;
 
 const round = (value: number): number => Math.round(value * 100) / 100;
@@ -59,9 +61,12 @@ const round = (value: number): number => Math.round(value * 100) / 100;
 export function calculateMetricsDelta(
   current: EvalMetrics,
   previous: Partial<EvalMetrics>,
+  currentMetricsVersion: number = METRICS_VERSION,
+  previousMetricsVersion?: number,
 ): EvalMetricsDelta {
   const delta: EvalMetricsDelta = {};
   for (const key of Object.keys(current) as Array<keyof EvalMetrics>) {
+    if (key === 'hit_rate_pct' && currentMetricsVersion !== previousMetricsVersion) continue;
     const currentValue = current[key];
     const previousValue = previous[key];
     if (typeof currentValue === 'number' && typeof previousValue === 'number') {

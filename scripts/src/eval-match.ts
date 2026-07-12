@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { basename, join } from 'node:path';
-import { calculateEvalMetrics, calculateMetricsDelta, type EvalItem, type EvalMetrics, type GoldenItem } from './lib/eval-metrics.js';
+import { calculateEvalMetrics, calculateMetricsDelta, METRICS_VERSION, type EvalItem, type EvalMetrics, type GoldenItem } from './lib/eval-metrics.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const FIXTURES = join(ROOT, 'scripts/tests/fixtures/golden-set');
@@ -11,6 +11,7 @@ const REPORTS = join(ROOT, 'output/eval');
 const DEFAULT_TENDERS = ['nakup-drobneho-naradi-podzim', 'n-485400-naradi', 'vypocetni-servery-pro-zo-pardubice', 'kancelarsky-material', 'varyte-vybaveni'];
 
 interface EvalReport {
+  metrics_version: number;
   generated_at: string;
   mode: 'offline' | 'live';
   tenders: string[];
@@ -118,11 +119,14 @@ async function main(): Promise<void> {
   const metrics = calculateEvalMetrics(items, golden);
   const previous = await previousReport();
   const delta: EvalReport['delta_vs_previous'] = previous ? {} : null;
-  if (delta) Object.assign(delta, calculateMetricsDelta(metrics, previous!.metrics));
+  if (delta) Object.assign(delta, calculateMetricsDelta(metrics, previous!.metrics, METRICS_VERSION, previous!.metrics_version));
   const generated = new Date().toISOString();
-  const report: EvalReport = { generated_at: generated, mode: live ? 'live' : 'offline', tenders, golden_items: golden.length, metrics, delta_vs_previous: delta };
+  const report: EvalReport = { metrics_version: METRICS_VERSION, generated_at: generated, mode: live ? 'live' : 'offline', tenders, golden_items: golden.length, metrics, delta_vs_previous: delta };
   printMetrics(metrics);
-  if (previous) console.log('Delta proti předchozímu reportu:', delta);
+  if (previous) {
+    console.log('Delta proti předchozímu reportu:', delta);
+    if (previous.metrics_version !== METRICS_VERSION) console.log('hit-rate: nová definice metriky, delta nedostupná');
+  }
   else console.log('Předchozí report není k dispozici.');
   if (!golden.length) console.warn('Zlatý set je prázdný: cenové metriky jsou N/A, protože lokální data neobsahují ověřené reálné ceny.');
   await mkdir(REPORTS, { recursive: true });
