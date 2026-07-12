@@ -106,7 +106,7 @@ samotné podání (provoz, lhůty v týdnech) se s vývojem nečeká.*
     Advisory režim z v1 po oponentuře ZRUŠEN — slib „0 formálních diskvalifikací" s měkkým
     varováním nešel dohromady; falešný blok řeší auditovaná výjimka, ne měkkost gate.
 
-- [ ] **A-02 — Runbook ručního podání NEN / profil zadavatele**
+- [x] **A-02 — Runbook ručního podání NEN / profil zadavatele** — **HOTOVO (PR #75)**: `docs/plan/04-runbook-podani.md` (252 řádků, 12 kroků, tabulka 14 blokujících kontrol, kontrolní seznam před odesláním).
   - **Proč:** F1.4; runbook je zároveň specifikace budoucí automatizace podání (F-02 ve vlně F). Dimenze: business, provoz.
   - **Soubory:** nový `docs/runbook-podani-nen.md` (krok za krokem: přihlášení, formáty příloh,
     limity velikosti, fikce podpisu §211/7, potvrzení, okamžitý zápis evidence podání do
