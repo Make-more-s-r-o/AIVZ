@@ -4,12 +4,12 @@
  */
 
 export const DOC_SLOTS = [
-  { type: 'vypis_or',           label: 'Výpis z obchodního rejstříku', multi: false },
-  { type: 'rejstrik_trestu',    label: 'Výpis z rejstříku trestů',     multi: false },
-  { type: 'potvrzeni_fu',       label: 'Potvrzení finančního úřadu',   multi: false },
-  { type: 'potvrzeni_ossz',     label: 'Potvrzení OSSZ',               multi: false },
-  { type: 'profesni_opravneni', label: 'Profesní oprávnění',           multi: false },
-  { type: 'ostatni',            label: 'Ostatní',                       multi: true  },
+  { type: 'vypis_or', label: 'Výpis z obchodního rejstříku', multi: false, bezne_pozadovan: true, typicka_platnost_dnu: 90, popis: 'Výpis z obchodního rejstříku, ne starší 3 měsíců — justice.cz nebo Czech POINT.' },
+  { type: 'rejstrik_trestu', label: 'Výpis z rejstříku trestů', multi: false, bezne_pozadovan: true, typicka_platnost_dnu: 90, popis: 'Výpis z evidence Rejstříku trestů, ne starší 3 měsíců — Czech POINT nebo Portál občana.' },
+  { type: 'potvrzeni_fu', label: 'Potvrzení finančního úřadu', multi: false, bezne_pozadovan: true, typicka_platnost_dnu: 90, popis: 'Potvrzení o neexistenci daňových nedoplatků, ne starší 3 měsíců — vyžádejte u příslušného finančního úřadu nebo přes datovou schránku.' },
+  { type: 'potvrzeni_ossz', label: 'Potvrzení OSSZ', multi: false, bezne_pozadovan: true, typicka_platnost_dnu: 90, popis: 'Potvrzení o neexistenci nedoplatků na sociálním zabezpečení, ne starší 3 měsíců — vyžádejte u příslušné OSSZ nebo přes ePortál ČSSZ.' },
+  { type: 'profesni_opravneni', label: 'Profesní oprávnění', multi: false, bezne_pozadovan: false, typicka_platnost_dnu: null, popis: 'Doklad o oprávnění vykonávat regulovanou činnost — získáte u příslušné komory, úřadu nebo profesního registru.' },
+  { type: 'ostatni', label: 'Ostatní', multi: true, bezne_pozadovan: false, typicka_platnost_dnu: null, popis: 'Další kvalifikační doklady podle konkrétní zakázky — zdroj určuje zadávací dokumentace.' },
 ] as const;
 
 export type DocSlotType = (typeof DOC_SLOTS)[number]['type'];
@@ -29,6 +29,20 @@ export interface DocSlotEntry {
 export interface DocManifest {
   version: number;
   entries: DocSlotEntry[];
+}
+
+export interface CompanyReadinessItem {
+  slot: DocSlotType;
+  label: string;
+  popis: string;
+}
+
+export interface CompanyReadiness {
+  pripraveno: number;
+  celkem: number;
+  chybi: CompanyReadinessItem[];
+  expirovane: CompanyReadinessItem[];
+  bez_platnosti: CompanyReadinessItem[];
 }
 
 // --- Sledování platnosti dokladů ---
@@ -106,6 +120,39 @@ export function docExpiryStatus(
   if (days < 0) return 'expirovany';
   if (days <= EXPIRY_WARNING_DAYS) return 'expiruje';
   return 'ok';
+}
+
+/** Vyhodnotí standardní sadu bez práce se soubory; expirující doklad je ještě platný. */
+export function computeCompanyReadiness(
+  entries: readonly DocSlotEntry[],
+  now: Date = new Date(),
+): CompanyReadiness {
+  const required = DOC_SLOTS.filter((slot) => slot.bezne_pozadovan);
+  const result: CompanyReadiness = {
+    pripraveno: 0,
+    celkem: required.length,
+    chybi: [],
+    expirovane: [],
+    bez_platnosti: [],
+  };
+
+  for (const slot of required) {
+    const item = { slot: slot.type, label: slot.label, popis: slot.popis };
+    const slotEntries = entries.filter((entry) => entry.slot === slot.type);
+    if (slotEntries.length === 0) {
+      result.chybi.push(item);
+      continue;
+    }
+    const statuses = slotEntries.map((entry) => docExpiryStatus(entry.platnost_do, now));
+    if (statuses.some((status) => status === 'ok' || status === 'expiruje')) {
+      result.pripraveno += 1;
+    } else if (statuses.some((status) => status === 'nezadano')) {
+      result.bez_platnosti.push(item);
+    } else {
+      result.expirovane.push(item);
+    }
+  }
+  return result;
 }
 
 // --- Checklist kvalifikačních příloh (čistá logika, sdílená s endpointem) ---

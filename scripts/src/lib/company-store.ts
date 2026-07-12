@@ -11,7 +11,7 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import type { DocSlotType, DocSlotEntry, DocManifest } from './doc-slots.js';
-import { DOC_SLOTS, docExpiryStatus } from './doc-slots.js';
+import { DOC_SLOTS, computeCompanyReadiness, docExpiryStatus, type CompanyReadiness } from './doc-slots.js';
 
 const ROOT = new URL('../../../', import.meta.url).pathname;
 const COMPANIES_DIR = join(ROOT, 'config', 'companies');
@@ -208,6 +208,13 @@ export async function getDocManifest(companyId: string): Promise<DocManifest> {
     await writeFile(mPath, JSON.stringify(manifest, null, 2), 'utf-8');
     return manifest;
   }
+}
+
+/** Načte připravenost existující firmy; u neznámé firmy nevytváří manifest ani adresáře. */
+export async function getCompanyReadiness(companyId: string): Promise<CompanyReadiness | null> {
+  if (!await getCompany(companyId)) return null;
+  const manifest = await getDocManifest(companyId);
+  return computeCompanyReadiness(manifest.entries);
 }
 
 export async function saveDocManifest(companyId: string, manifest: DocManifest): Promise<void> {
