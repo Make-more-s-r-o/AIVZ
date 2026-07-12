@@ -24,6 +24,7 @@ function makeCandidate(overrides: Partial<PrefillCandidate> = {}): PrefillCandid
   return {
     vyrobce: 'Makita',
     model: 'B-54081',
+    katalogove_cislo: 'B-54081',
     popis: 'Rázová redukce 3/4" na 1/2"',
     cena_bez_dph: 200,
     cena_s_dph: 242,
@@ -189,6 +190,16 @@ try {
     applyPricePrefill([item], 10);
     assert.equal(item.cenova_uprava, existing);
     ok('(h) existující cenova_uprava zůstává nedotčená');
+  }
+
+  // Identifikační penalizace je money-path invariant, nezávislý na cenovém odhadu.
+  {
+    const withoutModel = makeItem({ kandidati: [makeCandidate({ model: 'N/A', cena_spolehlivost: 'vysoka' })] });
+    const withoutCatalogue = makeItem({ kandidati: [makeCandidate({ katalogove_cislo: '', cena_spolehlivost: 'vysoka' })] });
+    applyPricePrefill([withoutModel, withoutCatalogue], 10);
+    assert.equal(withoutModel.kandidati![0].cena_spolehlivost, 'nizka');
+    assert.equal(withoutCatalogue.kandidati![0].cena_spolehlivost, 'stredni');
+    ok('(i) bez modelu → nizka; bez katalogového čísla → nejvýše stredni');
   }
 } finally {
   console.warn = originalWarn;

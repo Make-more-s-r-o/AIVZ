@@ -56,6 +56,7 @@ export interface PrefillCandidate {
   popis?: string;
   cena_bez_dph?: number | string;
   cena_spolehlivost?: string;
+  katalogove_cislo?: string;
   zadna_shoda?: boolean;
   [key: string]: unknown;
 }
@@ -76,6 +77,19 @@ export interface PrefillItem {
  */
 export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: number): void {
   for (const pm of polozkyMatch) {
+    // Identita produktu přímo určuje důvěryhodnost AI ceny. Penalizujeme všechny
+    // kandidáty, nejen vybraný, aby pozdější změna výběru nemohla obejít invariant.
+    for (const candidate of pm.kandidati ?? []) {
+      if (isPlaceholderProductName(candidate.model)) {
+        candidate.cena_spolehlivost = 'nizka';
+      } else if (
+        isPlaceholderProductName(candidate.katalogove_cislo)
+        && candidate.cena_spolehlivost === 'vysoka'
+      ) {
+        candidate.cena_spolehlivost = 'stredni';
+      }
+    }
+
     const selected = pm.kandidati?.[pm.vybrany_index ?? -1];
     if (!selected || pm.cenova_uprava) continue;
 

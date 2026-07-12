@@ -233,6 +233,19 @@ export function checkPriceSanity(
     }
 
     const selected = getSelectedCandidate(item);
+    if (
+      item.typ === 'produkt'
+      && selected
+      && !String(selected.model ?? '').trim()
+      && !String(selected.katalogove_cislo ?? '').trim()
+    ) {
+      addFinding({
+        polozka_index: item.polozka_index,
+        level: 'warn',
+        code: 'genericky_kandidat',
+        message: 'Kandidát není jednoznačně identifikován — cenu ověřte.',
+      });
+    }
     if (selected?.cena_spolehlivost === 'nizka' && share > LOW_CONFIDENCE_BIG_THRESHOLD) {
       addFinding({
         polozka_index: item.polozka_index,

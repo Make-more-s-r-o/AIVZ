@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { basename, join } from 'node:path';
-import { calculateEvalMetrics, type EvalItem, type EvalMetrics, type GoldenItem } from './lib/eval-metrics.js';
+import { calculateEvalMetrics, calculateMetricsDelta, type EvalItem, type EvalMetrics, type GoldenItem } from './lib/eval-metrics.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const FIXTURES = join(ROOT, 'scripts/tests/fixtures/golden-set');
@@ -82,6 +82,7 @@ function printMetrics(metrics: EvalMetrics): void {
     { metrika: 'Katalogové číslo', hodnota: display(metrics.katalogove_cislo_pct) },
     { metrika: 'Generický kandidát', hodnota: display(metrics.genericky_kandidat_pct) },
     { metrika: 'Verify hit-rate', hodnota: display(metrics.hit_rate_pct) },
+    { metrika: 'Pokrytí verify', hodnota: display(metrics.pokryti_verify_pct) },
     { metrika: 'MAPE ceny', hodnota: display(metrics.mape_pct) },
     { metrika: 'Podíl pod trhem', hodnota: display(metrics.podil_pod_trhem_pct) },
     { metrika: 'Medián relativní chyby', hodnota: display(metrics.median_relativni_chyby_pct) },
@@ -117,10 +118,7 @@ async function main(): Promise<void> {
   const metrics = calculateEvalMetrics(items, golden);
   const previous = await previousReport();
   const delta: EvalReport['delta_vs_previous'] = previous ? {} : null;
-  if (delta) for (const key of Object.keys(metrics) as Array<keyof EvalMetrics>) {
-    const current = metrics[key]; const old = previous!.metrics[key];
-    if (typeof current === 'number' && typeof old === 'number') delta[key] = Math.round((current - old) * 100) / 100;
-  }
+  if (delta) Object.assign(delta, calculateMetricsDelta(metrics, previous!.metrics));
   const generated = new Date().toISOString();
   const report: EvalReport = { generated_at: generated, mode: live ? 'live' : 'offline', tenders, golden_items: golden.length, metrics, delta_vs_previous: delta };
   printMetrics(metrics);
