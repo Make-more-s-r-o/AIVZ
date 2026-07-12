@@ -469,6 +469,31 @@ export interface OutcomeInput {
   pocet_uchazecu?: number | null;
   vitez_nazev?: string | null;
   poznamka?: string | null;
+  kandidat_id?: string;
+}
+
+export interface OutcomeKandidat {
+  id: string; tender_id: string; zdroj: string; zdroj_id: string | null; nalezeno_at: string;
+  vitez_nazev: string | null; vitez_ico: string | null; vitezna_cena_bez_dph: number | null;
+  pocet_uchazecu: number | null; url: string | null; shoda_skore: number; stav: 'navrh' | 'potvrzeno' | 'zamitnuto';
+}
+
+export async function getOutcomeCandidates(id: string): Promise<OutcomeKandidat[]> {
+  try {
+    const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/outcome-kandidati`, { headers: authHeaders() });
+    return res.ok ? (await res.json()).kandidati ?? [] : [];
+  } catch { return []; }
+}
+
+export async function useOutcomeCandidate(id: string, kid: string): Promise<OutcomeInput & { kandidat_id: string }> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/outcome-kandidati/${kid}/potvrdit`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) throw new Error('Návrh se nepodařilo načíst');
+  return (await res.json()).prefill;
+}
+
+export async function rejectOutcomeCandidate(id: string, kid: string, duvod = ''): Promise<void> {
+  const res = await fetch(`${API_BASE}/tenders/${encodeURIComponent(id)}/outcome-kandidati/${kid}/zamitnout`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ duvod }) });
+  if (!res.ok) throw new Error('Návrh se nepodařilo zamítnout');
 }
 
 export interface OutcomeStats {

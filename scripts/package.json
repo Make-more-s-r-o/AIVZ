@@ -13,7 +13,8 @@
     "full-flow": "tsx src/full-flow.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "eval": "node --import tsx src/eval-match.ts",
-    "build-golden-set": "node --import tsx src/build-golden-set.ts"
+    "build-golden-set": "node --import tsx src/build-golden-set.ts",
+    "watch-outcomes": "node --import tsx src/watch-outcomes.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -45,6 +45,9 @@ import {
   detachTag,
   getOutcome,
   saveOutcome,
+  getOutcomeCandidates,
+  useOutcomeCandidate,
+  rejectOutcomeCandidate,
   getProductMatch,
   getNakupy,
   seedNakupy,
@@ -53,6 +56,7 @@ import {
   getBidScore,
   type BidScore,
   type VysledekPodani,
+  type OutcomeKandidat,
   type PipelineSteps,
   type ActivityEntry,
   type Task,
@@ -670,6 +674,10 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
     queryKey: ['outcome', tenderId],
     queryFn: () => getOutcome(tenderId),
   });
+  const { data: outcomeCandidates = [] } = useQuery({
+    queryKey: ['outcome-kandidati', tenderId],
+    queryFn: () => getOutcomeCandidates(tenderId),
+  });
   // Product-match nemusí existovat (404 před krokem Produkty) → retry:false, chyba = bez předvyplnění.
   const { data: match } = useQuery({
     queryKey: ['product-match', tenderId],
@@ -684,6 +692,7 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
   const [vitezNazev, setVitezNazev] = useState('');
   const [poznamka, setPoznamka] = useState('');
   const [saving, setSaving] = useState(false);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const prefilled = useRef(false);
 
   // Načtení uloženého výsledku do formuláře (při příchodu i po uložení).
@@ -726,8 +735,11 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
         pocet_uchazecu: pocetUchazecu.trim() ? Math.trunc(Number(pocetUchazecu)) : null,
         vitez_nazev: vitezNazev.trim() || null,
         poznamka: poznamka.trim() || null,
+        kandidat_id: selectedCandidateId ?? undefined,
       });
       await qc.invalidateQueries({ queryKey: ['outcome', tenderId] });
+      await qc.invalidateQueries({ queryKey: ['outcome-kandidati', tenderId] });
+      setSelectedCandidateId(null);
       toast(
         r.winprice_feedback
           ? 'Výsledek uložen · vítězná cena propsána do historie cen'
@@ -742,6 +754,27 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
   }
 
   const badge = outcome ? VYSLEDEK_BADGE[outcome.vysledek] : null;
+  const proposals = outcomeCandidates.filter((candidate) => candidate.stav === 'navrh');
+
+  async function handleUse(candidate: OutcomeKandidat) {
+    try {
+      const prefill = await useOutcomeCandidate(tenderId, candidate.id);
+      setVysledek(prefill.vysledek);
+      setViteznaCena(prefill.vitezna_cena_bez_dph != null ? String(prefill.vitezna_cena_bez_dph) : '');
+      setPocetUchazecu(prefill.pocet_uchazecu != null ? String(prefill.pocet_uchazecu) : '');
+      setVitezNazev(prefill.vitez_nazev ?? '');
+      setSelectedCandidateId(prefill.kandidat_id);
+      toast('Návrh předvyplnil formulář. Výsledek se zapíše až tlačítkem Uložit.', 'success');
+    } catch (e) { toast(statusErrorMessage(e), 'danger'); }
+  }
+
+  async function handleReject(candidate: OutcomeKandidat) {
+    try {
+      await rejectOutcomeCandidate(tenderId, candidate.id);
+      await qc.invalidateQueries({ queryKey: ['outcome-kandidati', tenderId] });
+      toast('Návrh zamítnut', 'success');
+    } catch (e) { toast(statusErrorMessage(e), 'danger'); }
+  }
 
   return (
     <Card
@@ -758,6 +791,38 @@ function VysledekTab({ tenderId }: { tenderId: string }) {
           <Trophy size={16} />
           Výsledek zatím nebyl zaznamenán — po rozhodnutí zadavatele ho zde uložte, ať se stroj učí z reálných dat.
         </div>
+      )}
+
+      {proposals.length > 0 && (
+        <section style={{ marginBottom: 18 }}>
+          <h3 style={{ margin: '0 0 10px', fontSize: 'var(--font-size-md)' }}>Nalezené výsledky (návrhy)</h3>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {proposals.map((candidate) => {
+              const href = safeHttpUrl(candidate.url);
+              return (
+                <div key={candidate.id} style={{ border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', padding: 12, background: 'var(--surface-subtle)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div>
+                      <strong>{candidate.vitez_nazev || 'Vítěz neuveden'}</strong>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--font-size-sm)', marginTop: 4 }}>
+                        {candidate.vitezna_cena_bez_dph != null ? fmtCZK(candidate.vitezna_cena_bez_dph) + ' bez DPH' : 'Cena neuvedena'}
+                        {candidate.pocet_uchazecu != null ? ` · ${candidate.pocet_uchazecu} uchazečů` : ''}
+                        {` · shoda ${Math.round(candidate.shoda_skore * 100)} %`}
+                      </div>
+                      <div style={{ marginTop: 5, fontSize: 'var(--font-size-sm)' }}>
+                        Zdroj: {candidate.zdroj.toUpperCase()}{href && <> · <a href={href} target="_blank" rel="noopener noreferrer">otevřít <ExternalLink size={12} /></a></>}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <Button size="sm" variant="secondary" onClick={() => void handleUse(candidate)}>Použít</Button>
+                      <Button size="sm" variant="ghost" onClick={() => void handleReject(candidate)}>Zamítnout</Button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>

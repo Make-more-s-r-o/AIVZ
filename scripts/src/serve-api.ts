@@ -93,6 +93,7 @@ import { scoreBid } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { createApplyMarketPricesHandler } from './lib/market-price-api.js';
 import { getOutcome, upsertOutcome, getOutcomeStats, getCalibrationPairs, type VysledekPodani } from './lib/outcomes-store.js';
+import { candidatePrefill, getOutcomeCandidate, listOutcomeCandidates, markOutcomeCandidateConfirmed, rejectOutcomeCandidate } from './lib/outcome-kandidati-store.js';
 import { buildBidSnapshot, persistSnapshotBestEffort, type BidSnapshot } from './lib/bid-snapshot.js';
 import { insertSnapshot } from './lib/bid-snapshot-store.js';
 import { listNakupy, setObjednano, upsertNakupy } from './lib/nakupy-store.js';
@@ -3907,6 +3908,8 @@ const OutcomeInputSchema = z.object({
   pocet_uchazecu: z.number().int().nonnegative().nullish(),
   vitez_nazev: z.string().trim().max(500).nullish(),
   poznamka: z.string().trim().max(5000).nullish(),
+  // Pouze audit vazby; kandidát se potvrdí až po úspěšném lidském uložení tohoto formuláře.
+  kandidat_id: z.string().regex(/^\d+$/).optional(),
 });
 
 /**
@@ -3978,6 +3981,26 @@ app.get('/api/tenders/:id/outcome', async (req, res) => {
   }
 });
 
+// Návrhy jsou čitelné odděleně od výsledku; bez DB se endpoint graceful degraduje na [].
+app.get('/api/tenders/:id/outcome-kandidati', async (req, res) => {
+  res.json({ kandidati: await listOutcomeCandidates(req.params.id) });
+});
+
+// „Potvrdit“ zde záměrně nic neukládá ani nemění stav: pouze vrátí data formuláře.
+app.post('/api/tenders/:id/outcome-kandidati/:kid/potvrdit', requireJwt, async (req, res) => {
+  const candidate = await getOutcomeCandidate(String(req.params.id), String(req.params.kid));
+  if (!candidate || candidate.stav !== 'navrh') return res.status(404).json({ error: 'candidate_not_found' });
+  res.json({ prefill: candidatePrefill(candidate) });
+});
+
+app.post('/api/tenders/:id/outcome-kandidati/:kid/zamitnout', requireJwt, async (req, res) => {
+  const duvod = typeof req.body?.duvod === 'string' ? req.body.duvod.trim().slice(0, 1000) : '';
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  const candidate = await rejectOutcomeCandidate(String(req.params.id), String(req.params.kid), duvod);
+  if (!candidate) return res.status(404).json({ error: 'candidate_not_found' });
+  res.json({ candidate });
+});
+
 // PUT uložení/aktualizace výsledku zakázky (idempotentní upsert dle tender_id)
 app.put('/api/tenders/:id/outcome', async (req, res) => {
   const { id } = req.params;
@@ -3989,6 +4012,7 @@ app.put('/api/tenders/:id/outcome', async (req, res) => {
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
     const outcome = await upsertOutcome(id, parsed.data);
+    if (parsed.data.kandidat_id) await markOutcomeCandidateConfirmed(id, parsed.data.kandidat_id);
     const actor = (req as any).user?.sub ?? null;
     const actorName = (req as any).user?.name ?? null;
     await logActivity(id, 'vysledek_ulozen', actor, {
