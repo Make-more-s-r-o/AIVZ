@@ -84,7 +84,7 @@ samotné podání (provoz, lhůty v týdnech) se s vývojem nečeká.*
   - **Závislosti:** žádné. **Blokuje: A-06, A-07** (bez A-00 se nepodává).
     **Velikost:** S–M (převážně Dan). **Kdo:** **Dan** rozhodnutí + Codex kódový dodatek.
 
-- [ ] **A-01 — Checklist úplnosti balíku vs. ZD (HARD gate)** · **MONEY-PATH — adversariální oponentura povinná**
+- [x] **A-01 — Checklist úplnosti balíku vs. ZD (HARD gate)** · **MONEY-PATH** — **HOTOVO (PR #78, nasazeno)**. Oponentura REJECT se 6 nálezy → opraveno: párování proti skutečnému obsahu ZIPu, 1:1 (jeden soubor nepokryje víc požadavků), potvrzení nese sha256+fingerprint (propadne při změně dokumentů), „Příloha č. 1" ≠ „Příloha č. 11", vymyšlený požadavek lze auditovaně zamítnout.
   - **Proč:** F1.3; největší riziko pilotu = formální diskvalifikace, ne cena. Dimenze: kvalita, business.
   - **Soubory:** nový `scripts/src/lib/bid-completeness.ts` (deterministický výtah požadovaných
     dokumentů/příloh z `analysis.json` — kvalifikace, ČP, návrh smlouvy, soupis, doklady);
@@ -130,7 +130,7 @@ samotné podání (provoz, lhůty v týdnech) se s vývojem nečeká.*
   - **Závislosti:** žádné. **Velikost:** S. **Kdo:** Codex implementace, Fable review (dotýká se podani.ts).
   - **Rizika:** nízká — jen append-only zápis; NEměnit výpočet skóre samotný.
 
-- [ ] **A-04 — Outcome watcher MVP (VVZ award notice)**
+- [x] **A-04 — Outcome watcher MVP** — **HOTOVO (PR #79, nasazeno, migrace 021)**. ZJIŠTĚNÍ: **NEN publikuje výsledek veřejně** (vítěz, cena bez DPH, seznam účastníků) — ověřeno živě. Watcher zakládá jen NÁVRHY, výsledek potvrzuje člověk (invariant). Limity: závisí na zveřejnění zadavatelem; rámcové dohody s více vítězi → MVP bere prvního.
   - **Proč:** F3.1 předběžně; výsledky se zveřejňují s latencí týdnů → sběr musí běžet dřív, než začne fáze 3. Dimenze: business, autonomie.
   - **Soubory:** nový `scripts/src/lib/outcome-watcher.ts` (periodický sweep: pro zakázky ve
     stavu `odeslana` dohledat výsledek přes VVZ/ISVZ award notice párováním evidenční číslo +
@@ -323,7 +323,7 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
   - **Rizika:** automaticky spuštěné joby žerou AI kredit na irelevantních zakázkách →
     spouštět jen při převzetí (lidské rozhodnutí), NE plošně na celý feed (to až F-04 po kalibraci).
 
-- [ ] **B-06 — Fill miss-rate metrika + review nevyplněných slotů**
+- [x] **B-06 — Fill miss-rate metrika + review nevyplněných slotů** — **HOTOVO (PR #80, nasazeno)**. fill-report.json (sloty per dokument + kontext každé mezery), nevyplněný POVINNÝ slot blokuje podání.
   - **Proč:** F2.7; historicky 30–40 % miss-rate šablon; každý miss = ruční práce proti limitu
     45 min/nabídka. Dimenze: kvalita, UX.
   - **Soubory:** `scripts/src/lib/template-engine.ts` + `scripts/src/lib/reconstruct-engine.ts`
