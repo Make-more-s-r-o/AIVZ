@@ -145,6 +145,16 @@ test('cache starší než 30 dní je orientační a nevstupuje do HARD reality g
   assert.equal(result.realita?.pod_trhem, false);
 });
 
+test('cache nalezená slabým fallbackem názvu je vždy orientační', async () => {
+  const weakRow = { ...cachedRow(1), cache_match: 'nazev' as const };
+  const result = await verifyItemPrice({ vyrobce: '', model: '', nazev: 'Testovací položka', ai_cena_bez_dph: 100 }, {
+    cacheLookup: async () => [weakRow],
+  });
+  assert.equal(result.stav, 'orientacni');
+  assert.equal(result.zdroje?.[0]?.orientacni, true);
+  assert.equal(result.realita?.pod_trhem, false);
+});
+
 test('--no-cache ekvivalentní volba useCache=false cache obejde a použije AI', async () => {
   const calls: Array<{ system: string; user: string }> = [];
   let cacheCalls = 0;

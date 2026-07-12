@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
 import { closePool } from '../src/lib/db.js';
-import { findCachedSources, listFindings, selectCachedSources, upsertFindings, type WebFindingRow } from '../src/lib/web-findings-store.js';
+import { findCachedSources, listFindings, normalizeFindingItemName, selectCachedSources, upsertFindings, type WebFindingRow } from '../src/lib/web-findings-store.js';
 
 function row(overrides: Partial<WebFindingRow>): WebFindingRow {
   return {
@@ -24,6 +24,12 @@ test('cache lookup dodržuje prioritu katalog > výrobce+model > normalizovaný 
   assert.deepEqual(selectCachedSources(rows, { katalogove_cislo: 'CAT-1', vyrobce: 'Acme', model: 'M1', nazev_polozky: 'Židle kancelářská' }, 14, now).map((r) => r.id), [2]);
   assert.deepEqual(selectCachedSources(rows, { vyrobce: 'acme', model: 'M1', nazev_polozky: 'Židle kancelářská' }, 14, now).map((r) => r.id), [1, 3]);
   assert.deepEqual(selectCachedSources(rows, { nazev_polozky: 'zidle kancelarska' }, 14, now).map((r) => r.id), [1, 3, 2]);
+  assert.ok(selectCachedSources(rows, { nazev_polozky: 'Židle kancelářská 25 ks' }, 14, now).every((r) => r.cache_match === 'nazev'));
+});
+
+test('normalizace názvu odstraní pouze koncové množství a zachová modelové číslo', () => {
+  assert.equal(normalizeFindingItemName('Monitor Dell P2425H (množství: 12 ks)'), 'monitor dell p2425h');
+  assert.equal(normalizeFindingItemName('Monitor Dell P2425H'), 'monitor dell p2425h');
 });
 
 test('cache lookup respektuje maximální stáří', () => {
@@ -32,6 +38,18 @@ test('cache lookup respektuje maximální stáří', () => {
     row({ id: 2, found_at: '2026-07-10T00:00:00.000Z' }),
   ], { katalogove_cislo: 'CAT-1' }, 14, new Date('2026-07-12T00:00:00.000Z'));
   assert.deepEqual(result.map((r) => r.id), [2]);
+});
+
+test('cache lookup po nenalezeném katalogu kaskádově zkusí model a až potom název', () => {
+  const now = new Date('2026-07-12T00:00:00.000Z');
+  const modelHit = selectCachedSources([row({ katalogove_cislo: null })], {
+    katalogove_cislo: 'CHYBI', vyrobce: 'Acme', model: 'M1', nazev_polozky: 'Židle kancelářská',
+  }, 14, now);
+  assert.equal(modelHit[0]?.cache_match, 'model');
+  const nameHit = selectCachedSources([row({ katalogove_cislo: null, vyrobce: null, model: null })], {
+    katalogove_cislo: 'CHYBI', vyrobce: 'Acme', model: 'M1', nazev_polozky: 'Židle kancelářská 10 ks',
+  }, 14, now);
+  assert.equal(nameHit[0]?.cache_match, 'nazev');
 });
 
 test('web findings store bez DATABASE_URL degraduje na prázdné čtení a no-op zápis', async () => {
