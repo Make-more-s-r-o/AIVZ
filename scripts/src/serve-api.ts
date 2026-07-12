@@ -25,7 +25,7 @@ import {
   getAllCompanies, getCompany, getTenderCompanyId, createCompany, updateCompany, deleteCompany as deleteCompanyById,
   getCompanyDocuments, deleteCompanyDocument, getCompanyDocumentsDir,
   copyCompanyDocsToTender,
-  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots, setDocPlatnost,
+  getDocManifest, addDocToSlot, removeDocFromSlot, mapQualifikaceToSlots, setDocPlatnost, getCompanyReadiness,
 } from './lib/company-store.js';
 import {
   DOC_SLOTS, type DocSlotType, type DocSlotEntry,
@@ -2399,6 +2399,17 @@ app.get('/api/companies/:companyId', async (req, res) => {
     const company = await getCompany(req.params.companyId);
     if (!company) return res.status(404).json({ error: 'Company not found' });
     res.json(company);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/companies/:companyId/readiness - připravenost standardní sady dokladů
+app.get('/api/companies/:companyId/readiness', async (req, res) => {
+  try {
+    const readiness = await getCompanyReadiness(String(req.params.companyId));
+    if (!readiness) return res.status(404).json({ error: 'Company not found' });
+    res.json(readiness);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

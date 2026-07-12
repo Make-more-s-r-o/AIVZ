@@ -7,12 +7,12 @@ import {
 import { Building2, Trash2, Upload, FileText, Pencil, Plus, X, Check, AlertTriangle, CalendarClock } from 'lucide-react';
 
 const DOC_SLOTS = [
-  { type: 'vypis_or',           label: 'Výpis z obchodního rejstříku', multi: false },
-  { type: 'rejstrik_trestu',    label: 'Výpis z rejstříku trestů',     multi: false },
-  { type: 'potvrzeni_fu',       label: 'Potvrzení finančního úřadu',   multi: false },
-  { type: 'potvrzeni_ossz',     label: 'Potvrzení OSSZ',               multi: false },
-  { type: 'profesni_opravneni', label: 'Profesní oprávnění',           multi: false },
-  { type: 'ostatni',            label: 'Ostatní',                       multi: true  },
+  { type: 'vypis_or', label: 'Výpis z obchodního rejstříku', multi: false, bezne_pozadovan: true, dle_oboru: false, typicka_platnost_dnu: 90, popis: 'Výpis z obchodního rejstříku, ne starší 3 měsíců — justice.cz nebo Czech POINT.' },
+  { type: 'rejstrik_trestu', label: 'Výpis z rejstříku trestů', multi: false, bezne_pozadovan: true, dle_oboru: false, typicka_platnost_dnu: 90, popis: 'Výpis z evidence Rejstříku trestů, ne starší 3 měsíců — Czech POINT nebo Portál občana.' },
+  { type: 'potvrzeni_fu', label: 'Potvrzení finančního úřadu', multi: false, bezne_pozadovan: true, dle_oboru: false, typicka_platnost_dnu: 90, popis: 'Potvrzení o neexistenci daňových nedoplatků, ne starší 3 měsíců — finanční úřad nebo datová schránka.' },
+  { type: 'potvrzeni_ossz', label: 'Potvrzení OSSZ', multi: false, bezne_pozadovan: true, dle_oboru: false, typicka_platnost_dnu: 90, popis: 'Potvrzení o neexistenci nedoplatků na sociálním zabezpečení, ne starší 3 měsíců — OSSZ nebo ePortál ČSSZ.' },
+  { type: 'profesni_opravneni', label: 'Profesní oprávnění', multi: false, bezne_pozadovan: false, dle_oboru: true, typicka_platnost_dnu: null, popis: 'Doklad o oprávnění vykonávat regulovanou činnost — příslušná komora, úřad nebo profesní registr.' },
+  { type: 'ostatni', label: 'Ostatní', multi: true, bezne_pozadovan: false, dle_oboru: false, typicka_platnost_dnu: null, popis: 'Další kvalifikační doklady podle konkrétní zakázky — zdroj určuje zadávací dokumentace.' },
 ] as const;
 
 export default function CompanySettings() {
@@ -351,12 +351,20 @@ function CompanyDocuments({ companyId }: { companyId: string }) {
     }
   };
 
+  const requiredSlots = DOC_SLOTS.filter(slot => slot.bezne_pozadovan);
+  const prepared = requiredSlots.filter(slot => entries.some(entry =>
+    entry.slot === slot.type && (entry.platnost_status === 'ok' || entry.platnost_status === 'expiruje'),
+  )).length;
+
   return (
     <div className="mt-4 rounded-lg p-3" style={{ border: '1px dashed var(--border-strong)' }}>
       {docError && (
         <div className="mb-2 rounded px-2 py-1 text-xs" style={{ background: 'var(--danger-soft-bg)', color: 'var(--danger-fg)' }}>{docError}</div>
       )}
-      <h4 className="mb-3 text-xs font-semibold uppercase" style={{ color: 'var(--text-secondary)' }}>Výchozí kvalifikační doklady</h4>
+      <h4 className="mb-2 text-xs font-semibold uppercase" style={{ color: 'var(--text-secondary)' }}>Výchozí kvalifikační doklady</h4>
+      <div className="mb-3 rounded px-3 py-2 text-sm font-medium" style={{ background: prepared === requiredSlots.length ? 'var(--success-soft-bg)' : 'var(--warning-soft-bg)', color: prepared === requiredSlots.length ? 'var(--success-fg)' : 'var(--warning-fg)' }}>
+        Připravenost k podání: {prepared}/{requiredSlots.length} běžně požadovaných dokladů nahráno a platných
+      </div>
       <div className="space-y-2">
         {DOC_SLOTS.map(slot => {
           const slotEntries = entries.filter(e => e.slot === slot.type);
@@ -393,17 +401,37 @@ function DocSlotRow({
 }) {
   const [rowHover, setRowHover] = useState(false);
   const [uploadHover, setUploadHover] = useState(false);
+  const statuses = slotEntries.map(entry => entry.platnost_status ?? 'nezadano');
+  const hasExpired = statuses.includes('expirovany');
+  const hasExpiring = statuses.includes('expiruje');
+  const missingRequired = slot.bezne_pozadovan && slotEntries.length === 0;
+  const rowBackground = hasExpired
+    ? 'var(--danger-soft-bg)'
+    : hasExpiring
+      ? 'var(--warning-soft-bg)'
+      : missingRequired
+        ? 'var(--warning-soft-bg)'
+        : rowHover ? 'var(--surface-hover)' : 'transparent';
 
   return (
     <div
       onMouseEnter={() => setRowHover(true)}
       onMouseLeave={() => setRowHover(false)}
-      className="flex items-start gap-3 rounded px-2 py-1.5"
-      style={{ background: rowHover ? 'var(--surface-hover)' : 'transparent' }}
+      className="flex items-start gap-3 rounded px-2 py-2"
+      style={{ background: rowBackground }}
     >
       {/* Label */}
-      <div className="w-56 shrink-0 text-xs font-medium pt-0.5" style={{ color: 'var(--text-secondary)' }}>
-        {slot.label}
+      <div className="w-72 shrink-0 pt-0.5" style={{ color: 'var(--text-secondary)' }}>
+        <div className="flex items-center gap-1.5 text-xs font-medium">
+          {slot.label}
+          {(slot.bezne_pozadovan || slot.dle_oboru) && (
+            <span className="rounded px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--surface-sunken)', color: 'var(--text-secondary)' }}>
+              {slot.dle_oboru ? 'dle oboru' : 'běžně požadován'}
+            </span>
+          )}
+        </div>
+        <div className="mt-1 text-[11px] font-normal leading-4" style={{ color: 'var(--text-tertiary)' }}>{slot.popis}</div>
+        {slot.typicka_platnost_dnu != null && <div className="mt-0.5 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>Doporučení: obvykle max {slot.typicka_platnost_dnu} dní staré.</div>}
       </div>
 
       {/* Content */}
@@ -499,7 +527,7 @@ function DocEntryRow({
   const [hover, setHover] = useState(false);
   const dateValue = entry.platnost_do ? entry.platnost_do.slice(0, 10) : '';
   return (
-    <div className="flex items-center gap-2 text-xs">
+    <div className="flex flex-wrap items-center gap-2 text-xs">
       <Check className="h-3 w-3 shrink-0" style={{ color: 'var(--success-solid)' }} />
       <FileText className="h-3 w-3 shrink-0" style={{ color: 'var(--text-tertiary)' }} />
       <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{entry.filename}</span>
@@ -530,6 +558,11 @@ function DocEntryRow({
       >
         <Trash2 className="h-3 w-3" />
       </button>
+      {(!entry.platnost_do || entry.platnost_status === 'nezadano') && (
+        <div className="basis-full rounded px-2 py-1 text-[11px]" style={{ background: 'var(--warning-soft-bg)', color: 'var(--warning-fg)' }}>
+          Bez data platnosti systém nepozná, jestli je doklad ještě použitelný — doplňte.
+        </div>
+      )}
     </div>
   );
 }
