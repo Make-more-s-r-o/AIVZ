@@ -54,6 +54,17 @@ export const TenderAnalysisSchema = z.object({
     popis: z.string(),
     splnitelne: z.boolean(),
   })),
+  // Volitelné bez defaultu kvůli rozlišení historických analýz. Chybějící pole
+  // nesmí staré zakázky zablokovat, ale submit-gate na ně výslovně upozorní.
+  pozadovane_dokumenty: z.array(z.object({
+    nazev: z.string(),
+    popis: z.string().optional(),
+    povinny: z.boolean(),
+    typ: z.enum([
+      'kryci_list', 'cestne_prohlaseni', 'soupis', 'smlouva',
+      'seznam_poddodavatelu', 'jine',
+    ]).optional(),
+  })).optional(),
   hodnotici_kriteria: z.array(z.object({
     nazev: z.string(),
     vaha_procent: z.preprocess(parseAiNumber, z.number().nullable()).transform(v => v ?? 0),

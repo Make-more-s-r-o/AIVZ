@@ -23,6 +23,10 @@ import {
 import { getDocManifest } from './company-store.js';
 import type { DocManifest } from './doc-slots.js';
 import { buildPrilohaChecklist, isValidKvalifikaceVyjimka, type KvalifikaceVyjimky } from './priloha-checklist.js';
+import {
+  buildBalikChecklist, isValidBalikPotvrzeni, type BalikPotvrzeniMap,
+  type PozadovanyDokument,
+} from './balik-uplnost.js';
 
 export interface SubmitGateResult {
   ready: boolean;
@@ -69,6 +73,48 @@ export async function computeSubmitGate(
   const problems: string[] = [];
   const warnings: string[] = [];
   let pricesUpdatedAt: string | null = null;
+
+  // Úplnost celého balíku vůči explicitním požadavkům ZD. Historická analýza bez
+  // nového pole zůstává průchozí, ale operátor dostane viditelné varování.
+  try {
+    const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+    if (!Object.prototype.hasOwnProperty.call(analysis, 'pozadovane_dokumenty')) {
+      warnings.push('Úplnost balíku nelze ověřit — analýza je z předchozí verze.');
+    } else if (Array.isArray(analysis.pozadovane_dokumenty)) {
+      const meta = await readFile(join(outputDir, 'tender-meta.json'), 'utf-8')
+        .then((raw) => JSON.parse(raw)).catch(() => null);
+      const manifest = typeof meta?.company_id === 'string'
+        ? await (options.getCompanyManifest ?? getDocManifest)(meta.company_id).catch(() => ({ version: 1, entries: [] }))
+        : { version: 1, entries: [] };
+      const files = await readdir(outputDir);
+      const vygenerovaneSoubory = files.filter((file) =>
+        ['.docx', '.xlsx', '.pdf'].some((extension) => file.toLowerCase().endsWith(extension)));
+      const prilohyZakazky = await readdir(join(outputDir, 'prilohy')).catch(() => [] as string[]);
+      let potvrzeni: BalikPotvrzeniMap = {};
+      try { potvrzeni = JSON.parse(await readFile(join(outputDir, 'balik-potvrzeni.json'), 'utf-8')); } catch {}
+      const checklist = buildBalikChecklist({
+        pozadovaneDokumenty: analysis.pozadovane_dokumenty as PozadovanyDokument[],
+        vygenerovaneSoubory,
+        prilohyZakazky,
+        firemniDoklady: manifest.entries,
+      });
+      for (const item of checklist) {
+        if (!item.povinny || item.status === 'pokryto') continue;
+        if (item.status === 'nejiste' && isValidBalikPotvrzeni(potvrzeni[item.klic])) {
+          warnings.push(`Ruční potvrzení pokrytí dokumentu „${item.nazev}“ (${potvrzeni[item.klic].potvrdil}).`);
+        } else if (item.status === 'nejiste') {
+          problems.push(`Nelze spolehlivě ověřit požadovaný dokument „${item.nazev}“ — potvrďte ručně, že je pokryt.`);
+        } else {
+          problems.push(`Chybí povinný dokument požadovaný zadáním: ${item.nazev}.`);
+        }
+      }
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      problems.push(`Nelze ověřit úplnost balíku: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   // Požadované kvalifikační sloty jsou součástí submit-gate, nejen informativního
   // checklistu v UI. Expirovaný firemní doklad proto blokuje finalizaci fail-closed.

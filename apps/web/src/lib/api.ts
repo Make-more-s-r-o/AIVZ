@@ -1544,6 +1544,37 @@ export async function getPrilohaChecklist(id: string): Promise<PrilohaChecklist>
   }
 }
 
+export type BalikChecklistStatus = 'pokryto' | 'chybi' | 'nejiste';
+export interface BalikChecklistItem {
+  klic: string;
+  nazev: string;
+  popis?: string;
+  povinny: boolean;
+  typ?: 'kryci_list' | 'cestne_prohlaseni' | 'soupis' | 'smlouva' | 'seznam_poddodavatelu' | 'jine';
+  status: BalikChecklistStatus;
+  soubor?: string;
+  zdroj?: 'vygenerovano' | 'zakazka' | 'firma';
+  potvrzeni?: { potvrdil: string; at: string };
+}
+
+export interface BalikChecklist {
+  items: BalikChecklistItem[];
+  analyza_hotova: boolean;
+  podporovana_analyza: boolean;
+}
+
+export function getBalikChecklist(id: string): Promise<BalikChecklist> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik-checklist`);
+}
+
+export function confirmBalikItem(id: string, klic: string): Promise<{ success: boolean }> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik/potvrdit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ klic }),
+  });
+}
+
 // --- AI Cost ---
 
 export interface CostSummary {

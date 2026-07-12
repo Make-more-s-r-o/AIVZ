@@ -34,6 +34,10 @@ import {
 import {
   buildPrilohaChecklist, isValidKvalifikaceVyjimka, validateVyjimkaInput, type KvalifikaceVyjimky,
 } from './lib/priloha-checklist.js';
+import {
+  buildBalikChecklist, createBalikPotvrzeni, isValidBalikPotvrzeni,
+  type BalikPotvrzeniMap, type PozadovanyDokument,
+} from './lib/balik-uplnost.js';
 import { isDbAvailable, closePool } from './lib/db.js';
 import { runMigrations } from './lib/db-migrate.js';
 import {
@@ -2621,6 +2625,68 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
     }));
 
     res.json({ items, company_id: companyId, analyza_hotova: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+async function loadBalikChecklist(id: string) {
+  const outputDir = join(OUTPUT_DIR, id);
+  let analysis: any = null;
+  try { analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8')); } catch {}
+  if (!analysis || !Object.prototype.hasOwnProperty.call(analysis, 'pozadovane_dokumenty')) {
+    return { items: [], analyza_hotova: !!analysis, podporovana_analyza: false };
+  }
+  let companyId: string | null = null;
+  try {
+    const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
+    companyId = typeof meta.company_id === 'string' ? meta.company_id : null;
+  } catch {}
+  const manifest = companyId ? await getDocManifest(companyId).catch(() => ({ version: 1, entries: [] })) : { version: 1, entries: [] };
+  const files = await readdir(outputDir).catch(() => [] as string[]);
+  const generated = files.filter((file) => ['.docx', '.xlsx', '.pdf'].some((ext) => file.toLowerCase().endsWith(ext)));
+  const attachments = await readdir(join(outputDir, 'prilohy')).catch(() => [] as string[]);
+  let potvrzeni: BalikPotvrzeniMap = {};
+  try { potvrzeni = JSON.parse(await readFile(join(outputDir, 'balik-potvrzeni.json'), 'utf-8')); } catch {}
+  const items = buildBalikChecklist({
+    pozadovaneDokumenty: Array.isArray(analysis.pozadovane_dokumenty)
+      ? analysis.pozadovane_dokumenty as PozadovanyDokument[] : [],
+    vygenerovaneSoubory: generated,
+    prilohyZakazky: attachments,
+    firemniDoklady: manifest.entries,
+  }).map((item) => ({
+    ...item,
+    potvrzeni: isValidBalikPotvrzeni(potvrzeni[item.klic]) ? potvrzeni[item.klic] : undefined,
+  }));
+  return { items, analyza_hotova: true, podporovana_analyza: true };
+}
+
+// Checklist všech dokumentů požadovaných ZD; historická analýza vrací prázdný stav.
+app.get('/api/tenders/:id/balik-checklist', async (req, res) => {
+  const id = String(req.params.id);
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  try { res.json(await loadBalikChecklist(id)); }
+  catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+// Ruční potvrzení nejistého párování. Identita je výhradně ze serverem ověřeného JWT;
+// případná pole potvrdil/at v těle požadavku se záměrně vůbec nečtou.
+app.post('/api/tenders/:id/balik/potvrdit', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const id = String(req.params.id);
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  const klic = typeof req.body?.klic === 'string' ? req.body.klic : '';
+  try {
+    const checklist = await loadBalikChecklist(id);
+    const item = checklist.items.find((candidate) => candidate.klic === klic);
+    if (!item || item.status !== 'nejiste') {
+      return res.status(400).json({ error: 'invalid_item', reason: 'Potvrdit lze pouze existující nejistou položku.' });
+    }
+    const path = join(OUTPUT_DIR, id, 'balik-potvrzeni.json');
+    let confirmations: BalikPotvrzeniMap = {};
+    try { confirmations = JSON.parse(await readFile(path, 'utf-8')); } catch {}
+    confirmations[klic] = createBalikPotvrzeni((req as any).user);
+    await writeFile(path, JSON.stringify(confirmations, null, 2), 'utf-8');
+    res.json({ success: true, klic, potvrzeni: confirmations[klic] });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

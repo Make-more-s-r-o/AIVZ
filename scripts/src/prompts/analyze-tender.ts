@@ -9,6 +9,11 @@ Vždy extrahuj:
 6. Technické požadavky — konkrétní parametry, které musí dodané zboží/služba splňovat
 7. Identifikovaná rizika
 8. Doporučení GO/NOGO s odůvodněním
+9. Dokumenty, které zadávací dokumentace explicitně požaduje odevzdat jako součást nabídky
+
+V poli pozadovane_dokumenty vypiš JEN dokumenty, které zadávací dokumentace skutečně
+požaduje odevzdat jako součást nabídky. NEVYMÝŠLEJ. Když si nejsi jistý povinností,
+uveď povinny: true (konzervativně).
 
 Odpověz POUZE validním JSON. Žádný další text.`;
 
@@ -32,6 +37,9 @@ Odpověz ve formátu:
   },
   "kvalifikace": [
     {"typ": "profesni|technicka|ekonomicka", "popis": "...", "splnitelne": true}
+  ],
+  "pozadovane_dokumenty": [
+    {"nazev": "...", "popis": "...", "povinny": true, "typ": "kryci_list|cestne_prohlaseni|soupis|smlouva|seznam_poddodavatelu|jine"}
   ],
   "hodnotici_kriteria": [
     {"nazev": "...", "vaha_procent": 60, "popis": "..."}

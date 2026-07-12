@@ -15,6 +15,8 @@ import {
   finalizeTender,
   getPrilohaChecklist,
   createKvalifikaceVyjimka,
+  getBalikChecklist,
+  confirmBalikItem,
   downloadWithAuth,
   type FieldValidationResult,
   type PrilohaChecklistItem,
@@ -176,6 +178,7 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const [exceptionItem, setExceptionItem] = useState<PrilohaChecklistItem | null>(null);
   const [exceptionReason, setExceptionReason] = useState('');
   const [savingException, setSavingException] = useState(false);
+  const [confirmingBalikKey, setConfirmingBalikKey] = useState<string | null>(null);
 
   const { data: documents, isLoading, error } = useQuery({
     queryKey: ['documents', tenderId],
@@ -204,6 +207,11 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
     queryFn: () => getPrilohaChecklist(tenderId),
   });
 
+  const { data: balikChecklist, isLoading: balikChecklistLoading } = useQuery({
+    queryKey: ['balik-checklist', tenderId],
+    queryFn: () => getBalikChecklist(tenderId),
+  });
+
   const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -213,6 +221,7 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       await uploadAttachments(tenderId, Array.from(files));
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
       queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
     } catch (err) {
       console.error('Upload failed:', err);
       setActionError('Nahrání přílohy se nezdařilo.');
@@ -229,6 +238,7 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       await deleteAttachment(tenderId, filename);
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
       queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
     } catch (err) {
       console.error('Delete failed:', err);
       setActionError('Smazání přílohy se nezdařilo.');
@@ -295,6 +305,19 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       setSavingException(false);
     }
   }, [exceptionItem, exceptionReason, queryClient, tenderId, toast]);
+
+  const handleBalikConfirmation = useCallback(async (klic: string) => {
+    setConfirmingBalikKey(klic);
+    try {
+      await confirmBalikItem(tenderId, klic);
+      await queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
+      toast('Pokrytí dokumentu bylo auditovaně potvrzeno.', 'success');
+    } catch (err) {
+      toast((err as Error).message, 'danger');
+    } finally {
+      setConfirmingBalikKey(null);
+    }
+  }, [queryClient, tenderId, toast]);
 
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok "Dokumenty".</div>;
@@ -469,6 +492,54 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       )}
 
       {/* Checklist kvalifikačních příloh — odvozený z kvalifikačních požadavků AI analýzy */}
+      <Card title="Úplnost balíku vs. zadání">
+        {balikChecklistLoading ? (
+          <p className="m-0 text-sm text-gray-500">Načítám…</p>
+        ) : !balikChecklist?.podporovana_analyza ? (
+          <p className="m-0 text-sm text-amber-700">
+            Úplnost balíku nelze ověřit — analýza je z předchozí verze.
+          </p>
+        ) : balikChecklist.items.length === 0 ? (
+          <p className="m-0 text-sm text-gray-500">Zadávací dokumentace nepožaduje žádné další dokumenty nabídky.</p>
+        ) : (
+          <div>
+            <p className="mb-2 text-sm font-medium text-gray-700">
+              {balikChecklist.items.filter((item) => item.status === 'pokryto' || item.potvrzeni).length}/{balikChecklist.items.length} pokryto
+            </p>
+            {balikChecklist.items.map((item) => {
+              const covered = item.status === 'pokryto' || Boolean(item.potvrzeni);
+              return (
+                <div key={item.klic} className="border-b border-gray-100 py-2 last:border-b-0">
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 text-sm text-gray-900">{item.nazev}</span>
+                    <Badge tone={covered ? 'success' : item.status === 'chybi' ? 'danger' : 'warning'} size="sm">
+                      {covered ? 'Pokryto' : item.status === 'chybi' ? 'Chybí' : 'Nejisté'}
+                    </Badge>
+                    {item.status === 'nejiste' && !item.potvrzeni && (
+                      <Button
+                        variant="secondary"
+                        disabled={confirmingBalikKey === item.klic}
+                        onClick={() => handleBalikConfirmation(item.klic)}
+                      >
+                        {confirmingBalikKey === item.klic ? 'Potvrzuji…' : 'Potvrdit, že je pokryto'}
+                      </Button>
+                    )}
+                  </div>
+                  {item.popis && <p className="mt-1 text-xs text-gray-500">{item.popis}</p>}
+                  {item.soubor && <p className="mt-1 text-xs text-gray-500">Soubor: {item.soubor}</p>}
+                  {item.status === 'chybi' && item.povinny && (
+                    <p className="mt-1 text-xs font-semibold text-red-700">Bez tohoto dokumentu bude nabídka vyřazena.</p>
+                  )}
+                  {item.potvrzeni && (
+                    <p className="mt-1 text-xs text-gray-500">Ručně potvrdil/a {item.potvrzeni.potvrdil}.</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
       <Card title="Kvalifikační přílohy">
         {prilohaChecklistLoading ? (
           <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Načítám…</p>
