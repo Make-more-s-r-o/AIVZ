@@ -15,6 +15,7 @@ import { resolveModelId, getModelPricing } from './ai-client.js';
 import { logCost } from './cost-tracker.js';
 import { compareAiVsMarket } from './price-reality.js';
 import { candidateFingerprint } from './candidate-fingerprint.js';
+import { findCachedSources, type CachedSourceIdentity, type WebFindingRow } from './web-findings-store.js';
 import type {
   ProductMatch,
   ProductCandidate,
@@ -33,6 +34,8 @@ const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 // Každá fáze dostává vlastní wall-clock rozpočet; fallback tedy nedědí vyčerpaný čas fáze 1.
 export const WEB_SEARCH_PHASE_TIMEOUT_MS = 4 * 60 * 1000;
 export const EQUIVALENT_MAX_SEARCHES = 3;
+export const DEFAULT_VERIFY_CACHE_DAYS = 14;
+export const ESTIMATED_AI_ITEM_COST_CZK = 130 / 14;
 export const ANTHROPIC_CREDIT_ERROR_MESSAGE = 'Došel kredit Anthropic API — ověřování zastaveno, žádná data nebyla přepsána.';
 
 const client = new Anthropic({
@@ -52,6 +55,7 @@ export type { WebPriceSource };
 export interface VerifyInput {
   vyrobce: string;
   model: string;
+  katalogove_cislo?: string;
   nazev?: string;
   specifikace?: string;
   mnozstvi?: number;
@@ -69,6 +73,12 @@ export interface VerifyItemOptions {
   maxSearches?: number;
   /** Injekce klienta pro deterministické testy bez síťového volání. */
   aiClient?: PriceVerifierAiClient;
+  /** Vypne čtení historických nálezů. */
+  useCache?: boolean;
+  /** Maximální stáří nálezu; výchozí hodnota je VERIFY_CACHE_DNI nebo 14. */
+  cacheDays?: number;
+  /** Injekce lookupu pro deterministické testy. */
+  cacheLookup?: (identity: CachedSourceIdentity, maxStariDnu: number) => Promise<WebFindingRow[]>;
 }
 
 export interface PriceVerifierAiClient {
@@ -119,6 +129,9 @@ export interface VerifyAllResult {
     costCZK: number;
     modelId: string;
     preruseno_kvuli_kreditu: boolean;
+    z_cache: number;
+    ai_polozek: number;
+    usetreno_czk: number;
   };
 }
 
@@ -677,6 +690,61 @@ interface RawVerifyResult {
   outputTokens: number;
   searches: number;
   costCZK: number;
+  fromCache?: boolean;
+}
+
+function configuredCacheDays(): number {
+  const parsed = Number.parseInt(process.env.VERIFY_CACHE_DNI ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_VERIFY_CACHE_DAYS;
+}
+
+/** Historický řádek převede do stejného money-path kontraktu jako živé ověření. */
+function verificationFromCache(rows: WebFindingRow[], input: VerifyInput): OvereniCeny | null {
+  const nowMs = Date.now();
+  const sources = rows.flatMap((row): WebPriceSource[] => {
+    const foundMs = Date.parse(row.found_at);
+    if (!Number.isFinite(foundMs) || (!row.cena_bez_dph && !row.cena_s_dph) || !cleanUrl(row.url)) return [];
+    const age = Math.max(0, Math.floor((nowMs - foundMs) / 86_400_000));
+    return [{
+      url: cleanUrl(row.url)!,
+      dodavatel: row.dodavatel,
+      nazev_produktu: row.produkt ?? row.polozka_nazev,
+      cena_bez_dph: row.cena_bez_dph,
+      cena_s_dph: row.cena_s_dph,
+      cena_baleni_s_dph: row.cena_s_dph,
+      baleni_ks: null,
+      mena: 'CZK',
+      dostupnost: normalizeAvailability(row.dostupnost),
+      poznamka: 'Historický nález z dřívějšího webového ověření.',
+      z_cache: true,
+      cache_stari_dnu: age,
+      ...(age > 30 ? { orientacni: true } : {}),
+    }];
+  }).sort((a, b) => sourceGrossPrice(a) - sourceGrossPrice(b)).slice(0, 3);
+  if (sources.length === 0) return null;
+  const cheapest = sources[0]!;
+  const age = Math.min(...sources.map((source) => source.cache_stari_dnu ?? 0));
+  const onlyOrientational = sources.every((source) => source.orientacni === true);
+  const gross = cheapest.cena_s_dph ?? undefined;
+  return {
+    stav: onlyOrientational ? 'orientacni' : 'nalezeno',
+    shoda_typ: 'presny',
+    web_cena_bez_dph: cheapest.cena_bez_dph ?? undefined,
+    web_cena_s_dph: gross,
+    mena: 'CZK',
+    zdroj_url: cheapest.url,
+    dodavatel: cheapest.dodavatel ?? undefined,
+    dostupnost: cheapest.dostupnost,
+    poznamka: 'Použity uložené zdroje z historie ověřování.',
+    overeno_at: new Date().toISOString(),
+    z_cache: true,
+    cache_stari_dnu: age,
+    prekracuje_strop: typeof input.cena_max_s_dph === 'number' && input.cena_max_s_dph > 0 && gross !== undefined
+      ? gross > input.cena_max_s_dph
+      : undefined,
+    zdroje: sources,
+    realita: compareAiVsMarket(input.ai_cena_bez_dph ?? null, sources, input.mnozstvi ?? 1),
+  };
 }
 
 /** Rozliší doložené zamítnutí AI kandidáta od obyčejného „nenalezeno“. */
@@ -705,6 +773,19 @@ async function verifyOneInternal(input: VerifyInput, opts: VerifyItemOptions): P
   const maxSearches = opts.maxSearches ?? 3;
   const aiClient = opts.aiClient ?? client;
   const now = () => new Date().toISOString();
+
+  if (opts.useCache !== false) {
+    const cachedRows = await (opts.cacheLookup ?? findCachedSources)({
+      katalogove_cislo: input.katalogove_cislo,
+      vyrobce: input.vyrobce,
+      model: input.model,
+      nazev_polozky: input.nazev,
+    }, opts.cacheDays ?? configuredCacheDays());
+    const cached = verificationFromCache(cachedRows, input);
+    if (cached) {
+      return { overeni: cached, hitPhase: 1, inputTokens: 0, outputTokens: 0, searches: 0, costCZK: 0, fromCache: true };
+    }
+  }
 
   let first: Awaited<ReturnType<typeof callWithWebSearch>>;
   try {
@@ -916,6 +997,7 @@ function buildTargets(matchData: ProductMatch, analysis?: TenderAnalysis): Targe
         input: {
           vyrobce: cand.vyrobce,
           model: cand.model,
+          katalogove_cislo: cand.katalogove_cislo,
           nazev: item.polozka_nazev,
           specifikace: authoritativeSpecificationForItem(analysis, item.polozka_index),
           mnozstvi: item.mnozstvi,
@@ -938,6 +1020,7 @@ function buildTargets(matchData: ProductMatch, analysis?: TenderAnalysis): Targe
         input: {
           vyrobce: cand.vyrobce,
           model: cand.model,
+          katalogove_cislo: cand.katalogove_cislo,
           // Fallback smí dostat jen název ze zadání, nikdy AI identitu kandidáta.
           nazev: authoritativeName,
           specifikace: authoritativeSpecificationForItem(analysis, 0),
@@ -1073,6 +1156,9 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
         model: opts.model,
         maxSearches: opts.maxSearches,
         aiClient: opts.aiClient,
+        useCache: opts.useCache,
+        cacheDays: opts.cacheDays,
+        cacheLookup: opts.cacheLookup,
       });
       done++;
       opts.onProgress?.(`[${done}/${total}] ${target.polozka_nazev}: ${formatPrice(res.overeni)}`);
@@ -1141,6 +1227,9 @@ export async function verifyAllPrices(matchData: ProductMatch, opts: VerifyAllOp
     costCZK: raw.reduce((s, x) => s + x.res.costCZK, 0),
     modelId,
     preruseno_kvuli_kreditu: creditInterrupted,
+    z_cache: raw.filter((item) => item.res.fromCache === true).length,
+    ai_polozek: raw.filter((item) => item.res.fromCache !== true).length,
+    usetreno_czk: Math.round(raw.filter((item) => item.res.fromCache === true).length * ESTIMATED_AI_ITEM_COST_CZK * 100) / 100,
   };
 
   // Zapiš náklady jedním agregovaným záznamem (costCZK už zahrnuje i cenu web searchů)

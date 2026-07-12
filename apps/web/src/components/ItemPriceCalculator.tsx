@@ -336,6 +336,11 @@ export default function ItemPriceCalculator({
                       orientační — ověřte parametry
                     </span>
                   )}
+                  {source.z_cache === true && (
+                    <span className="rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0.5 text-[9px] font-semibold text-sky-800">
+                      z historie ({source.cache_stari_dnu ?? overeniCeny.cache_stari_dnu ?? 0} dní)
+                    </span>
+                  )}
                   <span>· {source.dodavatel || 'Neznámý dodavatel'}</span>
                   <span>· {cenaSdph != null ? `${cenaSdph.toLocaleString('cs-CZ')} Kč s DPH za balení` : 'cena neuvedena'}</span>
                   <span>· {source.baleni_ks != null ? `${source.baleni_ks} ks v balení` : 'počet v balení neověřen'}</span>

@@ -39,6 +39,10 @@ function parseIntArg(name: string): number | undefined {
   return Number.isNaN(n) ? undefined : n;
 }
 
+function hasFlag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
 function selectedCandidate(matchData: ProductMatch, polozkaIndex: number): ProductCandidate | undefined {
   if (polozkaIndex === -1) {
     return matchData.kandidati?.[matchData.vybrany_index ?? 0];
@@ -54,6 +58,8 @@ function findingsFromResults(
   results: ItemVerification[],
 ): WebFindingInput[] {
   return results.flatMap((result) => {
+    // Cache hit znovu neukládáme: UPDATE by posunul found_at a uměle omladil cenu.
+    if (result.overeni_ceny.z_cache === true) return [];
     if (!['nalezeno', 'ekvivalent', 'orientacni'].includes(result.overeni_ceny.stav)) return [];
     const candidate = selectedCandidate(matchData, result.polozka_index);
     const produkt = candidate ? `${candidate.vyrobce} ${candidate.model}`.trim() : null;
@@ -80,6 +86,9 @@ function findingsFromResults(
       cena_bez_dph: source.cena_bez_dph,
       cena_s_dph: source.cena_s_dph,
       dostupnost: source.dostupnost,
+      katalogove_cislo: candidate?.katalogove_cislo ?? null,
+      vyrobce: candidate?.vyrobce ?? null,
+      model: candidate?.model ?? null,
     }));
   });
 }
@@ -88,11 +97,13 @@ async function main(): Promise<void> {
   const tenderId = getArg('tender-id');
   if (!tenderId) {
     console.error('Chybí --tender-id=<id>');
-    console.error('Použití: npx tsx src/verify-prices.ts --tender-id=<id> [--limit=N] [--only-index=i]');
+    console.error('Použití: npx tsx src/verify-prices.ts --tender-id=<id> [--limit=N] [--only-index=i] [--no-cache] [--cache-dnu=N]');
     process.exit(1);
   }
   const limit = parseIntArg('limit');
   const onlyIndex = parseIntArg('only-index');
+  const noCache = hasFlag('no-cache');
+  const cacheDays = parseIntArg('cache-dnu');
 
   const matchPath = join(ROOT, 'output', tenderId, 'product-match.json');
   let matchData: ProductMatch;
@@ -114,12 +125,16 @@ async function main(): Promise<void> {
   console.log(`\nOvěřování cen web-searchem — zakázka ${tenderId}`);
   if (limit !== undefined) console.log(`  limit: ${limit}`);
   if (onlyIndex !== undefined) console.log(`  jen položka index: ${onlyIndex}`);
+  if (noCache) console.log('  cache: vypnuta (--no-cache)');
+  else if (cacheDays !== undefined) console.log(`  cache: maximálně ${cacheDays} dní`);
 
   const { results, summary } = await verifyAllPrices(matchData, {
     tenderId,
     analysis,
     limit,
     onlyIndex,
+    useCache: !noCache,
+    cacheDays,
     onProgress: (m) => console.log('  ' + m),
   });
 
@@ -172,6 +187,7 @@ async function main(): Promise<void> {
   );
   if (summary.prekracuje_strop > 0) console.log(`  Překračuje cenový strop: ${summary.prekracuje_strop}`);
   console.log(`  Web searchů: ${summary.searches}`);
+  console.log(`  Z cache: ${summary.z_cache}  |  AI ověření: ${summary.ai_polozek}  |  Odhad úspory: ${summary.usetreno_czk.toFixed(2)} CZK`);
   console.log(
     `  Tokeny: ${summary.inputTokens} in / ${summary.outputTokens} out  |  Náklad: ${summary.costCZK.toFixed(2)} CZK`,
   );
