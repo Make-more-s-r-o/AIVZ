@@ -228,6 +228,8 @@ export const WebPriceSourceSchema = z.object({
   shoda_parametru: z.array(z.string()).optional(),
   // Orientační zdroj má použitelný odkaz a cenu, ale AI nedoložila shodu parametrů.
   orientacni: z.boolean().optional(),
+  z_cache: z.boolean().optional(),
+  cache_stari_dnu: z.number().nonnegative().optional(),
 });
 
 export const OvereniCenySchema = z.object({
@@ -249,6 +251,8 @@ export const OvereniCenySchema = z.object({
   kandidat_fingerprint: z.string().optional(),
   prekracuje_strop: z.boolean().optional(),
   kandidat_neexistuje: z.boolean().optional(),
+  z_cache: z.boolean().optional(),
+  cache_stari_dnu: z.number().nonnegative().optional(),
   zdroje: z.array(WebPriceSourceSchema).max(3).optional(),
   realita: z.object({
     nejlevnejsi_bez_dph: z.number().nullable(),

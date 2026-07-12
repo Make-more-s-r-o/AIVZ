@@ -14,6 +14,7 @@ import {
   type PriceVerifierAiClient,
 } from '../src/lib/price-verifier.js';
 import type { ProductMatch, TenderAnalysis } from '../src/lib/types.js';
+import type { WebFindingRow } from '../src/lib/web-findings-store.js';
 
 const FIXTURES = new URL('./fixtures/', import.meta.url);
 
@@ -105,6 +106,66 @@ function foundVerification(fingerprint: string, at = '2026-07-10T10:00:00.000Z')
     }],
   };
 }
+
+function cachedRow(daysOld: number): WebFindingRow {
+  return {
+    id: 1, tender_id: 'T-old', polozka_index: 0, polozka_nazev: 'Testovací položka',
+    produkt: 'Test X', dodavatel: 'Historický shop', url: 'https://shop.cz/historie',
+    cena_bez_dph: 800, cena_s_dph: 968, dostupnost: 'skladem', zdroj: 'web_verify',
+    found_at: new Date(Date.now() - daysOld * 86_400_000).toISOString(),
+    katalogove_cislo: 'CAT-X', vyrobce: 'Test', model: 'X',
+  };
+}
+
+test('cache hit nevolá AI a zapíše metadata historie do ověření i souhrnu', async () => {
+  let aiCalls = 0;
+  const aiClient: PriceVerifierAiClient = { messages: { async create() { aiCalls++; throw new Error('AI se nemá volat'); } } };
+  const match = {
+    tenderId: 'T-cache', matchedAt: new Date().toISOString(),
+    polozky_match: [{ polozka_index: 0, polozka_nazev: 'Testovací položka', typ: 'produkt', kandidati: [testCandidate()], vybrany_index: 0 }],
+  } as ProductMatch;
+  const { results, summary } = await verifyAllPrices(match, {
+    tenderId: 'T-cache', aiClient, cacheLookup: async () => [cachedRow(5)],
+  });
+  assert.equal(aiCalls, 0);
+  assert.equal(results[0]?.overeni_ceny.z_cache, true);
+  assert.equal(results[0]?.overeni_ceny.cache_stari_dnu, 5);
+  assert.equal(results[0]?.overeni_ceny.zdroje?.[0]?.z_cache, true);
+  assert.equal(summary.z_cache, 1);
+  assert.equal(summary.ai_polozek, 0);
+  assert.ok(summary.usetreno_czk > 0);
+});
+
+test('cache starší než 30 dní je orientační a nevstupuje do HARD reality gate', async () => {
+  const result = await verifyItemPrice({ vyrobce: 'Test', model: 'X', ai_cena_bez_dph: 100 }, {
+    cacheDays: 60, cacheLookup: async () => [cachedRow(31)],
+  });
+  assert.equal(result.stav, 'orientacni');
+  assert.equal(result.zdroje?.[0]?.orientacni, true);
+  assert.equal(result.realita?.pod_trhem, false);
+});
+
+test('--no-cache ekvivalentní volba useCache=false cache obejde a použije AI', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  let cacheCalls = 0;
+  const result = await verifyItemPrice({ vyrobce: 'Test', model: 'X' }, {
+    useCache: false,
+    cacheLookup: async () => { cacheCalls++; return [cachedRow(1)]; },
+    aiClient: fakeAiClient([sourceResponse()], calls),
+  });
+  assert.equal(cacheCalls, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(result.z_cache, undefined);
+});
+
+test('bez DB cache graceful mine a verify pokračuje AI cestou', async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const result = await verifyItemPrice({ vyrobce: 'Test', model: 'X' }, {
+    aiClient: fakeAiClient([sourceResponse()], calls),
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.stav, 'nalezeno');
+});
 
 test('dvoufázové ověření spustí fallback jen po nenalezení a bez AI výrobce a modelu', async () => {
   const calls: Array<{ system: string; user: string }> = [];

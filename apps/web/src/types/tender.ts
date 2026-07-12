@@ -95,6 +95,8 @@ export interface WebPriceSource {
   splnuje_specifikaci?: boolean;
   shoda_parametru?: string[];
   orientacni?: boolean;
+  z_cache?: boolean;
+  cache_stari_dnu?: number;
 }
 
 export interface OvereniCeny {
@@ -115,6 +117,8 @@ export interface OvereniCeny {
   kandidat_fingerprint?: string;
   prekracuje_strop?: boolean;
   kandidat_neexistuje?: boolean;
+  z_cache?: boolean;
+  cache_stari_dnu?: number;
   zdroje?: WebPriceSource[];
   realita?: {
     nejlevnejsi_bez_dph: number | null;
