@@ -65,7 +65,12 @@ async function makeCase(files: {
     await writeFile(join(dir, 'parts-selection.json'), JSON.stringify(files.partsSelection), 'utf-8');
   }
   if (files.analysis !== undefined) {
-    await writeFile(join(dir, 'analysis.json'), JSON.stringify(files.analysis), 'utf-8');
+    // Tyto legacy fixture testují jiné části gate; explicitně používají aktuální
+    // formát analýzy, aby nový H5 fail-closed guard nemaskoval jejich výsledek.
+    const analysis = files.analysis && typeof files.analysis === 'object'
+      ? { pozadovane_dokumenty: [], ...(files.analysis as Record<string, unknown>) }
+      : files.analysis;
+    await writeFile(join(dir, 'analysis.json'), JSON.stringify(analysis), 'utf-8');
   }
   if (files.tenderMeta !== undefined) {
     await writeFile(join(dir, 'tender-meta.json'), JSON.stringify(files.tenderMeta), 'utf-8');
@@ -185,6 +190,8 @@ async function run(): Promise<void> {
       },
       tenderMeta: { company_id: 'firma-1' },
     });
+    await (await import('node:fs/promises')).mkdir(join(dir, 'prilohy'));
+    await writeFile(join(dir, 'prilohy', 'vypis.pdf'), 'doklad', 'utf-8');
     const res = await computeSubmitGate(dir, {
       now: new Date('2026-07-11T12:00:00Z'),
       getCompanyManifest: async () => ({
@@ -259,6 +266,9 @@ async function run(): Promise<void> {
       analysis: { kvalifikace: [{ typ: 'profesní', popis: 'obchodní rejstřík' }] },
       tenderMeta: { company_id: 'firma-1' },
     });
+    await (await import('node:fs/promises')).mkdir(join(dir, 'prilohy'));
+    await writeFile(join(dir, 'prilohy', 'vypis.pdf'), 'doklad', 'utf-8');
+    await writeFile(join(dir, 'prilohy', 'opravneni.pdf'), 'doklad', 'utf-8');
     const res = await computeSubmitGate(dir, {
       now: new Date('2026-07-11T12:00:00Z'),
       getCompanyManifest: async () => ({

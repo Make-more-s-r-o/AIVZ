@@ -1544,6 +1544,49 @@ export async function getPrilohaChecklist(id: string): Promise<PrilohaChecklist>
   }
 }
 
+export type BalikChecklistStatus = 'pokryto' | 'chybi' | 'nejiste';
+export interface BalikChecklistItem {
+  klic: string;
+  nazev: string;
+  popis?: string;
+  povinny: boolean;
+  typ?: 'kryci_list' | 'cestne_prohlaseni' | 'soupis' | 'smlouva' | 'seznam_poddodavatelu' | 'jine';
+  status: BalikChecklistStatus;
+  soubor?: string;
+  zdroj?: 'vygenerovano' | 'zakazka' | 'firma';
+  poznamka?: string;
+  potvrzeni?: { potvrdil: string; at: string; soubor: string; sha256: string; pozadavek_fingerprint: string };
+  potvrzeni_propadlo?: boolean;
+  zamitnuti?: { zamitnuto: true; duvod: string; kdo: string; at: string; pozadavek_fingerprint: string };
+}
+
+export interface BalikChecklist {
+  items: BalikChecklistItem[];
+  analyza_hotova: boolean;
+  podporovana_analyza: boolean;
+  prevzeti_uplnosti?: { prevzato: true; duvod: string; kdo: string; at: string };
+}
+
+export function getBalikChecklist(id: string): Promise<BalikChecklist> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik-checklist`);
+}
+
+export function confirmBalikItem(id: string, klic: string): Promise<{ success: boolean }> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik/potvrdit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ klic }),
+  });
+}
+
+export function prevzitUplnost(id: string, duvod: string): Promise<{ success: boolean }> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik/prevzit-uplnost`, { method: 'POST', body: JSON.stringify({ duvod }) });
+}
+
+export function zamitnoutBalikPozadavek(id: string, klic: string, duvod: string): Promise<{ success: boolean }> {
+  return fetchJson(`/tenders/${encodeURIComponent(id)}/balik/zamitnout-pozadavek`, { method: 'POST', body: JSON.stringify({ klic, duvod }) });
+}
+
 // --- AI Cost ---
 
 export interface CostSummary {

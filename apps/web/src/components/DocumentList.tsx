@@ -15,6 +15,10 @@ import {
   finalizeTender,
   getPrilohaChecklist,
   createKvalifikaceVyjimka,
+  getBalikChecklist,
+  confirmBalikItem,
+  prevzitUplnost,
+  zamitnoutBalikPozadavek,
   downloadWithAuth,
   type FieldValidationResult,
   type PrilohaChecklistItem,
@@ -176,6 +180,10 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const [exceptionItem, setExceptionItem] = useState<PrilohaChecklistItem | null>(null);
   const [exceptionReason, setExceptionReason] = useState('');
   const [savingException, setSavingException] = useState(false);
+  const [confirmingBalikKey, setConfirmingBalikKey] = useState<string | null>(null);
+  const [auditDialog, setAuditDialog] = useState<{ mode: 'prevzit' | 'zamitnout'; klic?: string } | null>(null);
+  const [auditReason, setAuditReason] = useState('');
+  const [savingAudit, setSavingAudit] = useState(false);
 
   const { data: documents, isLoading, error } = useQuery({
     queryKey: ['documents', tenderId],
@@ -204,6 +212,11 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
     queryFn: () => getPrilohaChecklist(tenderId),
   });
 
+  const { data: balikChecklist, isLoading: balikChecklistLoading } = useQuery({
+    queryKey: ['balik-checklist', tenderId],
+    queryFn: () => getBalikChecklist(tenderId),
+  });
+
   const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -213,6 +226,7 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       await uploadAttachments(tenderId, Array.from(files));
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
       queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
     } catch (err) {
       console.error('Upload failed:', err);
       setActionError('Nahrání přílohy se nezdařilo.');
@@ -229,6 +243,7 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       await deleteAttachment(tenderId, filename);
       queryClient.invalidateQueries({ queryKey: ['attachments', tenderId] });
       queryClient.invalidateQueries({ queryKey: ['priloha-checklist', tenderId] });
+      queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
     } catch (err) {
       console.error('Delete failed:', err);
       setActionError('Smazání přílohy se nezdařilo.');
@@ -295,6 +310,31 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       setSavingException(false);
     }
   }, [exceptionItem, exceptionReason, queryClient, tenderId, toast]);
+
+  const handleBalikConfirmation = useCallback(async (klic: string) => {
+    setConfirmingBalikKey(klic);
+    try {
+      await confirmBalikItem(tenderId, klic);
+      await queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
+      toast('Pokrytí dokumentu bylo auditovaně potvrzeno.', 'success');
+    } catch (err) {
+      toast((err as Error).message, 'danger');
+    } finally {
+      setConfirmingBalikKey(null);
+    }
+  }, [queryClient, tenderId, toast]);
+
+  const handleBalikAudit = useCallback(async () => {
+    if (!auditDialog || auditReason.trim().length < 10) return;
+    setSavingAudit(true);
+    try {
+      if (auditDialog.mode === 'prevzit') await prevzitUplnost(tenderId, auditReason.trim());
+      else await zamitnoutBalikPozadavek(tenderId, auditDialog.klic!, auditReason.trim());
+      await queryClient.invalidateQueries({ queryKey: ['balik-checklist', tenderId] });
+      toast('Auditovaná korekce byla uložena.', 'success'); setAuditDialog(null); setAuditReason('');
+    } catch (err) { toast((err as Error).message, 'danger'); }
+    finally { setSavingAudit(false); }
+  }, [auditDialog, auditReason, queryClient, tenderId, toast]);
 
   if (isLoading) return <div className="py-8 text-center text-gray-500">Načítám dokumenty...</div>;
   if (error) return <div className="py-8 text-center text-gray-500">Dokumenty zatím nejsou k dispozici. Spusťte krok "Dokumenty".</div>;
@@ -469,6 +509,69 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
       )}
 
       {/* Checklist kvalifikačních příloh — odvozený z kvalifikačních požadavků AI analýzy */}
+      <Card title="Úplnost balíku vs. zadání">
+        {balikChecklistLoading ? (
+          <p className="m-0 text-sm text-gray-500">Načítám…</p>
+        ) : !balikChecklist?.podporovana_analyza ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <p>Analýza je z předchozí verze a neobsahuje seznam požadovaných dokumentů.</p>
+            {balikChecklist?.prevzeti_uplnosti && <p className="mt-1">Odpovědnost převzal/a {balikChecklist.prevzeti_uplnosti.kdo}: {balikChecklist.prevzeti_uplnosti.duvod}</p>}
+            <div className="mt-3 flex gap-2">
+              <Button variant="primary" onClick={() => { window.location.hash = `#/tender/${encodeURIComponent(tenderId)}?tab=analyza`; }}>Spustit analýzu znovu</Button>
+              <Button variant="secondary" onClick={() => setAuditDialog({ mode: 'prevzit' })}>Převzít odpovědnost za úplnost</Button>
+            </div>
+          </div>
+        ) : balikChecklist.items.length === 0 ? (
+          <p className="m-0 text-sm text-gray-500">Zadávací dokumentace nepožaduje žádné další dokumenty nabídky.</p>
+        ) : (
+          <div>
+            <p className="mb-2 text-sm font-medium text-gray-700">
+              {balikChecklist.items.filter((item) => item.status === 'pokryto' || item.potvrzeni).length}/{balikChecklist.items.length} pokryto
+            </p>
+            {balikChecklist.items.map((item) => {
+              const covered = item.status === 'pokryto' || Boolean(item.potvrzeni) || Boolean(item.zamitnuti);
+              return (
+                <div key={item.klic} className="border-b border-gray-100 py-2 last:border-b-0">
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 text-sm text-gray-900">{item.nazev}</span>
+                    <Badge tone={covered ? 'success' : item.status === 'chybi' ? 'danger' : 'warning'} size="sm">
+                      {covered ? 'Pokryto' : item.status === 'chybi' ? 'Chybí' : 'Nejisté'}
+                    </Badge>
+                    {item.status === 'nejiste' && !item.potvrzeni && (
+                      <Button
+                        variant="secondary"
+                        disabled={confirmingBalikKey === item.klic}
+                        onClick={() => handleBalikConfirmation(item.klic)}
+                      >
+                        {confirmingBalikKey === item.klic ? 'Potvrzuji…' : 'Potvrdit, že je pokryto'}
+                      </Button>
+                    )}
+                    {!item.zamitnuti && <Button variant="secondary" onClick={() => setAuditDialog({ mode: 'zamitnout', klic: item.klic })}>V ZD není požadováno</Button>}
+                  </div>
+                  {item.popis && <p className="mt-1 text-xs text-gray-500">{item.popis}</p>}
+                  {item.soubor && <p className="mt-1 text-xs text-gray-500">Soubor: {item.soubor}</p>}
+                  {item.poznamka && <p className="mt-1 text-xs text-amber-700">{item.poznamka}</p>}
+                  {item.potvrzeni_propadlo && <p className="mt-1 text-xs font-semibold text-red-700">potvrzení propadlo, dokumenty se změnily</p>}
+                  {item.zamitnuti && <p className="mt-1 text-xs text-amber-700">Operátor označil: v ZD není požadováno ({item.zamitnuti.duvod})</p>}
+                  {item.status === 'chybi' && item.povinny && (
+                    <p className="mt-1 text-xs font-semibold text-red-700">Bez tohoto dokumentu bude nabídka vyřazena.</p>
+                  )}
+                  {item.potvrzeni && (
+                    <p className="mt-1 text-xs text-gray-500">Ručně potvrdil/a {item.potvrzeni.potvrdil}.</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      {auditDialog && <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+        <p className="font-semibold">{auditDialog.mode === 'prevzit' ? 'Převzít odpovědnost za úplnost' : 'Označit požadavek jako chybný'}</p>
+        <textarea className="mt-2 w-full rounded border p-2" value={auditReason} onChange={(e) => setAuditReason(e.target.value)} placeholder="Auditní důvod (alespoň 10 znaků)" />
+        <div className="mt-2 flex gap-2"><Button variant="primary" disabled={auditReason.trim().length < 10 || savingAudit} onClick={handleBalikAudit}>Uložit</Button><Button variant="secondary" onClick={() => setAuditDialog(null)}>Zrušit</Button></div>
+      </div>}
+
       <Card title="Kvalifikační přílohy">
         {prilohaChecklistLoading ? (
           <p style={{ margin: 0, fontSize: 'var(--font-size-sm)', color: 'var(--text-tertiary)' }}>Načítám…</p>

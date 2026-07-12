@@ -10,6 +10,7 @@
  *  - zbytkové placeholdery ve vygenerovaných .docx ("doplní účastník", "______").
  */
 import { readFile, readdir, stat } from 'fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'path';
 import type { ProductMatch, PolozkaMatch } from './types.js';
 import { checkPriceSanity } from './price-sanity.js';
@@ -23,6 +24,11 @@ import {
 import { getDocManifest } from './company-store.js';
 import type { DocManifest } from './doc-slots.js';
 import { buildPrilohaChecklist, isValidKvalifikaceVyjimka, type KvalifikaceVyjimky } from './priloha-checklist.js';
+import {
+  buildBalikChecklist, isValidBalikPotvrzeni, isValidBalikZamitnuti, isValidPrevzetiUplnosti,
+  pozadavekFingerprint, type BalikPotvrzeniMap,
+  type PozadovanyDokument,
+} from './balik-uplnost.js';
 
 export interface SubmitGateResult {
   ready: boolean;
@@ -70,6 +76,67 @@ export async function computeSubmitGate(
   const warnings: string[] = [];
   let pricesUpdatedAt: string | null = null;
 
+  // Úplnost celého balíku vůči explicitním požadavkům ZD.
+  try {
+    const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+    let potvrzeni: BalikPotvrzeniMap = {};
+    try { potvrzeni = JSON.parse(await readFile(join(outputDir, 'balik-potvrzeni.json'), 'utf-8')); } catch {}
+    if (!Object.prototype.hasOwnProperty.call(analysis, 'pozadovane_dokumenty')) {
+      if (isValidPrevzetiUplnosti(potvrzeni.__cela_zakazka__)) {
+        warnings.push(`Úplnost celé zakázky převzal/a ${potvrzeni.__cela_zakazka__.kdo}: ${potvrzeni.__cela_zakazka__.duvod}.`);
+      } else {
+        problems.push('Analýza je z předchozí verze a neobsahuje seznam požadovaných dokumentů — projděte zadávací dokumentaci ručně a převezměte odpovědnost, nebo spusťte analýzu znovu.');
+      }
+    } else if (Array.isArray(analysis.pozadovane_dokumenty)) {
+      const meta = await readFile(join(outputDir, 'tender-meta.json'), 'utf-8')
+        .then((raw) => JSON.parse(raw)).catch(() => null);
+      const manifest = typeof meta?.company_id === 'string'
+        ? await (options.getCompanyManifest ?? getDocManifest)(meta.company_id).catch(() => ({ version: 1, entries: [] }))
+        : { version: 1, entries: [] };
+      const files = await readdir(outputDir);
+      const vygenerovaneSoubory = files.filter((file) =>
+        ['.docx', '.xlsx', '.pdf'].some((extension) => file.toLowerCase().endsWith(extension)));
+      const prilohyZakazky = await readdir(join(outputDir, 'prilohy')).catch(() => [] as string[]);
+      const checklist = buildBalikChecklist({
+        pozadovaneDokumenty: analysis.pozadovane_dokumenty as PozadovanyDokument[],
+        vygenerovaneSoubory,
+        prilohyZakazky,
+        firemniDoklady: manifest.entries,
+      });
+      for (const item of checklist) {
+        const zaznam = potvrzeni[item.klic];
+        if (isValidBalikZamitnuti(zaznam, item)) {
+          warnings.push(`Požadavek „${item.nazev}“ operátor zamítl: ${zaznam.duvod}.`);
+          continue;
+        }
+        if (!item.povinny || item.status === 'pokryto') continue;
+        const audit = potvrzeni[item.klic];
+        let platnePotvrzeni = false;
+        if (item.status === 'nejiste' && item.soubor && isValidBalikPotvrzeni(audit)) {
+          try {
+            const data = await readFile(join(outputDir, item.soubor));
+            const hash = createHash('sha256').update(data).digest('hex');
+            platnePotvrzeni = audit.soubor === item.soubor && audit.sha256 === hash
+              && audit.pozadavek_fingerprint === pozadavekFingerprint(item);
+          } catch {}
+        }
+        if (platnePotvrzeni && isValidBalikPotvrzeni(audit)) {
+          warnings.push(`Ruční potvrzení pokrytí dokumentu „${item.nazev}“ (${audit.potvrdil}).`);
+        } else if (item.status === 'nejiste') {
+          const propadlo = isValidBalikPotvrzeni(audit) ? ' Potvrzení propadlo, dokumenty se změnily.' : '';
+          problems.push(`Nelze spolehlivě ověřit požadovaný dokument „${item.nazev}“ — potvrďte ručně, že je pokryt.${propadlo}`);
+        } else {
+          problems.push(`Chybí povinný dokument požadovaný zadáním: ${item.nazev}.${item.poznamka ? ` ${item.poznamka}.` : ''}`);
+        }
+      }
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      problems.push(`Nelze ověřit úplnost balíku: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Požadované kvalifikační sloty jsou součástí submit-gate, nejen informativního
   // checklistu v UI. Expirovaný firemní doklad proto blokuje finalizaci fail-closed.
   try {
@@ -83,9 +150,12 @@ export async function computeSubmitGate(
         : { version: 1, entries: [] };
       let attachments: string[] = [];
       try { attachments = await readdir(join(outputDir, 'prilohy')); } catch {}
+      // Manifest sám není součástí ZIPu. Metadata firemního dokladu použijeme jen
+      // tehdy, když copy flow zanechal fyzický soubor v přílohách zakázky.
+      const packagedManifest = { ...manifest, entries: manifest.entries.filter((entry) => attachments.includes(entry.filename)) };
       let vyjimky: KvalifikaceVyjimky = {};
       try { vyjimky = JSON.parse(await readFile(join(outputDir, 'kvalifikace-vyjimky.json'), 'utf-8')); } catch {}
-      for (const item of buildPrilohaChecklist({ kvalifikace, manifest, attachments, now: options.now })) {
+      for (const item of buildPrilohaChecklist({ kvalifikace, manifest: packagedManifest, attachments, now: options.now })) {
         if (!item.povinny || (item.status !== 'chybi' && item.status !== 'po_platnosti')) continue;
         const vyjimka = vyjimky[item.slot];
         if (isValidKvalifikaceVyjimka(vyjimka)) {
