@@ -35,7 +35,8 @@ import {
   buildPrilohaChecklist, isValidKvalifikaceVyjimka, validateVyjimkaInput, type KvalifikaceVyjimky,
 } from './lib/priloha-checklist.js';
 import {
-  buildBalikChecklist, createBalikPotvrzeni, isValidBalikPotvrzeni,
+  buildBalikChecklist, createBalikPotvrzeni, isValidBalikPotvrzeni, isValidBalikZamitnuti,
+  isValidPrevzetiUplnosti, pozadavekFingerprint,
   type BalikPotvrzeniMap, type PozadovanyDokument,
 } from './lib/balik-uplnost.js';
 import { isDbAvailable, closePool } from './lib/db.js';
@@ -2617,6 +2618,7 @@ app.get('/api/tenders/:id/priloha-checklist', async (req, res) => {
     try {
       attachments = (await readdir(join(OUTPUT_DIR, id, 'prilohy'))).filter((f) => !f.startsWith('.'));
     } catch {}
+    manifest = { ...manifest, entries: manifest.entries.filter((entry) => attachments.includes(entry.filename)) };
     let vyjimky: KvalifikaceVyjimky = {};
     try { vyjimky = JSON.parse(await readFile(join(OUTPUT_DIR, id, 'kvalifikace-vyjimky.json'), 'utf-8')); } catch {}
     const items = buildPrilohaChecklist({ kvalifikace: kval, manifest, attachments }).map((item) => ({
@@ -2635,7 +2637,10 @@ async function loadBalikChecklist(id: string) {
   let analysis: any = null;
   try { analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8')); } catch {}
   if (!analysis || !Object.prototype.hasOwnProperty.call(analysis, 'pozadovane_dokumenty')) {
-    return { items: [], analyza_hotova: !!analysis, podporovana_analyza: false };
+    let audits: BalikPotvrzeniMap = {};
+    try { audits = JSON.parse(await readFile(join(outputDir, 'balik-potvrzeni.json'), 'utf-8')); } catch {}
+    return { items: [], analyza_hotova: !!analysis, podporovana_analyza: false,
+      prevzeti_uplnosti: isValidPrevzetiUplnosti(audits.__cela_zakazka__) ? audits.__cela_zakazka__ : undefined };
   }
   let companyId: string | null = null;
   try {
@@ -2654,11 +2659,22 @@ async function loadBalikChecklist(id: string) {
     vygenerovaneSoubory: generated,
     prilohyZakazky: attachments,
     firemniDoklady: manifest.entries,
-  }).map((item) => ({
-    ...item,
-    potvrzeni: isValidBalikPotvrzeni(potvrzeni[item.klic]) ? potvrzeni[item.klic] : undefined,
+  });
+  const resolved = await Promise.all(items.map(async (item) => {
+    const audit = potvrzeni[item.klic];
+    const zamitnuti = isValidBalikZamitnuti(audit, item) ? audit : undefined;
+    let platne = false;
+    if (item.soubor && isValidBalikPotvrzeni(audit)) {
+      try {
+        const hash = sha256Hex(await readFile(join(outputDir, item.soubor)));
+        platne = audit.soubor === item.soubor && audit.sha256 === hash
+          && audit.pozadavek_fingerprint === pozadavekFingerprint(item);
+      } catch {}
+    }
+    return { ...item, potvrzeni: platne && isValidBalikPotvrzeni(audit) ? audit : undefined,
+      potvrzeni_propadlo: !platne && isValidBalikPotvrzeni(audit), zamitnuti };
   }));
-  return { items, analyza_hotova: true, podporovana_analyza: true };
+  return { items: resolved, analyza_hotova: true, podporovana_analyza: true };
 }
 
 // Checklist všech dokumentů požadovaných ZD; historická analýza vrací prázdný stav.
@@ -2684,12 +2700,50 @@ app.post('/api/tenders/:id/balik/potvrdit', requireJwt, requireRole('admin', 'an
     const path = join(OUTPUT_DIR, id, 'balik-potvrzeni.json');
     let confirmations: BalikPotvrzeniMap = {};
     try { confirmations = JSON.parse(await readFile(path, 'utf-8')); } catch {}
-    confirmations[klic] = createBalikPotvrzeni((req as any).user);
+    if (!item.soubor) return res.status(400).json({ error: 'missing_file' });
+    const hash = sha256Hex(await readFile(join(OUTPUT_DIR, id, item.soubor)));
+    confirmations[klic] = createBalikPotvrzeni((req as any).user, item.soubor, hash, item);
     await writeFile(path, JSON.stringify(confirmations, null, 2), 'utf-8');
     res.json({ success: true, klic, potvrzeni: confirmations[klic] });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+// Historickou analýzu lze odblokovat jen výslovným, auditovaným převzetím celé zakázky.
+app.post('/api/tenders/:id/balik/prevzit-uplnost', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const id = String(req.params.id); const duvod = typeof req.body?.duvod === 'string' ? req.body.duvod.trim() : '';
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (duvod.length < 10) return res.status(400).json({ error: 'duvod_too_short', reason: 'Důvod musí mít alespoň 10 znaků.' });
+  try {
+    const outputDir = join(OUTPUT_DIR, id);
+    const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+    if (Object.prototype.hasOwnProperty.call(analysis, 'pozadovane_dokumenty')) return res.status(400).json({ error: 'current_analysis' });
+    const path = join(outputDir, 'balik-potvrzeni.json'); let audits: BalikPotvrzeniMap = {};
+    try { audits = JSON.parse(await readFile(path, 'utf-8')); } catch {}
+    const actor = (req as any).user; const kdo = actor?.name || actor?.email || actor?.sub;
+    audits.__cela_zakazka__ = { prevzato: true, duvod, kdo, at: new Date().toISOString() };
+    await writeFile(path, JSON.stringify(audits, null, 2), 'utf-8');
+    res.json({ success: true, prevzeti: audits.__cela_zakazka__ });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+// Lidská korekce falešně pozitivního AI požadavku zůstává viditelná a je vázaná na fingerprint analýzy.
+app.post('/api/tenders/:id/balik/zamitnout-pozadavek', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const id = String(req.params.id); const klic = typeof req.body?.klic === 'string' ? req.body.klic : '';
+  const duvod = typeof req.body?.duvod === 'string' ? req.body.duvod.trim() : '';
+  if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (duvod.length < 10) return res.status(400).json({ error: 'duvod_too_short', reason: 'Důvod musí mít alespoň 10 znaků.' });
+  try {
+    const checklist = await loadBalikChecklist(id); const item = checklist.items.find((x) => x.klic === klic);
+    if (!item) return res.status(400).json({ error: 'invalid_item' });
+    const path = join(OUTPUT_DIR, id, 'balik-potvrzeni.json'); let audits: BalikPotvrzeniMap = {};
+    try { audits = JSON.parse(await readFile(path, 'utf-8')); } catch {}
+    const actor = (req as any).user; const kdo = actor?.name || actor?.email || actor?.sub;
+    audits[klic] = { zamitnuto: true, duvod, kdo, at: new Date().toISOString(), pozadavek_fingerprint: pozadavekFingerprint(item) };
+    await writeFile(path, JSON.stringify(audits, null, 2), 'utf-8');
+    res.json({ success: true, zamitnuti: audits[klic] });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
 });
 
 // Auditovaná výjimka pouze pro kvalifikační gate. Identita schvalovatele se vždy
