@@ -11,7 +11,9 @@
     "generate": "tsx src/generate-bid.ts",
     "validate": "tsx src/validate-bid.ts",
     "full-flow": "tsx src/full-flow.ts",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "eval": "node --import tsx src/eval-match.ts",
+    "build-golden-set": "node --import tsx src/build-golden-set.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
