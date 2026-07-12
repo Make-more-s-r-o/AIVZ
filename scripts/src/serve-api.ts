@@ -1901,6 +1901,16 @@ app.get('/api/tenders/:id/generation-meta', async (req, res) => {
   }
 });
 
+// Staré zakázky report nemají; prázdná odpověď je záměrná zpětná kompatibilita.
+app.get('/api/tenders/:id/fill-report', async (req, res) => {
+  try {
+    const data = await readFile(join(OUTPUT_DIR, req.params.id, 'fill-report.json'), 'utf-8');
+    res.json(JSON.parse(data));
+  } catch {
+    res.json(null);
+  }
+});
+
 // GET /api/tenders/:id/field-validation - all field validation results
 app.get('/api/tenders/:id/field-validation', async (req, res) => {
   try {

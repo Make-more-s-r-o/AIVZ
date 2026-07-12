@@ -11,6 +11,7 @@ import {
   getBundleZipUrl,
   getGenerationMeta,
   getFieldValidation,
+  getFillReport,
   setDocumentMode,
   finalizeTender,
   getPrilohaChecklist,
@@ -204,6 +205,12 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
   const { data: fieldValidation } = useQuery({
     queryKey: ['field-validation', tenderId],
     queryFn: () => getFieldValidation(tenderId),
+    retry: false,
+  });
+
+  const { data: fillReport } = useQuery({
+    queryKey: ['fill-report', tenderId],
+    queryFn: () => getFillReport(tenderId),
     retry: false,
   });
 
@@ -436,6 +443,8 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
               const validation = validationByDoc.get(filename);
               const mode = meta?.mode;
               const modeBadge = mode ? MODE_BADGES[mode] : null;
+              const fill = fillReport?.dokumenty.find((item) => item.dokument === filename);
+              const requiredMissing = fill?.nevyplnene_sloty.filter((slot) => slot.povinny) ?? [];
 
               return (
                 <div
@@ -458,6 +467,11 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
                             </span>
                           )}
                           {validation && <ConfidenceBadge confidence={validation.confidence} />}
+                          {fill && (
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${requiredMissing.length ? 'bg-red-100 text-red-800' : fill.nevyplneno ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800'}`}>
+                              Vyplněno {fill.vyplneno}/{fill.slotu_celkem} polí
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-gray-500 flex items-center gap-2">
                           {filename}
@@ -501,6 +515,14 @@ export default function DocumentList({ tenderId, stale }: DocumentListProps) {
                   </div>
                   {/* Validation checklist (expandable) */}
                   {validation && <ValidationChecklist result={validation} />}
+                  {requiredMissing.length > 0 && (
+                    <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                      <strong>Nevyplněná povinná pole:</strong>
+                      <ul className="mb-0 mt-1 list-disc pl-5">
+                        {requiredMissing.map((slot, index) => <li key={`${slot.klic}-${index}`}><strong>{slot.klic}</strong>: {slot.kontext}</li>)}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               );
             })}

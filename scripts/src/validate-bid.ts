@@ -341,10 +341,11 @@ Odpověz ve formátu:
     console.log(`\n--- Submit gate ---`);
     if (gate.warnings.length) {
       report.checks.push({
-        kategorie: 'cena',
-        kontrola: 'Price sanity varování',
+        kategorie: 'kompletnost',
+        kontrola: 'Neblokující varování submit-gate',
         status: 'warning',
         detail: gate.warnings.join(' | '),
+        zdroj: 'deterministic',
       });
       for (const warning of gate.warnings) report.doporuceni.push(warning);
       console.log(`  Varování:`);
