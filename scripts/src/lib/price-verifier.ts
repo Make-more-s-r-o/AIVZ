@@ -718,7 +718,7 @@ function verificationFromCache(rows: WebFindingRow[], input: VerifyInput): Overe
       poznamka: 'Historický nález z dřívějšího webového ověření.',
       z_cache: true,
       cache_stari_dnu: age,
-      ...(age > 30 ? { orientacni: true } : {}),
+      ...(age > 30 || row.cache_match === 'nazev' ? { orientacni: true } : {}),
     }];
   }).sort((a, b) => sourceGrossPrice(a) - sourceGrossPrice(b)).slice(0, 3);
   if (sources.length === 0) return null;

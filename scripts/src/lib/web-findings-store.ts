@@ -18,6 +18,7 @@ export interface WebFindingInput {
   katalogove_cislo?: string | null;
   vyrobce?: string | null;
   model?: string | null;
+  nazev_polozky?: string | null;
 }
 
 export interface WebFindingRow {
@@ -36,6 +37,9 @@ export interface WebFindingRow {
   katalogove_cislo: string | null;
   vyrobce: string | null;
   model: string | null;
+  nazev_polozky?: string | null;
+  /** Pouze runtime metadata; není fyzickým sloupcem tabulky. */
+  cache_match?: 'katalog' | 'model' | 'nazev';
 }
 
 export interface CachedSourceIdentity {
@@ -47,11 +51,21 @@ export interface CachedSourceIdentity {
 
 const FINDING_COLUMNS = `id, tender_id, polozka_index, polozka_nazev, produkt, dodavatel, url,
   cena_bez_dph::float8 AS cena_bez_dph, cena_s_dph::float8 AS cena_s_dph,
-  dostupnost, zdroj, found_at::text AS found_at, katalogove_cislo, vyrobce, model`;
+  dostupnost, zdroj, found_at::text AS found_at, katalogove_cislo, vyrobce, model, nazev_polozky`;
 
 /** Normalizace identity shodná pro SQL lookup i testovatelné porovnání. */
 export function normalizeFindingIdentity(value: string | null | undefined): string {
   return (value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+/** Konzervativní normalizace názvu: zachová modelová čísla uvnitř názvu. */
+export function normalizeFindingItemName(value: string | null | undefined): string {
+  return normalizeFindingIdentity(value)
+    .replace(/\s*\(\s*mnozstvi\s*:\s*\d+(?:[.,]\d+)?\s*(?:ks|kus(?:u|y)?|bal(?:eni)?|sada|sad|m|mm|cm|kg|g|l|ml)\s*\)\s*$/i, '')
+    .replace(/\s*[–—-]?\s*\d+(?:[.,]\d+)?\s*(?:ks|kus(?:u|y)?|bal(?:eni)?|sad(?:a|y)?|m|cm|kg|g|l|ml)\s*$/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Čistá varianta výběru pro lokální práci a testy pravidel priority/stáří. */
@@ -64,16 +78,20 @@ export function selectCachedSources(
   const katalog = normalizeFindingIdentity(identity.katalogove_cislo);
   const vyrobce = normalizeFindingIdentity(identity.vyrobce);
   const model = normalizeFindingIdentity(identity.model);
-  const nazev = normalizeFindingIdentity(identity.nazev_polozky);
-  const matches = (row: WebFindingRow): boolean => katalog
-    ? normalizeFindingIdentity(row.katalogove_cislo) === katalog
-    : vyrobce && model
-      ? normalizeFindingIdentity(row.vyrobce) === vyrobce && normalizeFindingIdentity(row.model) === model
-      : Boolean(nazev) && normalizeFindingIdentity(row.polozka_nazev) === nazev;
-  return rows
-    .filter((row) => matches(row) && now.getTime() - Date.parse(row.found_at) <= maxStariDnu * 86_400_000)
+  const nazev = normalizeFindingItemName(identity.nazev_polozky);
+  const fresh = rows.filter((row) => now.getTime() - Date.parse(row.found_at) <= maxStariDnu * 86_400_000);
+  const tiers: Array<{ type: NonNullable<WebFindingRow['cache_match']>; enabled: boolean; matches: (row: WebFindingRow) => boolean }> = [
+    { type: 'katalog', enabled: Boolean(katalog), matches: (row) => normalizeFindingIdentity(row.katalogove_cislo) === katalog },
+    { type: 'model', enabled: Boolean(vyrobce && model), matches: (row) => normalizeFindingIdentity(row.vyrobce) === vyrobce && normalizeFindingIdentity(row.model) === model },
+    { type: 'nazev', enabled: Boolean(nazev), matches: (row) => normalizeFindingItemName(row.nazev_polozky ?? row.polozka_nazev) === nazev },
+  ];
+  const tier = tiers.find((candidate) => candidate.enabled && fresh.some(candidate.matches));
+  if (!tier) return [];
+  return fresh
+    .filter(tier.matches)
     .sort((a, b) => (a.cena_s_dph ?? a.cena_bez_dph ?? Infinity) - (b.cena_s_dph ?? b.cena_bez_dph ?? Infinity))
-    .slice(0, 3);
+    .slice(0, 3)
+    .map((row) => ({ ...row, cache_match: tier.type }));
 }
 
 /**
@@ -88,8 +106,8 @@ export async function upsertFindings(findings: WebFindingInput[]): Promise<numbe
     await query(
       `INSERT INTO warehouse_web_findings
          (tender_id, polozka_index, polozka_nazev, produkt, dodavatel, url,
-          cena_bez_dph, cena_s_dph, dostupnost, zdroj, katalogove_cislo, vyrobce, model)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          cena_bez_dph, cena_s_dph, dostupnost, zdroj, katalogove_cislo, vyrobce, model, nazev_polozky)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (tender_id, polozka_index, url) DO UPDATE SET
          polozka_nazev = EXCLUDED.polozka_nazev,
          produkt = EXCLUDED.produkt,
@@ -101,6 +119,7 @@ export async function upsertFindings(findings: WebFindingInput[]): Promise<numbe
          katalogove_cislo = EXCLUDED.katalogove_cislo,
          vyrobce = EXCLUDED.vyrobce,
          model = EXCLUDED.model,
+         nazev_polozky = EXCLUDED.nazev_polozky,
          found_at = NOW()`,
       [
         finding.tender_id,
@@ -116,6 +135,7 @@ export async function upsertFindings(findings: WebFindingInput[]): Promise<numbe
         finding.katalogove_cislo ?? null,
         finding.vyrobce ?? null,
         finding.model ?? null,
+        finding.nazev_polozky ?? (normalizeFindingItemName(finding.polozka_nazev) || null),
       ],
     );
     stored++;
@@ -135,35 +155,31 @@ export async function findCachedSources(
   const katalog = normalizeFindingIdentity(identity.katalogove_cislo);
   const vyrobce = normalizeFindingIdentity(identity.vyrobce);
   const model = normalizeFindingIdentity(identity.model);
-  const nazev = normalizeFindingIdentity(identity.nazev_polozky);
+  const nazev = normalizeFindingItemName(identity.nazev_polozky);
   if (!katalog && !(vyrobce && model) && !nazev) return [];
   const normalizedSql = (column: string) =>
     `LOWER(TRANSLATE(BTRIM(${column}), 'áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ', 'acdeeinorstuuyzACDEEINORSTUUYZ'))`;
 
-  let condition: string;
-  let params: unknown[];
-  if (katalog) {
-    condition = `${normalizedSql('katalogove_cislo')} = $1`;
-    params = [katalog, maxStariDnu];
-  } else if (vyrobce && model) {
-    condition = `${normalizedSql('vyrobce')} = $1 AND ${normalizedSql('model')} = $2`;
-    params = [vyrobce, model, maxStariDnu];
-  } else {
-    condition = `${normalizedSql('polozka_nazev')} = $1`;
-    params = [nazev, maxStariDnu];
-  }
-  const ageParam = params.length;
   try {
-    const result = await query<WebFindingRow>(
-      `SELECT ${FINDING_COLUMNS}
-       FROM warehouse_web_findings
-       WHERE ${condition}
-         AND found_at >= NOW() - ($${ageParam}::double precision * INTERVAL '1 day')
-       ORDER BY cena_s_dph NULLS LAST, cena_bez_dph NULLS LAST, found_at DESC
-       LIMIT 3`,
-      params,
-    );
-    return result.rows;
+    const tiers = [
+      katalog ? { type: 'katalog' as const, condition: `${normalizedSql('katalogove_cislo')} = $1`, values: [katalog] } : null,
+      vyrobce && model ? { type: 'model' as const, condition: `${normalizedSql('vyrobce')} = $1 AND ${normalizedSql('model')} = $2`, values: [vyrobce, model] } : null,
+      nazev ? { type: 'nazev' as const, condition: 'nazev_polozky = $1', values: [nazev] } : null,
+    ].filter((tier): tier is NonNullable<typeof tier> => tier !== null);
+    for (const tier of tiers) {
+      const params: unknown[] = [...tier.values, maxStariDnu];
+      const result = await query<WebFindingRow>(
+        `SELECT ${FINDING_COLUMNS}
+         FROM warehouse_web_findings
+         WHERE ${tier.condition}
+           AND found_at >= NOW() - ($${params.length}::double precision * INTERVAL '1 day')
+         ORDER BY cena_s_dph NULLS LAST, cena_bez_dph NULLS LAST, found_at DESC
+         LIMIT 3`,
+        params,
+      );
+      if (result.rows.length > 0) return result.rows.map((row) => ({ ...row, cache_match: tier.type }));
+    }
+    return [];
   } catch {
     // Chybějící DB nebo migrace nesmí zablokovat placenou cestu.
     return [];
