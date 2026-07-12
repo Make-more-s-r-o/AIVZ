@@ -1,5 +1,6 @@
 import type { PolozkaMatch, PriceSanityFlag, ProductMatch } from './types.js';
 import { compareAiVsMarket, informationalCostForQuantity } from './price-reality.js';
+import { isPlaceholderProductName } from './price-prefill.js';
 
 // Položka nad 40 % celkové nabídky vyžaduje kontrolu u nabídek s více než třemi položkami.
 export const BID_SHARE_THRESHOLD = 0.40;
@@ -233,6 +234,19 @@ export function checkPriceSanity(
     }
 
     const selected = getSelectedCandidate(item);
+    if (
+      item.typ === 'produkt'
+      && selected
+      && isPlaceholderProductName(selected.model)
+      && isPlaceholderProductName(selected.katalogove_cislo)
+    ) {
+      addFinding({
+        polozka_index: item.polozka_index,
+        level: 'warn',
+        code: 'genericky_kandidat',
+        message: 'Kandidát není jednoznačně identifikován — před potvrzením doplňte cenu z ověřeného zdroje nebo ručně.',
+      });
+    }
     if (selected?.cena_spolehlivost === 'nizka' && share > LOW_CONFIDENCE_BIG_THRESHOLD) {
       addFinding({
         polozka_index: item.polozka_index,

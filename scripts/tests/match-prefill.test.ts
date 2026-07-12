@@ -24,6 +24,7 @@ function makeCandidate(overrides: Partial<PrefillCandidate> = {}): PrefillCandid
   return {
     vyrobce: 'Makita',
     model: 'B-54081',
+    katalogove_cislo: 'B-54081',
     popis: 'Rázová redukce 3/4" na 1/2"',
     cena_bez_dph: 200,
     cena_s_dph: 242,
@@ -36,6 +37,7 @@ function makeItem(overrides: Partial<PrefillItem> = {}): PrefillItem {
   return {
     polozka_nazev: 'Rázová redukce 3/4"×1/2"',
     polozka_index: 0,
+    typ: 'produkt',
     mnozstvi: 1,
     kandidati: [makeCandidate()],
     vybrany_index: 0,
@@ -114,6 +116,47 @@ try {
     ok('(c) normální kandidát → cena s defaultMarze, potvrzeno=false');
   }
 
+  // (c2) Popis sám o sobě není identita produktu: bez modelu i katalogového čísla
+  // nesmí kladný AI odhad vstoupit do závazné nabídky.
+  {
+    const item = makeItem({
+      kandidati: [makeCandidate({ model: '', katalogove_cislo: '', popis: 'Obecný vhodný výrobek', cena_bez_dph: 12500 })],
+    });
+    applyPricePrefill([item], 10);
+    const cu = item.cenova_uprava as Record<string, unknown>;
+    assert.equal(cu.nakupni_cena_bez_dph, 0);
+    assert.equal(cu.nakupni_cena_s_dph, 0);
+    assert.equal(cu.nabidkova_cena_bez_dph, 0);
+    assert.equal(cu.nabidkova_cena_s_dph, 0);
+    assert.equal(cu.potvrzeno, false);
+    assert.equal(
+      cu.poznamka,
+      'Kandidát není jednoznačně identifikován (chybí model i katalogové číslo) — nacenění vyžaduje ověřený zdroj nebo ruční cenu.',
+    );
+    const flags = checkPriceSanity([item as never]);
+    assert.ok(flags.some((flag) => flag.code === 'zero_price' && flag.level === 'hard'));
+    const generic = flags.find((flag) => flag.code === 'genericky_kandidat');
+    assert.equal(generic?.level, 'warn');
+    assert.match(generic?.message ?? '', /doplňte cenu z ověřeného zdroje nebo ručně/);
+    ok('(c2) produkt bez modelu i katalogového čísla → nulový prefill + srozumitelný HARD/WARN');
+  }
+
+  // Služby mají záměrně zástupného výrobce a katalogové číslo nepotřebují.
+  {
+    const item = makeItem({
+      typ: 'sluzba',
+      polozka_nazev: 'Pravidelný servis zařízení',
+      kandidati: [makeCandidate({ vyrobce: '-', model: 'Pravidelný servis zařízení', katalogove_cislo: '', popis: '', cena_bez_dph: 1000 })],
+    });
+    applyPricePrefill([item], 10);
+    const cu = item.cenova_uprava as Record<string, unknown>;
+    assert.equal(cu.nakupni_cena_bez_dph, 1000);
+    assert.equal(cu.nabidkova_cena_bez_dph, 1100);
+    assert.equal(cu.potvrzeno, false);
+    assert.equal(checkPriceSanity([item as never]).some((flag) => flag.code === 'genericky_kandidat'), false);
+    ok('(c3) služba s modelem ve tvaru názvu služby → pravidlo M1 se neuplatní');
+  }
+
   // (d) sada-mismatch: položka = jednotlivý díl, kandidát = sada → nizka spolehlivost + varovná poznámka
   {
     warnings.length = 0;
@@ -189,6 +232,16 @@ try {
     applyPricePrefill([item], 10);
     assert.equal(item.cenova_uprava, existing);
     ok('(h) existující cenova_uprava zůstává nedotčená');
+  }
+
+  // Identifikační penalizace je money-path invariant, nezávislý na cenovém odhadu.
+  {
+    const withoutModel = makeItem({ kandidati: [makeCandidate({ model: 'N/A', cena_spolehlivost: 'vysoka' })] });
+    const withoutCatalogue = makeItem({ kandidati: [makeCandidate({ katalogove_cislo: '', cena_spolehlivost: 'vysoka' })] });
+    applyPricePrefill([withoutModel, withoutCatalogue], 10);
+    assert.equal(withoutModel.kandidati![0].cena_spolehlivost, 'nizka');
+    assert.equal(withoutCatalogue.kandidati![0].cena_spolehlivost, 'stredni');
+    ok('(i) bez modelu → nizka; bez katalogového čísla → nejvýše stredni');
   }
 } finally {
   console.warn = originalWarn;

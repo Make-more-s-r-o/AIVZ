@@ -196,6 +196,26 @@ test('low_confidence_big: nízká spolehlivost nad 10 % bidu je WARN', () => {
   assert.equal(findings.some((finding) => finding.level === 'warn' && finding.code === 'low_confidence_big'), true);
 });
 
+test('genericky_kandidat: produkt bez modelu i katalogového čísla vytvoří WARN', () => {
+  const generic = item(0, 121);
+  generic.kandidati[0]!.model = '';
+  const findings = checkPriceSanity([generic]);
+  const warning = findings.find((finding) => finding.code === 'genericky_kandidat');
+  assert.equal(warning?.level, 'warn');
+  assert.equal(warning?.message, 'Kandidát není jednoznačně identifikován — před potvrzením doplňte cenu z ověřeného zdroje nebo ručně.');
+});
+
+test('genericky_kandidat nevznikne s modelem, katalogovým číslem ani pro službu', () => {
+  const withModel = item(0, 121);
+  const withCatalogue = item(1, 121);
+  withCatalogue.kandidati[0]!.model = '';
+  withCatalogue.kandidati[0]!.katalogove_cislo = 'ABC-1';
+  const service = item(2, 121);
+  service.typ = 'sluzba';
+  service.kandidati[0]!.model = '';
+  assert.equal(checkPriceSanity([withModel, withCatalogue, service]).some((finding) => finding.code === 'genericky_kandidat'), false);
+});
+
 test('outlier_vs_batch: u osmi položek odhalí cenu nad 50× mediánem ostatních', () => {
   const items = Array.from({ length: 7 }, (_, index) => item(index, 100));
   items.push(item(7, 5_001));

@@ -132,6 +132,8 @@ export const ProductCandidateSchema = z.object({
   cena_bez_dph: aiNumber(),
   cena_s_dph: aiNumber(),
   cena_spolehlivost: z.enum(['vysoka', 'stredni', 'nizka']).default('nizka'),
+  // Volitelné kvůli zpětné kompatibilitě historických product-match souborů.
+  identifikace_jistota: z.enum(['vysoka', 'stredni', 'nizka']).optional(),
   cena_komentar: z.string().optional(),
   dodavatele: z.array(z.string()),
   dostupnost: z.string(),
@@ -196,6 +198,7 @@ export const PriceSanityFlagSchema = z.object({
     'extreme_outlier',
     'cena_pod_nakupem',
     'orientacni_cena_nad_nabidkou',
+    'genericky_kandidat',
     // Historické soubory zůstanou čitelné; při parse se starý název přepíše.
     'ai_cena_pod_trhem',
   ]).transform((code) => code === 'ai_cena_pod_trhem' ? 'cena_pod_nakupem' as const : code),

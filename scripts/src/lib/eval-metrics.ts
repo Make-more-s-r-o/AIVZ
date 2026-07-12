@@ -25,6 +25,7 @@ export interface EvalItem {
   kandidati?: EvalCandidate[];
   vybrany_index?: number;
   overeni_ceny?: {
+    overeno_at?: string;
     stav?: string;
     zdroj_url?: string;
     web_cena_bez_dph?: number;
@@ -39,6 +40,7 @@ export interface EvalMetrics {
   katalogove_cislo_pct: number | null;
   genericky_kandidat_pct: number | null;
   hit_rate_pct: number | null;
+  pokryti_verify_pct: number | null;
   cenovych_porovnani: number;
   mape_pct: number | null;
   podil_pod_trhem_pct: number | null;
@@ -49,7 +51,30 @@ export interface EvalMetrics {
   shoda_ceny: number;
 }
 
+export const METRICS_VERSION = 2;
+
+export type EvalMetricsDelta = Partial<Record<keyof EvalMetrics, number>>;
+
 const round = (value: number): number => Math.round(value * 100) / 100;
+
+/** Delta je dostupná jen pro metriky číselné v obou reportech; podporuje i staré reporty. */
+export function calculateMetricsDelta(
+  current: EvalMetrics,
+  previous: Partial<EvalMetrics>,
+  currentMetricsVersion: number = METRICS_VERSION,
+  previousMetricsVersion?: number,
+): EvalMetricsDelta {
+  const delta: EvalMetricsDelta = {};
+  for (const key of Object.keys(current) as Array<keyof EvalMetrics>) {
+    if (key === 'hit_rate_pct' && currentMetricsVersion !== previousMetricsVersion) continue;
+    const currentValue = current[key];
+    const previousValue = previous[key];
+    if (typeof currentValue === 'number' && typeof previousValue === 'number') {
+      delta[key] = round(currentValue - previousValue);
+    }
+  }
+  return delta;
+}
 
 /** Placeholdery nejsou smysluplná identifikace výrobku. */
 export function meaningful(value: unknown): boolean {
@@ -95,13 +120,17 @@ export function calculateEvalMetrics(items: EvalItem[], golden: GoldenItem[]): E
 
   const sorted = [...errors].sort((a, b) => a - b);
   const count = errors.length;
+  const verifiedItems = items.filter((item) => meaningful(item.overeni_ceny?.overeno_at));
   return {
     pocet_polozek: items.length,
     pocet_kandidatu: candidates.length,
     identifikace_pct: candidates.length ? round(identified / candidates.length * 100) : null,
     katalogove_cislo_pct: candidates.length ? round(catalogue / candidates.length * 100) : null,
     genericky_kandidat_pct: candidates.length ? round(generic / candidates.length * 100) : null,
-    hit_rate_pct: items.length ? round(items.filter(hasNonOrientationalSource).length / items.length * 100) : null,
+    hit_rate_pct: verifiedItems.length
+      ? round(verifiedItems.filter(hasNonOrientationalSource).length / verifiedItems.length * 100)
+      : null,
+    pokryti_verify_pct: items.length ? round(verifiedItems.length / items.length * 100) : null,
     cenovych_porovnani: count,
     mape_pct: count ? round(errors.reduce((sum, error) => sum + error, 0) / count * 100) : null,
     podil_pod_trhem_pct: count ? round(below / count * 100) : null,

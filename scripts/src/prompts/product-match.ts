@@ -18,6 +18,7 @@ Pro každý produkt uveď:
 - Spolehlivost cenového odhadu (viz níže)
 - Zdroj cenového odhadu ("zdroj_ceny") — na čem je cena založená (katalogová cena výrobce, odhad z distribuce, apod.)
 - Katalogové číslo ("katalogove_cislo") — přesné katalogové/objednací číslo výrobce (např. "BL-P001", "40B0S5N100", "DERA-180-W"). Důležité pro ověření produktu.
+- Jistotu identifikace ("identifikace_jistota") — "vysoka" / "stredni" / "nizka" podle toho, jak jistý je přesný model a katalogové číslo.
 - Dostupné dodavatele v ČR
 - Dostupnost (skladem / na objednávku / dodací lhůta)
 
@@ -33,6 +34,12 @@ KDYŽ NENAJDEŠ REÁLNÝ PRODUKT:
 - Nevymýšlej náhradu jiného rozsahu ani neodhaduj cenu.
 - Vrať kandidáta s "zadna_shoda": true, "cena_bez_dph": 0, "cena_s_dph": 0, "cena_spolehlivost": "nizka" a v "popis" stručně uveď, co jsi hledal a proč shoda chybí.
 - Takovou položku nacení operátor ručně.
+
+POVINNÁ IDENTIFIKACE KANDIDÁTA:
+- Každý kandidát musí obsahovat pole "vyrobce", "model" a "katalogove_cislo". Neznámou hodnotu ponech jako prázdný řetězec; nikdy ji nedoplňuj odhadem.
+- Katalogové/objednací číslo uveď JEN pokud si jím jsi jistý. NIKDY ho nevymýšlej. Když ho neznáš, nech prázdné a nastav cena_spolehlivost: nizka.
+- NIKDY nekombinuj model s parametry, které k němu nepatří (např. serverové šasi s nekompatibilním procesorem, brusný disk v provedení, které výrobce nevyrábí). Pokud si nejsi jistý existencí PŘESNÉ varianty, popiš raději generický produkt dle specifikace a nastav zadna_shoda nebo nizkou spolehlivost.
+- U komoditního zboží (brusivo, spojovací materiál, pásky, kotouče) je lepší uvést běžně dostupný typ dle parametrů než vymyslet konkrétní model.
 
 KRITICKÉ PRAVIDLO PRO PŘESNÉ PARAMETRY:
 - Pokud požadavek uvádí KONKRÉTNÍ hodnotu (např. "DDR5 5600 MHz", "PCIe Gen4 NVMe", "min. 16GB"), vybraný produkt MUSÍ mít PŘESNĚ tuto nebo vyšší hodnotu
@@ -106,6 +113,7 @@ Navrhni ${candidateCount} konkrétní produkty ve formátu:
       "cena_bez_dph": 150000,
       "cena_s_dph": 181500,
       "cena_spolehlivost": "stredni",
+      "identifikace_jistota": "vysoka",
       "cena_komentar": "Odhad na základě ..., může se lišit ±30%",
       "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
       "katalogove_cislo": "ABC-12345",
@@ -158,6 +166,7 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
           "cena_bez_dph": 150000,
           "cena_s_dph": 181500,
           "cena_spolehlivost": "stredni",
+          "identifikace_jistota": "vysoka",
           "cena_komentar": "Odhad na základě ...",
           "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
           "katalogove_cislo": "ABC-12345",
