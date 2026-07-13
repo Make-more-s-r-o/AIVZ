@@ -153,6 +153,7 @@ export interface RunAllStatus {
   failedStep?: StepName;
   error?: string;
   initiator?: 'monitoring' | 'operator';
+  stepDurationsMs?: Partial<Record<StepName, number>>;
 }
 
 export interface JobStatus {
@@ -168,6 +169,7 @@ export interface JobStatus {
   currentStep?: StepName;
   failedStep?: StepName;
   initiator?: 'monitoring' | 'operator';
+  stepDurationsMs?: Partial<Record<StepName, number>>;
   logs: string[];
   totalLogLines: number;
 }

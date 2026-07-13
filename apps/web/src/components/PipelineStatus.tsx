@@ -62,6 +62,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
   const [budgetPaused, setBudgetPaused] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [jobError, setJobError] = useState<string | null>(null);
+  const [stepDurationsMs, setStepDurationsMs] = useState<Partial<Record<StepName, number>>>({});
   const [showLogs, setShowLogs] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -92,6 +93,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
     if (observedRunAllRef.current === observationKey) return;
     observedRunAllRef.current = observationKey;
     if (runAll.status === 'queued' || runAll.status === 'running') {
+      setStepDurationsMs(runAll.stepDurationsMs ?? {});
       setWaitingApproval(null);
       setBudgetPaused(null);
       setActiveJobId(runAll.jobId);
@@ -102,6 +104,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
       return;
     }
     if (runAll.status === 'waiting_approval') {
+      setStepDurationsMs(runAll.stepDurationsMs ?? {});
       // Pipeline pauznutá na potvrzení cen — bez spinneru, žlutý stav s odkazem na Ocenění.
       setActiveJobId(null);
       setActiveStep(null);
@@ -112,6 +115,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
       return;
     }
     if (runAll.status === 'budget_paused') {
+      setStepDurationsMs(runAll.stepDurationsMs ?? {});
       setActiveJobId(null);
       setActiveStep(null);
       activeStepRef.current = null;
@@ -125,7 +129,10 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
       setJobError(runAll.error || (runAll.status === 'interrupted'
         ? 'Pipeline byla přerušena restartem serveru.'
         : 'Neznámá chyba'));
+      setStepDurationsMs(runAll.stepDurationsMs ?? {});
+      return;
     }
+    if (runAll.status === 'done') setStepDurationsMs(runAll.stepDurationsMs ?? {});
   }, [runAll]);
 
   // Poll job status when we have an active job
@@ -145,6 +152,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
           setActiveStep(job.currentStep);
           activeStepRef.current = job.currentStep;
         }
+        if (job.stepDurationsMs) setStepDurationsMs(job.stepDurationsMs);
 
         if (job.status === 'done') {
           clearInterval(interval);
@@ -329,6 +337,11 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
                     <span className="text-[9px] text-gray-400">{cost.toFixed(1)} Kč</span>
                   ) : null;
                 })()}
+                {runAll?.status === 'done' && stepDurationsMs[step.key] !== undefined && (
+                  <span className="text-[9px] tabular-nums text-gray-400">
+                    {Math.round(stepDurationsMs[step.key]! / 1000)} s
+                  </span>
+                )}
               </div>
               {i < STEPS.length - 1 && (
                 <div

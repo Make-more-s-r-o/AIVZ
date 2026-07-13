@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,10 @@ import {
   ApprovalRequiredError,
   advanceRunAllChain,
   claimWaitingApproval,
+  getPipelineStepDurationsMs,
   loadPipelineJobs,
+  markPipelineStepFinished,
+  markPipelineStepStarted,
   savePipelineJobs,
   selectJobsToStart,
   restoreWaitingApproval,
@@ -21,6 +24,57 @@ test('resume claim: waiting_approval lze synchronně rezervovat jen jednou', () 
   assert.equal(claimWaitingApproval(parent), true);
   assert.equal(parent.status, 'running');
   assert.equal(claimWaitingApproval(parent), false);
+});
+
+test('timestampy kroku zachytí skutečný start a pozdější konec', () => {
+  const parent = job({ kind: 'pipeline', step: 'all', status: 'running' });
+  markPipelineStepStarted(parent, 'analyze', '2026-07-10T10:00:01.000Z');
+  markPipelineStepFinished(parent, 'analyze', '2026-07-10T10:00:33.250Z');
+
+  const timing = parent.stepTimings?.analyze;
+  assert.ok(timing);
+  assert.ok(Date.parse(timing.startedAt) < Date.parse(timing.finishedAt!));
+  assert.equal(getPipelineStepDurationsMs(parent)?.analyze, 32_250);
+});
+
+test('běžící krok má průběžné trvání bez finishedAt', () => {
+  const parent = job({ kind: 'pipeline', step: 'all', status: 'running' });
+  markPipelineStepStarted(parent, 'match', '2026-07-10T10:00:00.000Z');
+
+  assert.equal(parent.stepTimings?.match?.finishedAt, undefined);
+  assert.equal(getPipelineStepDurationsMs(parent, '2026-07-10T10:00:05.500Z')?.match, 5_500);
+});
+
+test('timestampy kroků přežijí serializaci a načtení', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vz-pipeline-jobs-'));
+  const filePath = join(dir, '.jobs.json');
+  try {
+    const parent = job({ id: 'pipeline-timed', kind: 'pipeline', step: 'all', status: 'done' });
+    markPipelineStepStarted(parent, 'extract', '2026-07-10T10:00:00.000Z');
+    markPipelineStepFinished(parent, 'extract', '2026-07-10T10:00:02.125Z');
+    await savePipelineJobs(filePath, [parent]);
+
+    const restored = await loadPipelineJobs(filePath);
+    assert.deepEqual(restored.jobs.get(parent.id)?.stepTimings, parent.stepTimings);
+    assert.equal(getPipelineStepDurationsMs(restored.jobs.get(parent.id)!)?.extract, 2_125);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('legacy záznam bez timestampů se načte beze změny', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vz-pipeline-jobs-'));
+  const filePath = join(dir, '.jobs.json');
+  try {
+    const legacy = job({ id: 'pipeline-legacy', kind: 'pipeline', step: 'all', status: 'done' });
+    await writeFile(filePath, JSON.stringify({ version: 1, jobs: [legacy] }), 'utf-8');
+
+    const restored = await loadPipelineJobs(filePath);
+    assert.equal(restored.jobs.get(legacy.id)?.stepTimings, undefined);
+    assert.equal(getPipelineStepDurationsMs(restored.jobs.get(legacy.id)!), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('resume claim: neúspěšné ověření vrátí parent do waiting_approval', () => {

@@ -140,6 +140,7 @@ import {
   ApprovalRequiredError,
   BudgetPausedError,
   advanceRunAllChain,
+  getPipelineStepDurationsMs,
   claimBudgetPaused,
   claimWaitingApproval,
   loadPipelineJobs,
@@ -147,6 +148,8 @@ import {
   restoreWaitingApproval,
   savePipelineJobs,
   selectJobsToStart,
+  markPipelineStepFinished,
+  markPipelineStepStarted,
   type PipelineJob as Job,
   type PipelineStep,
 } from './lib/pipeline-job-state.js';
@@ -501,11 +504,13 @@ function processQueue() {
 function startJob(job: Job) {
   runningJobs.add(job.id);
   job.status = 'running';
+  const executionStartedAt = new Date().toISOString();
   if (job.parentJobId) {
     const parent = jobs.get(job.parentJobId);
     if (parent) {
       parent.status = 'running';
       parent.currentStep = job.step as PipelineStep;
+      markPipelineStepStarted(parent, job.step as PipelineStep, executionStartedAt);
     }
   }
   scheduleJobsPersist();
@@ -515,6 +520,8 @@ function startJob(job: Job) {
     job.status = 'error';
     job.error = `Unknown step: ${job.step}`;
     job.finishedAt = new Date().toISOString();
+    const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
+    if (parent) markPipelineStepFinished(parent, job.step as PipelineStep, job.finishedAt);
     runningJobs.delete(job.id);
     scheduleJobsPersist();
     processQueue();
@@ -605,6 +612,7 @@ function startJob(job: Job) {
     scheduleJobsPersist();
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
+    if (parent) markPipelineStepFinished(parent, job.step as PipelineStep, job.finishedAt);
     if (!parent) {
       processQueue();
       return;
@@ -757,6 +765,7 @@ async function getPipelineStatus(tenderId: string) {
     failedStep: latestRunAll.failedStep,
     error: latestRunAll.error,
     initiator: latestRunAll.initiator,
+    stepDurationsMs: getPipelineStepDurationsMs(latestRunAll),
   } : undefined;
 
   // Zastaralost vygenerovaných dokumentů vůči poslední změně cen (viz lib/stale-check.ts).
@@ -2940,6 +2949,7 @@ app.get('/api/jobs', (req, res) => {
     parentJobId: j.parentJobId,
     currentStep: j.currentStep,
     failedStep: j.failedStep,
+    stepDurationsMs: getPipelineStepDurationsMs(j),
     logLines: j.logs.length,
   })));
 });
@@ -2965,6 +2975,7 @@ app.get('/api/jobs/:jobId', (req, res) => {
     currentStep: job.currentStep,
     failedStep: job.failedStep,
     initiator: job.initiator,
+    stepDurationsMs: getPipelineStepDurationsMs(job),
     logs: job.logs.slice(since),
     totalLogLines: job.logs.length,
   });
