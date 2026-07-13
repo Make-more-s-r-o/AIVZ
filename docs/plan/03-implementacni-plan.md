@@ -260,7 +260,7 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
     B-03 (dělat B-03 první nebo souběžně); riziko halucinace katalogových čísel → instrukce
     „nech prázdné" + verify B-02 je ověří proti webu.
 
-- [ ] **B-02 — Verify fallback řetěz** · **MONEY-PATH — adversariální oponentura povinná**
+- [x] **B-02 — Verify fallback řetěz** — **IMPLEMENTOVÁNO (audit 2026-07-13)**: dvoufázový řetěz (přesná shoda → ekvivalent dle závazné specifikace) v `price-verifier.ts`, `shoda_typ` v kontraktu, ekvivalent nikdy automatický zdroj (UI confirm gate + badge „ekvivalent"/„orientační" v ItemPriceCalculator), cost per položka přes `logCost`. Offline eval 2026-07-13: verify hit-rate 56,25 % při pokrytí jen 4,88 % — **akceptace ≥ 70 % zůstává NEPOTVRZENÁ, měření čeká na živá verify data z pilotů** (offline set je nemá; doplnit po prvních reálných bězích).
   - **Proč:** F2.2; hlavní páka na hit-rate ≥ 70 %. Dimenze: kvalita, business.
   - **Soubory:** `scripts/src/lib/price-verifier.ts` (1153 řádků — řetěz dotazů: 1. katalogové
     číslo → 2. výrobce+model → 3. generický ekvivalent kategorie; každý nález nese `uroven_jistoty`
@@ -373,7 +373,7 @@ viditelné na jedné obrazovce.
     per-item attestaci neobchází — adversariální oponentura to u každého diffu explicitně
     hledá.
 
-- [ ] **C-01b — Inbox jako pracovní plocha (zbytek: generate/finalize, řazení)**
+- [x] **C-01b — Inbox jako pracovní plocha** — **HOTOVO (PR #86, nasazeno 2026-07-13)**. Bulk generate/finalize per-zakázka (409 s důvodem, nikdy all-or-nothing), gate znovupoužívá `findUnconfirmedPrices` + přepočet HARD flagů; bulk nikdy nepotvrzuje ceny (regression test). Codex adversarial review REJECT→fix: governance per iteraci, fail-open legacy single-product gate opraven, finalize cap 20. Řazení lhůta × skóre.
   - **Proč:** F2.4; potvrzení cen je vyřešeno (C-01/PR #63), zbývá spouštění generate a
     finalize z inboxu a řazení dle lhůty × skóre. Dimenze: UX (60 → 75+).
   - **Soubory:** `scripts/src/lib/inbox.ts` (akční payloady); `scripts/src/serve-api.ts`
@@ -390,7 +390,7 @@ viditelné na jedné obrazovce.
   - **Rizika:** známý bug-vzor „desync draftu s hromadným potvrzením" (PR #53) —
     regression test povinný.
 
-- [ ] **C-02 — Cost + throughput agregace**
+- [x] **C-02 — Cost + throughput agregace** — **HOTOVO (endpoint dříve; widget PR #87, nasazeno 2026-07-13)**. `kc_na_cn` (počet CN z kanonického `cenova_nabidka.docx`), 14denní trend v Přehledu.
   - **Proč:** F2.6; cost-tracker je per zakázka, chybí agregace/trend. Dimenze: provoz (50 → 70).
   - **Soubory:** `scripts/src/lib/cost-tracker.ts` (agregační funkce den/týden/měsíc/zakázka —
     test `costs-aggregate.test.ts` už existuje, rozšířit); endpoint
@@ -405,7 +405,7 @@ viditelné na jedné obrazovce.
     v `config/governance.json`, serverové guardy 503, admin API + sekce v Nastavení,
     audit kdo/kdy. Vyčerpaný kredit už prod tiše nepoloží.
 
-- [ ] **C-03b — Strop: včasné varování + šetrná pauza (zbytek)**
+- [x] **C-03b — Strop: včasné varování + šetrná pauza** — **HOTOVO (PR #88, nasazeno 2026-07-13)**. Slack warn při 80 % (1×/den, atomický claim), stav `budget_paused` na hranici kroku, resume přes společný endpoint (generate vždy znovu přes money-gate). Vyžaduje env `VZ_WATCHDOG_SLACK_WEBHOOK_URL` na prod (bez něj se alert jen nepošle, pauza funguje).
   - **Proč:** F2.6/F4.4; strop dnes tvrdě řeže (503) — chybí varování před nárazem a
     šetrné pauznutí rozběhlé práce. Dimenze: provoz.
   - **Soubory:** governance guard / `scripts/src/lib/cost-tracker.ts` (Slack warn při 80 %
