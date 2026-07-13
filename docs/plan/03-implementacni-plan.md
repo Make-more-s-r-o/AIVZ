@@ -419,7 +419,7 @@ viditelné na jedné obrazovce.
   - **Závislosti:** C-02 (agregace — sjednotit zdroj čísla s governance počítáním).
     **Velikost:** S–M. **Kdo:** Codex, review Fable (fail-closed sémantika).
 
-- [ ] **C-04 — Latence per pipeline krok**
+- [x] **C-04 — Latence per pipeline krok** — **HOTOVO (PR #90, nasazeno 2026-07-13)**. Persistentní timestampy per krok (od skutečného startu child procesu), `stepDurationsMs` v jobs API, trvání kroků v PipelineStatus; legacy .jobs.json kompatibilní.
   - **Proč:** F2.6; hrdla pro 5–10/den potřebují číslo. Dimenze: provoz.
   - **Soubory:** `scripts/src/lib/pipeline-job-state.ts` (timestampy start/end per krok — stav
     už je persistentní); expose v `GET /api/.../jobs` odpovědích; zobrazení v
