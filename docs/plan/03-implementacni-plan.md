@@ -428,7 +428,7 @@ viditelné na jedné obrazovce.
     data zpětně dostupná pro C-02 widget.
   - **Závislosti:** žádné. **Velikost:** S. **Kdo:** Codex.
 
-- [ ] **C-05 — Ruční revize vah go/no-go z pilotů** (lidský vstup)
+- [ ] **C-05 — Ruční revize vah go/no-go z pilotů** (lidský vstup) — **kódová část HOTOVÁ (PR #92, 2026-07-13)**: váhy v `config/go-no-go.json` (fail-safe, default = dnešní hodnoty, bit-perfect test). Zbývá Danova revize hodnot proti realitě pilotů (config change + restart).
   - **Proč:** F2.5; ještě NE auto-kalibrace (malý vzorek) — jen ruční sanity: stálo skóre
     za práci? Dimenze: business, autonomie.
   - **Soubory:** `scripts/src/lib/go-no-go.ts` (váhy vytáhnout do konfigurovatelné konstanty /
