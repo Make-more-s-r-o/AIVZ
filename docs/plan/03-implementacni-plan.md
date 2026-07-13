@@ -745,7 +745,7 @@ pilotu: uzavřený okruh (c) právní konzultace A-09 (GDPR/licence dat/ToS) a T
 
 Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadline vázaný na vlnu.
 
-- [ ] **T-01 — CI typecheck backendu** (do konce vlny B)
+- [x] **T-01 — CI typecheck backendu** — **HOTOVO (PR #94, 2026-07-13)**: všech ~22 chyb opraveno čistě typově, `npm run typecheck`, deploy.yml failne na nové chybě. tsc = 0.
   - **Proč:** 27 pre-existing tsc chyb (night3 §7.4); backend běží přes tsx → CI typy nehlídá,
     chyby se hromadí. Dimenze: provoz.
   - **Soubory:** `scripts/package.json` (script `typecheck`: `tsc --noEmit`);
@@ -753,7 +753,7 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
   - **Akceptace:** `tsc --noEmit` v scripts = 0 chyb; CI failne na nové typové chybě.
   - **Velikost:** M (opravy). **Kdo:** Codex (mechanické).
 
-- [ ] **T-02 — E2E smoke po deployi** (do konce vlny C)
+- [x] **T-02 — E2E smoke po deployi** — **HOTOVO (PR #97, 2026-07-13)**: post-deploy krok čeká na healthy vz-api, automatický nginx reload, smoke health+db:ok / SPA 200 / auth 401; fail = červený job.
   - **Proč:** po deployi se opakuje nginx 502 (stale IP) a ruční kontrola; deploy zabíjí joby
     (do E-01). Dimenze: provoz.
   - **Soubory:** `.github/workflows/deploy.yml` (post-deploy krok: nginx reload na hostu +
@@ -763,7 +763,7 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
     zelené); nginx reload automatický.
   - **Velikost:** S. **Kdo:** Codex.
 
-- [ ] **T-03 — Graceful drain před deployem** (interim než E-01; do konce vlny C)
+- [x] **T-03 — Graceful drain před deployem** — **HOTOVO (PR #96, 2026-07-13)**: SIGTERM → drain (mutace 503, okno 25 s, checkpoint `interrupted` s resume bodem), stop_grace_period 40 s; resume generate vždy přes money-gate. Živý test na prod při běžícím jobu zatím neproveden (udělat v klidnou hodinu).
   - **Proč:** deploy dnes zabíjí běžící joby (známý gap z memory). Dimenze: provoz, průchodnost.
   - **Soubory:** `scripts/src/serve-api.ts` + `scripts/src/lib/pipeline-job-state.ts`
     (SIGTERM handler: nové joby nepřijímat, běžící checkpointnout jako `interrupted` s resume
