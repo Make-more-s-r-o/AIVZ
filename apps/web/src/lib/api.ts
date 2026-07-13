@@ -1675,12 +1675,13 @@ export interface CostsOverview {
   tyden_czk: number;
   mesic_czk: number;
   celkem_czk: number;
+  kc_na_cn: number | null;
   top_zakazky: Array<{ tender_id: string; nazev: string | null; celkem_czk: number }>;
   po_dnech: Array<{ den: string; czk: number }>;
 }
 
 const EMPTY_COSTS_OVERVIEW: CostsOverview = {
-  dnes_czk: 0, tyden_czk: 0, mesic_czk: 0, celkem_czk: 0, top_zakazky: [], po_dnech: [],
+  dnes_czk: 0, tyden_czk: 0, mesic_czk: 0, celkem_czk: 0, kc_na_cn: null, top_zakazky: [], po_dnech: [],
 };
 
 /** Resilientní GET — chyba/401 vrátí prázdný přehled místo pádu Přehledu. */

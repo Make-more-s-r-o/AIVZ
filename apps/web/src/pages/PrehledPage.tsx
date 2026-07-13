@@ -282,12 +282,15 @@ export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps)
           </EmptyState>
         ) : (
           <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', gap: 24 }}>
+            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
               <MoneyStat label="Dnes" czk={costsOverview.dnes_czk} />
               <MoneyStat label="Týden" czk={costsOverview.tyden_czk} />
               <MoneyStat label="Měsíc" czk={costsOverview.mesic_czk} />
               <MoneyStat label="Celkem" czk={costsOverview.celkem_czk} />
+              <MoneyStat label="Kč/CN" czk={costsOverview.kc_na_cn} />
             </div>
+
+            <DailyCostTrend days={costsOverview.po_dnech} />
 
             {costsOverview.top_zakazky.length > 0 && (
               <div style={{ flex: 1, minWidth: 220 }}>
@@ -438,14 +441,56 @@ function StatBlock({ label, value, tone }: { label: string; value: number; tone:
 }
 
 // Velké peněžní číslo pro kartu "AI náklady" (dnes/týden/měsíc/celkem).
-function MoneyStat({ label, czk }: { label: string; czk: number }) {
+function MoneyStat({ label, czk }: { label: string; czk: number | null }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <span style={{
         fontSize: 'var(--font-size-2xl)', fontWeight: 'var(--weight-bold)', lineHeight: 1,
         color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums',
-      }}>{fmtCZK(czk)}</span>
+      }}>{czk == null ? '—' : fmtCZK(czk)}</span>
       <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>{label}</span>
+    </div>
+  );
+}
+
+// Kompaktní 14denní trend bez grafové závislosti; nulové dny zůstávají viditelné jako baseline.
+function DailyCostTrend({ days }: { days: Array<{ den: string; czk: number }> }) {
+  if (days.length === 0) return null;
+  const width = 196;
+  const height = 48;
+  const gap = 3;
+  const barWidth = (width - gap * (days.length - 1)) / days.length;
+  const max = Math.max(...days.map((day) => day.czk), 0);
+
+  return (
+    <div style={{ minWidth: width }}>
+      <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', marginBottom: 6 }}>
+        Trend za posledních 14 dní
+      </div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        width={width}
+        height={height}
+        role="img"
+        aria-label="Denní AI náklady za posledních 14 dní"
+      >
+        {days.map((day, index) => {
+          const barHeight = max > 0 ? Math.max(2, (day.czk / max) * height) : 2;
+          return (
+            <rect
+              key={day.den}
+              x={index * (barWidth + gap)}
+              y={height - barHeight}
+              width={barWidth}
+              height={barHeight}
+              rx={2}
+              fill={day.czk > 0 ? 'var(--accent)' : 'var(--border-default)'}
+            >
+              <title>{new Date(`${day.den}T00:00:00`).toLocaleDateString('cs-CZ')}: {fmtCZK(day.czk)}</title>
+            </rect>
+          );
+        })}
+      </svg>
     </div>
   );
 }

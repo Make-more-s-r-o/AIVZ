@@ -15,8 +15,13 @@ function entry(daysAgo: number, costCZK: number, overrides: Partial<CostEntry> =
   };
 }
 
-function tender(tenderId: string, entries: CostEntry[], name: string | null = null): CostsAggregateTenderInput {
-  return { tenderId, name, entries };
+function tender(
+  tenderId: string,
+  entries: CostEntry[],
+  name: string | null = null,
+  hasGeneratedOffer = false,
+): CostsAggregateTenderInput {
+  return { tenderId, name, entries, hasGeneratedOffer };
 }
 
 test('prázdný vstup → nuly a 14 nulových dní', () => {
@@ -25,6 +30,7 @@ test('prázdný vstup → nuly a 14 nulových dní', () => {
   assert.equal(s.tyden_czk, 0);
   assert.equal(s.mesic_czk, 0);
   assert.equal(s.celkem_czk, 0);
+  assert.equal(s.kc_na_cn, null);
   assert.deepEqual(s.top_zakazky, []);
   assert.equal(s.po_dnech.length, 14);
   assert.ok(s.po_dnech.every((d) => d.czk === 0));
@@ -101,4 +107,23 @@ test('po_dnech: záznam mimo posledních 14 dní se do řady nepropíše', () =>
 test('zaokrouhlení na 2 desetinná místa', () => {
   const s = computeCostsAggregate([tender('T1', [entry(0, 10.005), entry(0, 0.001)])], NOW);
   assert.equal(s.dnes_czk, 10.01);
+});
+
+test('Kč/CN: celkové náklady se dělí počtem zakázek s kanonickou vygenerovanou CN', () => {
+  const s = computeCostsAggregate([
+    tender('T1', [entry(0, 100)], null, true),
+    tender('T2', [entry(0, 50)], null, true),
+    tender('T3', [entry(0, 25)]), // rozpracovaná zakázka: náklady ano, hotová CN ne
+  ], NOW);
+  assert.equal(s.celkem_czk, 175);
+  assert.equal(s.kc_na_cn, 87.5);
+});
+
+test('Kč/CN: bez vygenerované CN je null a výsledek se zaokrouhlí na haléře', () => {
+  assert.equal(computeCostsAggregate([tender('T1', [entry(0, 10)])], NOW).kc_na_cn, null);
+  assert.equal(computeCostsAggregate([
+    tender('T1', [entry(0, 10)], null, true),
+    tender('T2', [], null, true),
+    tender('T3', [], null, true),
+  ], NOW).kc_na_cn, 3.33);
 });
