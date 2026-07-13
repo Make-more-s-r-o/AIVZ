@@ -48,6 +48,18 @@ export function incompleteDownloadWarning(downloaded: number, found: number): st
   return `staženo ${downloaded}/${found} — pipeline nespuštěna, zkontrolujte dokumenty a spusťte ručně`;
 }
 
+export const AI_JOBS_DISABLED_MONITORING_WARNING = 'AI joby jsou vypnuté v Governance';
+
+/** Měkký governance guard: zakázka zůstává převzatá, zakáže se pouze enqueue pipeline. */
+export function monitoringAutoStartGovernanceDecision(aiJobsEnabled: boolean): {
+  spustit: boolean;
+  varovani: string | null;
+} {
+  return aiJobsEnabled
+    ? { spustit: true, varovani: null }
+    : { spustit: false, varovani: AI_JOBS_DISABLED_MONITORING_WARNING };
+}
+
 class DownloadLimitError extends Error {
   constructor(
     message: string,

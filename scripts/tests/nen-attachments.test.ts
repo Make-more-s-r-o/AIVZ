@@ -17,6 +17,7 @@ import {
   sanitizeAttachmentName,
   downloadNenAttachments,
   incompleteDownloadWarning,
+  monitoringAutoStartGovernanceDecision,
   shouldAutoStartDownloadedPipeline,
 } from '../src/lib/monitoring/zd-download.js';
 
@@ -443,4 +444,10 @@ test('automatická pipeline se spustí jen po úplném stažení bez varování'
     incompleteDownloadWarning(1, 2),
     'staženo 1/2 — pipeline nespuštěna, zkontrolujte dokumenty a spusťte ručně',
   );
+});
+
+test('governance ai_jobs=false ponechá převzetí úspěšné a vrátí varování bez spuštění', () => {
+  const decision = monitoringAutoStartGovernanceDecision(false);
+  assert.equal(decision.spustit, false);
+  assert.equal(decision.varovani, 'AI joby jsou vypnuté v Governance');
 });

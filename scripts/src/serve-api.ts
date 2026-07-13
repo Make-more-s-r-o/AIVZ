@@ -107,7 +107,8 @@ import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
 import {
-  downloadNenAttachments, incompleteDownloadWarning, shouldAutoStartDownloadedPipeline,
+  downloadNenAttachments, incompleteDownloadWarning, monitoringAutoStartGovernanceDecision,
+  shouldAutoStartDownloadedPipeline,
 } from './lib/monitoring/zd-download.js';
 import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
 import {
@@ -118,7 +119,11 @@ import { isFeedItemExcluded, scoreFeedItem, serializeFeedItemFeatureVector, slug
 import { persistScoreSnapshotBestEffort } from './lib/score-snapshot-store.js';
 import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
-import { getMonitoringConfig, saveMonitoringConfig } from './lib/monitoring/monitoring-config.js';
+import {
+  getMonitoringConfig,
+  resolveMonitoringPipelineStart,
+  saveMonitoringConfig,
+} from './lib/monitoring/monitoring-config.js';
 import {
   GovernancePatchSchema,
   dailyAiLimitBlock,
@@ -367,7 +372,13 @@ async function getStepGateError(tenderId: string, step: string): Promise<string 
   return null;
 }
 
-function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, startQueue = true): Job {
+function enqueueStepJob(
+  tenderId: string,
+  step: string,
+  parentJobId?: string,
+  startQueue = true,
+  initiator: Job['initiator'] = 'operator',
+): Job {
   let jobId = randomUUID().slice(0, 8);
   while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
   const job: Job = {
@@ -379,6 +390,7 @@ function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, st
     startedAt: new Date().toISOString(),
     kind: 'step',
     parentJobId,
+    initiator,
   };
   jobs.set(jobId, job);
   jobQueue.push(jobId);
@@ -394,7 +406,10 @@ function enqueueStepJob(tenderId: string, step: string, parentJobId?: string, st
  * endpointem `run/all` i převzetím z monitoringu. Když už pro zakázku běží/čeká pipeline,
  * vrátí ho beze změny (created=false) — idempotentní, nikdy nespustí druhý souběžný řetězec.
  */
-function enqueueRunAllPipeline(tenderId: string): { job: Job; created: boolean } {
+function enqueueRunAllPipeline(
+  tenderId: string,
+  initiator: Job['initiator'] = 'operator',
+): { job: Job; created: boolean } {
   const existing = [...jobs.values()].find((job) =>
     job.tenderId === tenderId && job.kind === 'pipeline'
     && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
@@ -411,9 +426,10 @@ function enqueueRunAllPipeline(tenderId: string): { job: Job; created: boolean }
     startedAt: new Date().toISOString(),
     kind: 'pipeline',
     currentStep: RUN_ALL_STEPS[0],
+    initiator,
   };
   jobs.set(parent.id, parent);
-  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id);
+  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id, true, initiator);
   scheduleJobsPersist();
   console.log(`Pipeline job ${parent.id} queued for ${tenderId}`);
   return { job: parent, created: true };
@@ -599,7 +615,7 @@ function startJob(job: Job) {
       // Ostatní gate chyby (chybějící soubor apod.) zůstávají tvrdou chybou řetězce.
       const gateError = await getStepGateError(job.tenderId, nextStep);
       if (gateError) throw new Error(gateError);
-      enqueueStepJob(job.tenderId, nextStep, parent.id, false);
+      enqueueStepJob(job.tenderId, nextStep, parent.id, false, parent.initiator);
     }).finally(() => {
       scheduleJobsPersist();
       processQueue();
@@ -725,6 +741,7 @@ async function getPipelineStatus(tenderId: string) {
     currentStep: latestRunAll.currentStep,
     failedStep: latestRunAll.failedStep,
     error: latestRunAll.error,
+    initiator: latestRunAll.initiator,
   } : undefined;
 
   // Zastaralost vygenerovaných dokumentů vůči poslední změně cen (viz lib/stale-check.ts).
@@ -1126,7 +1143,7 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 });
 
 // POST /api/monitoring/:id/prevzit - založí z feed položky zakázku (složka input/ + CRM stav).
-// Volitelně (opt-in) stáhne přílohy zadávací dokumentace z NEN a spustí celý pipeline:
+// Volitelně stáhne přílohy zadávací dokumentace z NEN a spustí celý pipeline:
 //   body { stahnout_zd?: boolean, spustit?: boolean }
 // „spustit" je bezpečné i autonomně — money-gate před generováním PAUZNE řetězec na
 // waiting_approval, dokud operátor nepotvrdí ceny. Bez stažených souborů se „spustit" ignoruje.
@@ -1134,10 +1151,11 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
   const actor = (req as any).user?.sub ?? null;
   const stahnoutZd = req.body?.stahnout_zd === true;
-  const spustit = req.body?.spustit === true;
   if (!(await enforceGovernance(res, 'ingest_enabled'))) return;
-  if (spustit && !(await enforceGovernance(res, 'ai_jobs_enabled', true))) return;
   try {
+    // Explicitní hodnota z requestu má přednost; bez ní rozhoduje instance-wide nastavení.
+    const monitoringConfig = await getMonitoringConfig();
+    const spustit = resolveMonitoringPipelineStart(req.body, monitoringConfig);
     const item = await getFeedItem(id);
     if (!item) return res.status(404).json({ error: 'Položka feedu nenalezena.' });
     if (item.stav === 'prevzata' && item.tender_id) {
@@ -1169,8 +1187,8 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     // Převzetí je hlavní operace; kalibrační zápis při výpadku DB pouze varuje.
     try {
       const now = new Date();
-      const [company, monitoring] = await Promise.all([getCompany('default'), getMonitoringConfig()]);
-      const features = serializeFeedItemFeatureVector(item, company ?? undefined, now, monitoring);
+      const company = await getCompany('default');
+      const features = serializeFeedItemFeatureVector(item, company ?? undefined, now, monitoringConfig);
       await persistScoreSnapshotBestEffort({
         tender_id: tenderId, typ: 'gonogo', skore: features.skore,
         doporuceni: features.doporuceni, features, kontext: 'prevzeti',
@@ -1208,10 +1226,27 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
 
     if (spustit) {
       if (shouldAutoStartDownloadedPipeline(pocetNalezenych, pocetStazenych, varovani)) {
-        const { job, created } = enqueueRunAllPipeline(tenderId);
-        spusteno = true;
-        jobId = job.id;
-        if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
+        // Governance je zde měkký guard: převzetí už proběhlo a kill-switch smí zastavit
+        // jen spuštění AI práce, ne vrátit chybu celého převzetí.
+        try {
+          const governance = await getGovernance();
+          const governanceDecision = monitoringAutoStartGovernanceDecision(governance.ai_jobs_enabled);
+          if (!governanceDecision.spustit) {
+            varovani.push(governanceDecision.varovani!);
+          } else {
+            const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+            if (limitError) {
+              varovani.push(limitError);
+            } else {
+              const { job, created } = enqueueRunAllPipeline(tenderId, 'monitoring');
+              spusteno = true;
+              jobId = job.id;
+              if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
+            }
+          }
+        } catch (error) {
+          varovani.push(`Pipeline nebyl spuštěn — Governance nelze ověřit: ${String(error)}`);
+        }
       } else if (pocetNalezenych > 0) {
         varovani.push(incompleteDownloadWarning(pocetStazenych, pocetNalezenych));
       } else {
@@ -2888,6 +2923,7 @@ app.get('/api/jobs/:jobId', (req, res) => {
     parentJobId: job.parentJobId,
     currentStep: job.currentStep,
     failedStep: job.failedStep,
+    initiator: job.initiator,
     logs: job.logs.slice(since),
     totalLogLines: job.logs.length,
   });
@@ -2959,7 +2995,7 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   }
 
   // Rozjeď řetězec: zařaď generate krok pod původní parent job (chain pokračuje generate→validate).
-  enqueueStepJob(id, 'generate', waiting.id);
+  enqueueStepJob(id, 'generate', waiting.id, true, waiting.initiator);
   scheduleJobsPersist();
 
   console.log(`Pipeline job ${waiting.id} resumed (generate) for ${id}`);

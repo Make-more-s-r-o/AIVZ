@@ -18,6 +18,7 @@ export const MonitoringConfigSchema = z.object({
   vyloucena_slova: z.array(z.string().trim().min(1)).default([]),
   min_hodnota: z.number().finite().nonnegative().nullable().default(null),
   max_hodnota: z.number().finite().nonnegative().nullable().default(null),
+  auto_spustit_pipeline: z.boolean().default(true),
 }).strict().superRefine((value, ctx) => {
   if (value.min_hodnota != null && value.max_hodnota != null && value.min_hodnota > value.max_hodnota) {
     ctx.addIssue({
@@ -36,7 +37,16 @@ export const DEFAULT_MONITORING_CONFIG: MonitoringConfig = Object.freeze({
   vyloucena_slova: [],
   min_hodnota: null,
   max_hodnota: null,
+  auto_spustit_pipeline: true,
 });
+
+/** Explicitní volba klienta přebíjí instance-wide výchozí chování. */
+export function resolveMonitoringPipelineStart(body: unknown, config: MonitoringConfig): boolean {
+  if (body && typeof body === 'object' && typeof (body as { spustit?: unknown }).spustit === 'boolean') {
+    return (body as { spustit: boolean }).spustit;
+  }
+  return config.auto_spustit_pipeline;
+}
 
 /** Načte konfiguraci; chybějící soubor znamená bezpečné výchozí nastavení. */
 export async function getMonitoringConfig(path = MONITORING_CONFIG_PATH): Promise<MonitoringConfig> {

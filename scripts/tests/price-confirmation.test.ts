@@ -1,7 +1,10 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-import { findUnconfirmedPrices } from '../src/lib/price-confirmation.js';
+import {
+  assertPricesConfirmedForGeneration,
+  findUnconfirmedPrices,
+} from '../src/lib/price-confirmation.js';
 import type { ProductMatch } from '../src/lib/types.js';
 
 function match(items: Array<{ name: string; part?: string; confirmed: boolean }>): ProductMatch {
@@ -30,4 +33,11 @@ test('money-gate ignoruje nepodávanou část', () => {
     { name: 'B', part: 'B', confirmed: false },
   ]), new Set(['A']));
   assert.deepEqual(result, { count: 0, names: [] });
+});
+
+test('generate má hard fail nad nepotvrzenou cenou', () => {
+  assert.throws(
+    () => assertPricesConfirmedForGeneration(match([{ name: 'B', confirmed: false }])),
+    /Generování nelze spustit nad nepotvrzenými cenami \(1\): B/,
+  );
 });

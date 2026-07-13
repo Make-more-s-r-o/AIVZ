@@ -31,6 +31,7 @@ export interface PipelineJob {
   parentJobId?: string;
   currentStep?: PipelineStep;
   failedStep?: PipelineStep;
+  initiator?: 'monitoring' | 'operator';
 }
 
 /**

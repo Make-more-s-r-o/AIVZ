@@ -30,3 +30,16 @@ export function findUnconfirmedPrices(
     ? { count: 0, names: [] }
     : { count: 1, names: ['cenová kalkulace'] };
 }
+
+/** Tvrdý gate přímého generování: bez lidského potvrzení cen vždy vyhodí chybu. */
+export function assertPricesConfirmedForGeneration(
+  productMatch: ProductMatch,
+  selectedPartIds?: ReadonlySet<string> | null,
+): void {
+  const unconfirmed = findUnconfirmedPrices(productMatch, selectedPartIds);
+  if (unconfirmed.count > 0) {
+    throw new Error(
+      `Generování nelze spustit nad nepotvrzenými cenami (${unconfirmed.count}): ${unconfirmed.names.join(', ')}.`,
+    );
+  }
+}
