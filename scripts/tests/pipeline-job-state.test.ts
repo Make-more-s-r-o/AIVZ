@@ -6,7 +6,10 @@ import test from 'node:test';
 import {
   ApprovalRequiredError,
   advanceRunAllChain,
+  checkpointJobsForDrain,
+  claimInterrupted,
   claimWaitingApproval,
+  getDrainHttpResponse,
   getPipelineStepDurationsMs,
   loadPipelineJobs,
   markPipelineStepFinished,
@@ -24,6 +27,15 @@ test('resume claim: waiting_approval lze synchronně rezervovat jen jednou', () 
   assert.equal(claimWaitingApproval(parent), true);
   assert.equal(parent.status, 'running');
   assert.equal(claimWaitingApproval(parent), false);
+});
+
+test('nový enqueue během drainu dostane 503 draining', () => {
+  assert.deepEqual(getDrainHttpResponse(true, 'POST', '/api/tenders/t-1/run/all'), {
+    status: 503,
+    body: { error: 'draining' },
+  });
+  assert.equal(getDrainHttpResponse(true, 'GET', '/api/jobs'), null);
+  assert.equal(getDrainHttpResponse(false, 'POST', '/api/tenders/t-1/run/all'), null);
 });
 
 test('timestampy kroku zachytí skutečný start a pozdější konec', () => {
@@ -310,6 +322,37 @@ test('restore: přerušený pipeline řetězec zastaví i navazující queued kr
     assert.equal(restored.jobs.get('child-queued')?.status, 'interrupted');
     // Navazující krok přerušeného řetězce NESMÍ zůstat ve frontě ke spuštění.
     assert.deepEqual(restored.queuedJobIds, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('SIGTERM checkpoint persistuje interrupted + currentStep a po restartu jde resumnout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vz-pipeline-drain-'));
+  const filePath = join(dir, '.jobs.json');
+  try {
+    const parent = job({
+      id: 'pipeline-drain', step: 'all', status: 'running', kind: 'pipeline', currentStep: 'match',
+    });
+    const child = job({
+      id: 'child-match', step: 'match', status: 'running', parentJobId: parent.id,
+    });
+    const jobs = new Map([[parent.id, parent], [child.id, child]]);
+
+    const interrupted = checkpointJobsForDrain(jobs.values(), '2026-07-10T11:00:00.000Z');
+    await savePipelineJobs(filePath, jobs.values());
+
+    assert.equal(interrupted, 2);
+    assert.equal(parent.status, 'interrupted');
+    assert.equal(parent.currentStep, 'match');
+
+    const restarted = await loadPipelineJobs(filePath, '2026-07-10T11:01:00.000Z');
+    const resumable = restarted.jobs.get(parent.id)!;
+    assert.equal(resumable.status, 'interrupted');
+    assert.equal(resumable.currentStep, 'match');
+    assert.equal(claimInterrupted(resumable), true);
+    assert.equal(resumable.status, 'running');
+    assert.equal(resumable.currentStep, 'match');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

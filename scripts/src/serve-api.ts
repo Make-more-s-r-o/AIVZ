@@ -144,9 +144,14 @@ import {
   advanceRunAllChain,
   getPipelineStepDurationsMs,
   claimBudgetPaused,
+  claimInterrupted,
   claimWaitingApproval,
+  checkpointJobsForDrain,
+  checkpointPipelineAfterCompletedStep,
+  getDrainHttpResponse,
   loadPipelineJobs,
   restoreBudgetPaused,
+  restoreInterrupted,
   restoreWaitingApproval,
   savePipelineJobs,
   selectJobsToStart,
@@ -172,12 +177,27 @@ if (!existsSync(companyConfigPath)) {
 }
 
 const app = express();
+let draining = false;
 // Case-sensitive routing: jinak Express (case-insensitive) namapuje /API/... na /api/... handler,
 // zatímco req.path zůstane /API/... a case-sensitive `startsWith('/api/')` guardy v auth/RBAC
 // middleware ho pustí bez ověření (auth+RBAC bypass). Tímto /API/... → 404, fail-closed.
 app.set('case sensitive routing', true);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// Po SIGTERM server zůstane po dobu drain okna dostupný pro čtení stavu, ale žádná
+// API mutace už nesmí vytvořit novou práci ani změnit snapshot před exitem.
+app.use((req, res, next) => {
+  const response = getDrainHttpResponse(draining, req.method, req.path);
+  if (response) return res.status(response.status).json(response.body);
+  next();
+});
+
+function rejectIfDraining(res: express.Response): boolean {
+  if (!draining) return false;
+  res.status(503).json({ error: 'draining' });
+  return true;
+}
 
 // --- Security: path traversal protection ---
 function isSafePath(value: string): boolean {
@@ -273,6 +293,7 @@ const jobs = new Map<string, Job>();
 // PIPELINE_MAX_CONCURRENT (default 2). Plánovač (selectJobsToStart) navíc zaručuje per-tender
 // serializaci — nikdy dvě úlohy téže zakázky současně (sdílí soubory v output/<tenderId>).
 const runningJobs = new Set<string>();
+const activeJobStoppers = new Map<string, () => void>();
 const PIPELINE_MAX_CONCURRENT = (() => {
   const raw = Number(process.env.PIPELINE_MAX_CONCURRENT);
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2;
@@ -411,7 +432,8 @@ function enqueueRunAllPipeline(
   const existing = [...jobs.values()].find((job) =>
     job.tenderId === tenderId && job.kind === 'pipeline'
     && (job.status === 'running' || job.status === 'queued'
-      || job.status === 'waiting_approval' || job.status === 'budget_paused'));
+      || job.status === 'waiting_approval' || job.status === 'budget_paused'
+      || job.status === 'interrupted'));
   if (existing) return { job: existing, created: false };
 
   let parentId = randomUUID().slice(0, 8);
@@ -459,6 +481,7 @@ function runningTenderIds(): string[] {
  * selectJobsToStart (FIFO + per-tender lock); zde jen provedeme mutace (odebrání z fronty, spawn).
  */
 function processQueue() {
+  if (draining) return;
   // Vyřaď z fronty úlohy, které už mezitím zmizely z mapy (cleanup), ať plánovač počítá s realitou.
   for (let i = jobQueue.length - 1; i >= 0; i--) {
     if (!jobs.has(jobQueue[i])) jobQueue.splice(i, 1);
@@ -570,6 +593,15 @@ function startJob(job: Job) {
     ABSOLUTE_CAP_MS,
   );
 
+  activeJobStoppers.set(job.id, () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(idleTimer);
+    clearTimeout(absoluteTimer);
+    runningJobs.delete(job.id);
+    try { child.kill('SIGTERM'); } catch { /* už skončil */ }
+  });
+
   child.stdout.on('data', (data: Buffer) => {
     resetIdleTimer();
     const lines = data.toString().split('\n').filter(Boolean);
@@ -591,10 +623,16 @@ function startJob(job: Job) {
     if (error) job.error = error;
     job.finishedAt = new Date().toISOString();
     runningJobs.delete(job.id);
+    activeJobStoppers.delete(job.id);
     scheduleJobsPersist();
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
     if (parent) markPipelineStepFinished(parent, job.step as PipelineStep, job.finishedAt);
+    if (parent && draining && status === 'done') {
+      checkpointPipelineAfterCompletedStep(parent, job.step as PipelineStep, job.finishedAt);
+      scheduleJobsPersist();
+      return;
+    }
     if (!parent) {
       processQueue();
       return;
@@ -1243,6 +1281,8 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
             const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
             if (limitError) {
               varovani.push(limitError);
+            } else if (draining) {
+              varovani.push('Pipeline nebyl spuštěn — server se připravuje na nasazení nové verze.');
             } else {
               const { job, created } = enqueueRunAllPipeline(tenderId, 'monitoring');
               spusteno = true;
@@ -2952,6 +2992,8 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
+  if (rejectIfDraining(res)) return;
+
   const { job: parent, created } = enqueueRunAllPipeline(id);
   if (!created) {
     return res.json({ jobId: parent.id, status: parent.status, message: 'Pipeline already in progress' });
@@ -2968,7 +3010,7 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   // druhý už pauznutý stav neuvidí a nemůže zařadit duplicitní krok.
   const waiting = [...jobs.values()].find((job) =>
     job.tenderId === id && job.kind === 'pipeline'
-    && (job.status === 'waiting_approval' || job.status === 'budget_paused'));
+    && (job.status === 'waiting_approval' || job.status === 'budget_paused' || job.status === 'interrupted'));
   if (!waiting) {
     const active = [...jobs.values()].find((job) =>
       job.tenderId === id && job.kind === 'pipeline'
@@ -2989,8 +3031,13 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   const governanceKey: GovernanceSwitch = resumeStep === 'generate' ? 'generate_enabled' : 'ai_jobs_enabled';
   if (!(await enforceGovernance(res, governanceKey, true))) return;
 
+  if (rejectIfDraining(res)) return;
+
   const wasBudgetPaused = waiting.status === 'budget_paused';
-  const claimed = wasBudgetPaused ? claimBudgetPaused(waiting) : claimWaitingApproval(waiting);
+  const wasInterrupted = waiting.status === 'interrupted';
+  const claimed = wasBudgetPaused
+    ? claimBudgetPaused(waiting)
+    : wasInterrupted ? claimInterrupted(waiting) : claimWaitingApproval(waiting);
   if (!claimed) {
     return res.status(409).json({ error: 'Pipeline už pokračuje.', jobId: waiting.id });
   }
@@ -3004,6 +3051,7 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
         ? 'Nelze ověřit potvrzení cen — product-match.json chybí nebo je poškozený.'
         : `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`;
       if (wasBudgetPaused) restoreBudgetPaused(waiting, message);
+      else if (wasInterrupted) restoreInterrupted(waiting, message);
       else restoreWaitingApproval(waiting, message);
       scheduleJobsPersist();
       return res.status(pending === null ? 422 : 409).json({
@@ -3013,6 +3061,11 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
       });
     }
   }
+
+
+  // SIGTERM mohl přijít během governance/money-gate awaitů. Parent už v tom případě
+  // checkpointJobsForDrain vrátil do interrupted; nový child se nesmí založit.
+  if (rejectIfDraining(res)) return;
 
   enqueueStepJob(id, resumeStep, waiting.id, true, waiting.initiator);
   scheduleJobsPersist();
@@ -3053,6 +3106,8 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   // Gate: require confirmed prices before document generation
   const gateError = await getStepGateError(id, step);
   if (gateError) return res.status(400).json({ error: gateError });
+
+  if (rejectIfDraining(res)) return;
 
   const job = enqueueStepJob(id, step);
   res.json({ jobId: job.id, status: job.status });
@@ -3530,6 +3585,7 @@ app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, r
   const started: string[] = [];
   const skipped: BulkSkip[] = [];
   for (const id of ids) {
+    if (rejectIfDraining(res)) return;
     if (!isSafeTenderId(id)) {
       skipped.push({ id, status: 409, reason: 'invalid_id' });
       continue;
@@ -4768,13 +4824,46 @@ startup().then(() => {
   reminderTimer = setInterval(() => { void runReminderSweep(); }, 15 * 60 * 1000);
 
   // Graceful shutdown
-  const shutdown = async () => {
-    console.log('\nShutting down...');
-    if (reminderTimer) clearInterval(reminderTimer);
-    server.close();
-    await flushJobsPersist();
-    await closePool();
-    process.exit(0);
+  const DRAIN_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.PIPELINE_DRAIN_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 25_000;
+  })();
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = () => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      draining = true;
+      console.log(`\nSIGTERM: draining pipeline jobs for up to ${DRAIN_TIMEOUT_MS}ms...`);
+      if (reminderTimer) clearInterval(reminderTimer);
+
+      const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+      while (runningJobs.size > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+      }
+
+      const checkpointed = checkpointJobsForDrain(jobs.values());
+      jobQueue.length = 0;
+      for (const stop of activeJobStoppers.values()) stop();
+      activeJobStoppers.clear();
+      scheduleJobsPersist();
+      await flushJobsPersist();
+      // Finální atomický zápis je záměrně přímý: proces nesmí exitnout jen na
+      // základě best-effort debounced persistu.
+      await savePipelineJobs(JOBS_FILE, jobs.values());
+      console.log(`Drain checkpoint persisted (${checkpointed} active/queued job(s) interrupted).`);
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.race([
+        closed,
+        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+      ]);
+      server.closeAllConnections();
+      await closePool();
+      process.exit(0);
+    })().catch((err) => {
+      console.error('Graceful drain failed before clean exit:', err);
+      process.exitCode = 1;
+    });
+    return shutdownPromise;
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

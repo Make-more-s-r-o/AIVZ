@@ -134,6 +134,97 @@ export function restoreBudgetPaused(job: PipelineJob, error: string): void {
   job.finishedAt = undefined;
 }
 
+/** Synchronní rezervace pipeline přerušené deployem/restartem pro jediný resume request. */
+export function claimInterrupted(job: PipelineJob): boolean {
+  if (job.kind !== 'pipeline' || job.status !== 'interrupted' || !job.currentStep) return false;
+  job.status = 'running';
+  job.error = undefined;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+  // Opakovaný krok dostane nové měření; původní nedokončený pokus je v logu jobu.
+  if (job.stepTimings) delete job.stepTimings[job.currentStep];
+  return true;
+}
+
+export function restoreInterrupted(job: PipelineJob, error: string): void {
+  job.status = 'interrupted';
+  job.error = error;
+  job.failedStep = job.currentStep;
+  job.finishedAt = new Date().toISOString();
+}
+
+export interface DrainHttpResponse {
+  status: 503;
+  body: { error: 'draining' };
+}
+
+/** Během drainu odmítáme všechny API mutace, aby se po finálním snapshotu nic nezařadilo. */
+export function getDrainHttpResponse(
+  draining: boolean,
+  method: string,
+  path: string,
+): DrainHttpResponse | null {
+  if (!draining || method.toUpperCase() === 'GET' || !path.startsWith('/api/')) return null;
+  return { status: 503, body: { error: 'draining' } };
+}
+
+/**
+ * Fail-closed checkpoint všech aktivních a dosud nezačatých jobů. Parent pipeline si ponechá
+ * currentStep; u legacy parentu ho odvodíme z child jobu, aby zůstal resumovatelný.
+ */
+export function checkpointJobsForDrain(
+  jobs: Iterable<PipelineJob>,
+  now = new Date().toISOString(),
+): number {
+  const all = [...jobs];
+  const childStepByParent = new Map<string, PipelineStep>();
+  for (const job of all) {
+    if (job.parentJobId && RUN_ALL_STEPS.includes(job.step as PipelineStep)) {
+      childStepByParent.set(job.parentJobId, job.step as PipelineStep);
+    }
+  }
+
+  let count = 0;
+  for (const job of all) {
+    if (job.status !== 'running' && job.status !== 'queued') continue;
+    if (job.kind === 'pipeline' && !job.currentStep) {
+      job.currentStep = childStepByParent.get(job.id);
+    }
+    job.status = 'interrupted';
+    job.finishedAt = now;
+    job.error = 'Úloha byla bezpečně přerušena kvůli nasazení nové verze.';
+    if (job.kind === 'pipeline' && job.currentStep) {
+      job.failedStep = job.currentStep;
+      markPipelineStepFinished(job, job.currentStep, now);
+    }
+    count += 1;
+  }
+  return count;
+}
+
+/** Po dokončení aktuálního kroku během drainu uloží jako resume bod krok následující. */
+export function checkpointPipelineAfterCompletedStep(
+  parent: PipelineJob,
+  completedStep: PipelineStep,
+  now = new Date().toISOString(),
+): void {
+  const index = RUN_ALL_STEPS.indexOf(completedStep);
+  if (index === RUN_ALL_STEPS.length - 1) {
+    parent.status = 'done';
+    parent.currentStep = completedStep;
+    parent.failedStep = undefined;
+    parent.error = undefined;
+    parent.finishedAt = now;
+    return;
+  }
+  const resumeStep = index >= 0 ? RUN_ALL_STEPS[index + 1] : completedStep;
+  parent.status = 'interrupted';
+  parent.currentStep = resumeStep;
+  parent.failedStep = resumeStep;
+  parent.error = 'Pipeline byla po dokončení aktuálního kroku pozastavena kvůli nasazení nové verze.';
+  parent.finishedAt = now;
+}
+
 interface PersistedJobFile {
   version: 1;
   jobs: PipelineJob[];
