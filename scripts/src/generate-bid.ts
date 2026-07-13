@@ -12,6 +12,7 @@ import {
   generateTechnickyNavrh,
   type MultiProductItem,
   type DiscoveredTemplate,
+  type CompanyProfile,
 } from './lib/template-engine.js';
 import { fillExcelWithAI } from './lib/xls-filler.js';
 import { fillSoupisWithPrices } from './fill-soupis.js';
@@ -134,7 +135,7 @@ async function main() {
   }
 
   // Load company: prefer per-tender company from meta, fallback to legacy
-  let company: Record<string, unknown>;
+  let company: CompanyProfile & Record<string, string>;
   try {
     const meta = JSON.parse(await readFile(join(outputDir, 'tender-meta.json'), 'utf-8'));
     if (meta.company_id) {

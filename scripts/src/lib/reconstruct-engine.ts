@@ -202,7 +202,7 @@ function buildFromStructure(structure: TemplateStructure, data: DocumentData): (
                     spacing: { before: 60, after: 60 },
                   })],
                   width: { size: 40, type: WidthType.PERCENTAGE },
-                  shading: { type: ShadingType.SOLID as const, color: 'F0F0F0', fill: 'F0F0F0' },
+                  shading: { type: ShadingType.SOLID, color: 'F0F0F0', fill: 'F0F0F0' },
                   borders,
                 }),
                 new TableCell({
@@ -232,7 +232,7 @@ function buildFromStructure(structure: TemplateStructure, data: DocumentData): (
                 children: [new TextRun({ text: h, bold: true })],
                 spacing: { before: 60, after: 60 },
               })],
-              shading: { type: ShadingType.SOLID as const, color: 'E8E8E8', fill: 'E8E8E8' },
+              shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
               borders,
             })),
           });

@@ -31,6 +31,9 @@ interface ScrapeJob {
   categoryId: number;     // default warehouse kategorie
   input: Record<string, unknown>; // Apify actor input
   maxItems: number;
+  mode?: 'keyword' | 'urls';
+  keyword?: string;
+  listingUrls?: string[];
 }
 
 // Heureka includeOffers=true vrátí ceny z CZC, Alza, Prusa a dalších obchodů
