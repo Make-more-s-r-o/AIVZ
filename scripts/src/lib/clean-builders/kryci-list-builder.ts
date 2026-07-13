@@ -29,7 +29,7 @@ const DOC_STYLES = {
 
 const thinBorder = { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA' };
 const borders = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
-const headerShading = { type: ShadingType.SOLID as const, color: 'F0F0F0', fill: 'F0F0F0' };
+const headerShading = { type: ShadingType.SOLID, color: 'F0F0F0', fill: 'F0F0F0' };
 
 function labelValueRow(label: string, value: string): TableRow {
   return new TableRow({
@@ -111,7 +111,7 @@ export async function buildKryciList(data: DocumentData): Promise<Buffer> {
             })],
             width: { size: 100, type: WidthType.PERCENTAGE },
             columnSpan: 2,
-            shading: { type: ShadingType.SOLID as const, color: 'E8E8E8', fill: 'E8E8E8' },
+            shading: { type: ShadingType.SOLID, color: 'E8E8E8', fill: 'E8E8E8' },
             borders,
           }),
         ],

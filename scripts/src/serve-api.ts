@@ -1571,7 +1571,7 @@ app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async
 });
 
 // POST /api/tenders/:id/upload - upload files to existing tender
-app.post('/api/tenders/:id/upload', upload.array('files', 20), async (req, res) => {
+app.post<{ id: string }>('/api/tenders/:id/upload', upload.array('files', 20), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
@@ -2571,7 +2571,8 @@ app.delete('/api/companies/:companyId', async (req, res) => {
 const companyDocUpload = multer({
   storage: multer.diskStorage({
     destination: async (req, _file, cb) => {
-      const dir = getCompanyDocumentsDir(req.params.companyId);
+      // Multer's storage callback loses the route-param generic; this route always supplies :companyId.
+      const dir = getCompanyDocumentsDir(req.params.companyId as string);
       await mkdir(dir, { recursive: true });
       cb(null, dir);
     },
@@ -4004,7 +4005,7 @@ app.post('/api/views', requireJwt, async (req, res) => {
 });
 
 // DELETE pohled — jen vlastník NEBO admin (role z user-store dle sub).
-app.delete('/api/views/:id', requireJwt, async (req, res) => {
+app.delete<{ id: string }>('/api/views/:id', requireJwt, async (req, res) => {
   const { id } = req.params;
   if (!/^\d{1,18}$/.test(id)) return res.status(400).json({ error: 'invalid_id' });
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
@@ -4052,7 +4053,7 @@ app.post('/api/stitky', async (req, res) => {
 });
 
 // DELETE štítek — jen admin (globální číselník; kaskádně odpojí vazby).
-app.delete('/api/stitky/:id', requireJwt, requireRole('admin'), async (req, res) => {
+app.delete<{ id: string }>('/api/stitky/:id', requireJwt, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
   if (!/^\d{1,18}$/.test(id)) return res.status(400).json({ error: 'invalid_id' });
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });

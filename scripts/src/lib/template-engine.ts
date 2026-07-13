@@ -24,7 +24,7 @@ import {
 import { parseDocx, parseExcel, convertDocToDocx } from './document-parser.js';
 import type { TenderAnalysis, ProductCandidate } from './types.js';
 
-interface CompanyProfile {
+export interface CompanyProfile {
   nazev: string;
   ico: string;
   dic: string;

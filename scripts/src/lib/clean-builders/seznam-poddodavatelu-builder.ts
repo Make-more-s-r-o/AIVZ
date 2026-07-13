@@ -27,7 +27,7 @@ const DOC_STYLES = {
 
 const thinBorder = { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA' };
 const borders = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
-const headerShading = { type: ShadingType.SOLID as const, color: 'F0F0F0', fill: 'F0F0F0' };
+const headerShading = { type: ShadingType.SOLID, color: 'F0F0F0', fill: 'F0F0F0' };
 
 export async function buildSeznamPoddodavatelu(data: DocumentData): Promise<Buffer> {
   const headerRow = new TableRow({
