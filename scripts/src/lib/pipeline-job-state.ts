@@ -6,6 +6,13 @@ export const RUN_ALL_STEPS = ['extract', 'analyze', 'match', 'generate', 'valida
 export type PipelineStep = typeof RUN_ALL_STEPS[number];
 export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval' | 'budget_paused';
 
+export interface PipelineStepTiming {
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export type PipelineStepTimings = Partial<Record<PipelineStep, PipelineStepTiming>>;
+
 /**
  * Signál z run-all řetězce, že další krok (generate) narazil na lidský money-gate —
  * nepotvrzené ceny. Není to chyba: řetězec se PAUZNE (waiting_approval), ne error.
@@ -40,6 +47,50 @@ export interface PipelineJob {
   currentStep?: PipelineStep;
   failedStep?: PipelineStep;
   initiator?: 'monitoring' | 'operator';
+  /** Skutečný wall-clock start/konec jednotlivých kroků run-all pipeline. */
+  stepTimings?: PipelineStepTimings;
+}
+
+/** Zapíše skutečný start kroku. Opakované volání původní start nepřepíše. */
+export function markPipelineStepStarted(
+  job: PipelineJob,
+  step: PipelineStep,
+  now = new Date().toISOString(),
+): void {
+  if (job.kind !== 'pipeline') return;
+  job.stepTimings ??= {};
+  job.stepTimings[step] ??= { startedAt: now };
+}
+
+/** Uzavře měřený krok; bez známého startu nic nesyntetizuje (legacy kompatibilita). */
+export function markPipelineStepFinished(
+  job: PipelineJob,
+  step: PipelineStep,
+  now = new Date().toISOString(),
+): void {
+  const timing = job.stepTimings?.[step];
+  if (job.kind !== 'pipeline' || !timing || timing.finishedAt) return;
+  timing.finishedAt = now;
+}
+
+/** Trvání kroků v ms; běžící krok se počítá proti `now`. Nevalidní legacy data ignoruje. */
+export function getPipelineStepDurationsMs(
+  job: PipelineJob,
+  now = new Date().toISOString(),
+): Partial<Record<PipelineStep, number>> | undefined {
+  if (!job.stepTimings) return undefined;
+  const nowMs = Date.parse(now);
+  const durations: Partial<Record<PipelineStep, number>> = {};
+  for (const step of RUN_ALL_STEPS) {
+    const timing = job.stepTimings[step];
+    if (!timing) continue;
+    const startMs = Date.parse(timing.startedAt);
+    const endMs = timing.finishedAt ? Date.parse(timing.finishedAt) : nowMs;
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+      durations[step] = endMs - startMs;
+    }
+  }
+  return Object.keys(durations).length > 0 ? durations : undefined;
 }
 
 /**
@@ -186,7 +237,10 @@ export async function loadPipelineJobs(
       job.status = 'interrupted';
       job.finishedAt = now;
       job.error = job.error || 'Úloha byla přerušena restartem serveru.';
-      if (job.kind === 'pipeline' && job.currentStep) job.failedStep = job.currentStep;
+      if (job.kind === 'pipeline' && job.currentStep) {
+        job.failedStep = job.currentStep;
+        markPipelineStepFinished(job, job.currentStep, now);
+      }
       interruptedCount += 1;
     }
     restored.set(job.id, job);
