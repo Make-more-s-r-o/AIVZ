@@ -820,7 +820,7 @@ Tasky mimo vlnovou sekvenci — dělají se průběžně, některé mají deadli
     `docs/plan/01-business-model.md` §1.1 (nahradí „zatím nemáme").
   - **Velikost:** M (research). **Kdo:** Codex/Sonnet + Fable sanity, Dan interpretace.
 
-- [ ] **T-09 — Legacy `?token=` v backendu odstranit** (S; do konce vlny B)
+- [x] **T-09 — Legacy `?token=` v backendu odstranit** (S; dokončeno 2026-07-13)
   - **Proč:** JWT je pryč z FE query stringu, ale backend query-parametr pro skripty
     zůstal — token v query = token v nginx lozích. Dimenze: provoz/bezpečnost.
   - **Soubory:** `scripts/src/lib/jwt-auth.ts` (query podporu vypnout), interní skripty

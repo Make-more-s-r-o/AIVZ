@@ -53,7 +53,7 @@ Triáž: v seznamu je číselné go/no-go skóre 0-100 → operátor si vybere, 
 ## 5) Tři věci k Danovu rozhodnutí
 
 1. **Marže % — reálná hodnota.** Default je 10 % v gate, ALE cenový panel i bulk-confirm defaultují **0 %** → one-click k nulové marži. Jakou marži chceš jako skutečný default pro podání (10 %? per-kategorie?) a má bulk-confirm dědit tenhle default místo nuly?
-2. **Hlídač token — JWT v query stringu.** JWT stále teče přes `?token=` do nginx access logu (api.ts 4 místa + serve-api.ts). Bezpečnostní dluh. Řešit teď (přesun do hlavičky/cookie), nebo odložit za „první podaná"?
+2. **Hlídač token — JWT v query stringu.** V době reportu JWT stále teklo přes `?token=` do nginx access logu (api.ts 4 místa + serve-api.ts). **Vyřešeno v T-09 (2026-07-13):** backend query token odmítá a klienti používají `Authorization: Bearer`.
 3. **Win-price data — outliery + PDF backfill.** Chceš, abych proaktivně (a) vyčistil outliery ve win_prices (kazí go/no-go proximity faktor) a (b) dohnal chybějící PDF/ceny u 95 % „ostatni" záznamů? Zvedne to kvalitu triáže i business skóre, ale je to práce navíc mimo money-path.
 
 ## 6) Autonomní rozhodnutí učiněná v noci
