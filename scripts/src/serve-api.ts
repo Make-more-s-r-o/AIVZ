@@ -18,7 +18,9 @@ import {
 } from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
-import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
+import {
+  authenticateBearer, isJwtEnabled, requireJwtBearer as requireJwt, signToken,
+} from './lib/jwt-auth.js';
 import {
   getAllUsers, getUserByEmail, getUserById, createUser,
   verifyPassword, updatePassword, deleteUser, updateLastLogin, isFirstRun,
@@ -213,35 +215,15 @@ app.use((req, res, next) => {
   // z PUBLIC_PATHS (health, auth status/login/setup). Read-only role `viewer` čtení nadále smí —
   // RBAC middleware níže blokuje jen mutace.
 
-  // 1. JWT Bearer token / legacy statický API_TOKEN (platí pro GET i mutace)
-  const auth = req.headers.authorization;
-  if (auth?.startsWith('Bearer ')) {
-    const token = auth.slice(7);
-    // Try JWT first
-    const jwtPayload = verifyToken(token);
-    if (jwtPayload) {
-      (req as any).user = jwtPayload;
-      return next();
-    }
-    // Try static API_TOKEN
-    if (API_TOKEN && token === API_TOKEN) return next();
+  // JWT Bearer token / legacy statický API_TOKEN (platí pro GET i mutace).
+  // Tokeny v query stringu se záměrně neakceptují, aby nekončily v access lozích.
+  const bearerAuth = authenticateBearer(req.headers.authorization, API_TOKEN);
+  if (bearerAuth.authenticated) {
+    if (bearerAuth.payload) (req as any).user = bearerAuth.payload;
+    return next();
   }
 
-  // 2. Support ?token= query param — zpětná kompatibilita pro curl/skripty a staré odkazy.
-  //    FE (apps/web) už tuto cestu NEPOUŽÍVÁ (viz downloadWithAuth v apps/web/src/lib/api.ts —
-  //    stahování jde přes fetch + Authorization hlavičku, aby token neunikal do nginx access
-  //    logů). Plné odstranění query-token akceptace na BE je follow-up, ne součást této změny.
-  if (req.query.token) {
-    const qToken = req.query.token as string;
-    const jwtPayload = verifyToken(qToken);
-    if (jwtPayload) {
-      (req as any).user = jwtPayload;
-      return next();
-    }
-    if (API_TOKEN && qToken === API_TOKEN) return next();
-  }
-
-  // 3. Dev režim (JWT_SECRET nenastaven, isJwtEnabled()===false) = single-user lokální vývoj.
+  // Dev režim (JWT_SECRET nenastaven, isJwtEnabled()===false) = single-user lokální vývoj.
   //    - GET zůstává otevřené (jako dřív) → lokální vývoj bez tokenu funguje beze změny.
   //    - Mutace vyžadují same-origin z loopbacku. Origin/Referer i Host jsou klientem ovladatelné
   //      → NESMÍ sloužit jako auth signál v produkci; proto je celá tato větev v prod (JWT zapnutý)
@@ -823,28 +805,6 @@ app.get('/api/health', async (_req, res) => {
 });
 
 // --- Auth endpoints ---
-
-// Helper: require JWT auth for specific routes
-function requireJwt(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const auth = req.headers.authorization;
-  if (auth?.startsWith('Bearer ')) {
-    const payload = verifyToken(auth.slice(7));
-    if (payload) {
-      (req as any).user = payload;
-      return next();
-    }
-  }
-  // Also check query token (zpětná kompatibilita pro curl/skripty — FE už ?token= neposílá,
-  // viz downloadWithAuth v apps/web/src/lib/api.ts; plné odstranění je follow-up)
-  if (req.query.token) {
-    const payload = verifyToken(req.query.token as string);
-    if (payload) {
-      (req as any).user = payload;
-      return next();
-    }
-  }
-  res.status(401).json({ error: 'Unauthorized — JWT required' });
-}
 
 // RBAC (M7): omezení mutací dle role. V dev bez JWT (isJwtEnabled()===false) se neomezuje
 // (single-user provoz). Legacy token bez role → dohledat z user-store dle sub (ať se nezamkne).
