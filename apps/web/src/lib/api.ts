@@ -152,6 +152,7 @@ export interface RunAllStatus {
   currentStep?: StepName;
   failedStep?: StepName;
   error?: string;
+  initiator?: 'monitoring' | 'operator';
 }
 
 export interface JobStatus {
@@ -166,6 +167,7 @@ export interface JobStatus {
   parentJobId?: string;
   currentStep?: StepName;
   failedStep?: StepName;
+  initiator?: 'monitoring' | 'operator';
   logs: string[];
   totalLogLines: number;
 }
@@ -208,6 +210,7 @@ export interface MonitoringConfig {
   vyloucena_slova: string[];
   min_hodnota: number | null;
   max_hodnota: number | null;
+  auto_spustit_pipeline: boolean;
 }
 
 export interface MonitoringFeedItem {

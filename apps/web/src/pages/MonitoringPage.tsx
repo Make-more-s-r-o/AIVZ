@@ -79,7 +79,9 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     if (busyId) return;
     setBusyId(item.id);
     try {
-      const result = await prevzitMonitoring(item.id, process ? { stahnout_zd: true, spustit: true } : {});
+      const result = await prevzitMonitoring(item.id, process
+        ? { stahnout_zd: true }
+        : { spustit: false });
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['monitoring-feed'] }),
         qc.invalidateQueries({ queryKey: ['tenders'] }),

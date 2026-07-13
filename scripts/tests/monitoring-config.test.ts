@@ -8,6 +8,7 @@ import {
   DEFAULT_MONITORING_CONFIG,
   MonitoringConfigSchema,
   getMonitoringConfig,
+  resolveMonitoringPipelineStart,
   saveMonitoringConfig,
 } from '../src/lib/monitoring/monitoring-config.js';
 
@@ -30,6 +31,7 @@ test('monitoring config se validuje a uloží do nového adresáře', async () =
     vyloucena_slova: ['pronájem'],
     min_hodnota: 100_000,
     max_hodnota: 5_000_000,
+    auto_spustit_pipeline: false,
   };
   try {
     assert.deepEqual(await saveMonitoringConfig(input, path), input);
@@ -40,7 +42,19 @@ test('monitoring config se validuje a uloží do nového adresáře', async () =
 });
 
 test('monitoring config odmítne neznámou kategorii a obrácený rozsah', () => {
-  const base = { kategorie_zajmu: [], klicova_slova: [], vyloucena_slova: [], min_hodnota: null, max_hodnota: null };
+  const base = { kategorie_zajmu: [], klicova_slova: [], vyloucena_slova: [], min_hodnota: null, max_hodnota: null, auto_spustit_pipeline: true };
   assert.equal(MonitoringConfigSchema.safeParse({ ...base, kategorie_zajmu: ['neexistuje'] }).success, false);
   assert.equal(MonitoringConfigSchema.safeParse({ ...base, min_hodnota: 10, max_hodnota: 5 }).success, false);
+});
+
+test('monitoring config doplní auto-spuštění jako zapnuté i starému souboru', () => {
+  const parsed = MonitoringConfigSchema.parse({
+    kategorie_zajmu: [], klicova_slova: [], vyloucena_slova: [], min_hodnota: null, max_hodnota: null,
+  });
+  assert.equal(parsed.auto_spustit_pipeline, true);
+});
+
+test('explicitní spustit=false přebije zapnuté auto-spuštění v konfiguraci', () => {
+  assert.equal(resolveMonitoringPipelineStart({ spustit: false }, DEFAULT_MONITORING_CONFIG), false);
+  assert.equal(resolveMonitoringPipelineStart({}, DEFAULT_MONITORING_CONFIG), true);
 });

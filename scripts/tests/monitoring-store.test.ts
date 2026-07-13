@@ -267,6 +267,7 @@ const MONITORING_CONFIG: MonitoringConfig = {
   vyloucena_slova: [],
   min_hodnota: null,
   max_hodnota: null,
+  auto_spustit_pipeline: true,
 };
 
 test('scoreFeedItem výrazně zvýhodní kategorii zájmu a srazí kategorii mimo zájem', () => {

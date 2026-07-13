@@ -27,7 +27,7 @@ import {
   hasPartsSelectionSnapshot,
   readPartsSelectionSnapshot,
 } from './lib/parts-selection-guard.js';
-import { findUnconfirmedPrices } from './lib/price-confirmation.js';
+import { assertPricesConfirmedForGeneration } from './lib/price-confirmation.js';
 import {
   buildDocumentFillReport,
   buildFillReport,
@@ -119,12 +119,7 @@ async function main() {
       generationPartIds = new Set(analysis.casti.map((cast) => cast.id));
     }
   }
-  const unconfirmed = findUnconfirmedPrices(productMatch, generationPartIds);
-  if (unconfirmed.count > 0) {
-    throw new Error(
-      `Generování nelze spustit nad nepotvrzenými cenami (${unconfirmed.count}): ${unconfirmed.names.join(', ')}.`,
-    );
-  }
+  assertPricesConfirmedForGeneration(productMatch, generationPartIds);
 
   // Vyčistit staré vygenerované soubory (ponechat data z předchozích kroků pipeline)
   const KEEP_FILES = new Set([

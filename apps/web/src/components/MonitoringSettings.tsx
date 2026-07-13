@@ -108,6 +108,14 @@ export default function MonitoringSettings() {
             </LabeledInput>
           </div>
         </Fieldset>
+
+        <Fieldset title="Zpracování po převzetí" description="Automatické zpracování nikdy nepřeskočí lidské potvrzení cen.">
+          <Checkbox
+            checked={form.auto_spustit_pipeline}
+            onChange={(auto_spustit_pipeline) => setForm({ ...form, auto_spustit_pipeline })}
+            label="Po převzetí zakázky automaticky spustit zpracování (zastaví se na potvrzení cen)"
+          />
+        </Fieldset>
       </Card>
     </div>
   );

@@ -331,6 +331,10 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
         </button>
       </div>
 
+      {runAll?.initiator === 'monitoring' && (
+        <div className="text-right text-[10px] text-gray-400">spuštěno automaticky po převzetí</div>
+      )}
+
       {/* Total cost */}
       {costData && costData.totalCZK > 0 && (
         <div className="text-right text-xs text-gray-400">

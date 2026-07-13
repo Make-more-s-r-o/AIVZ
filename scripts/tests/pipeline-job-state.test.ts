@@ -194,6 +194,24 @@ test('run-all: jiná chyba při startu generate zůstává tvrdou chybou řetěz
   assert.equal(parent.finishedAt, '2026-07-10T12:00:00.000Z');
 });
 
+test('monitoring run-all zachová initiator a bez potvrzení cen nespustí generate', async () => {
+  const parent = job({
+    id: 'pipeline-monitoring', step: 'all', status: 'running', kind: 'pipeline',
+    currentStep: 'match', initiator: 'monitoring',
+  });
+  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id, initiator: 'monitoring' });
+  let generateStarted = false;
+
+  await advanceRunAllChain(parent, doneChild, (step) => {
+    if (step === 'generate') throw new ApprovalRequiredError(1, 'Čeká na potvrzení cen (1).');
+    generateStarted = true;
+  });
+
+  assert.equal(generateStarted, false, 'generate se bez potvrzené ceny nesmí zařadit');
+  assert.equal(parent.status, 'waiting_approval');
+  assert.equal(parent.initiator, 'monitoring');
+});
+
 test('restore: waiting_approval pipeline job přežije restart (neflipuje na interrupted)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vz-pipeline-jobs-'));
   const filePath = join(dir, '.jobs.json');

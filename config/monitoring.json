@@ -3,5 +3,6 @@
   "klicova_slova": [],
   "vyloucena_slova": [],
   "min_hodnota": null,
-  "max_hodnota": null
+  "max_hodnota": null,
+  "auto_spustit_pipeline": true
 }
