@@ -330,10 +330,32 @@ export interface InboxEntry {
   data_error_files: string[];
   deadline_alarm: boolean;
   hodin_do_lhuty: number | null;
+  score: number | null;
 }
 
-export async function getInbox(): Promise<InboxEntry[]> {
-  return fetchJson('/inbox');
+export type InboxSort = 'deadline_score' | 'score_deadline';
+
+export interface InboxBulkSkipped {
+  id: string;
+  status: number;
+  reason: string;
+  detail?: any;
+}
+
+export interface InboxBulkResult {
+  started: string[];
+  skipped: InboxBulkSkipped[];
+}
+
+export async function getInbox(sort: InboxSort = 'deadline_score'): Promise<InboxEntry[]> {
+  return fetchJson(`/inbox?sort=${encodeURIComponent(sort)}`);
+}
+
+export async function runInboxBulk(action: 'generate' | 'finalize', ids: string[]): Promise<InboxBulkResult> {
+  return fetchJson(`/inbox/bulk-${action}`, {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
 }
 
 // Profit-aware bid skóre počítané on-the-fly z aktuálních souborů zakázky.

@@ -1,11 +1,15 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { mkdtemp, mkdir, rm, copyFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, copyFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { computeInboxEntry, needsAction, buildInbox, readInboxJson, type InboxTenderInput } from '../src/lib/inbox.js';
+import {
+  computeInboxEntry, evaluateBulkCandidate, inboxBulkGovernanceKey, needsAction, buildInbox, readInboxJson,
+  type InboxTenderInput,
+} from '../src/lib/inbox.js';
+import { DEFAULT_GOVERNANCE, governanceSwitchBlock } from '../src/lib/governance.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -280,9 +284,103 @@ test('buildInbox: filtruje čisté a řadí nejnaléhavější první', () => {
     },
     { tenderId: 'fails', validation: { ready_to_submit: false, checks: [{ status: 'fail' }, { status: 'fail' }] } },
   ];
-  const out = buildInbox(inputs);
+  const out = buildInbox(inputs, 'urgency');
   assert.equal(out.length, 3); // 'clean' vypadne
   assert.equal(out[0].tender_id, 'hard'); // hard flag nejvýš
   assert.equal(out[1].tender_id, 'fails'); // pak fails
   assert.equal(out[2].tender_id, 'ceny');
+});
+
+test('buildInbox: default řadí nejbližší lhůtu první a sekundárně vyšší skóre', () => {
+  const inputs: InboxTenderInput[] = [
+    { tenderId: 'later', analysis: { terminy: {}, go_no_go: { score: 95 } }, lhutaNabidek: '2026-07-15T12:00:00Z', nowMs: NOW, validation: { checks: [{ status: 'fail' }] } },
+    { tenderId: 'same-low', analysis: { go_no_go: { score: 40 } }, lhutaNabidek: '2026-07-12T12:00:00Z', nowMs: NOW, validation: { checks: [{ status: 'fail' }] } },
+    { tenderId: 'same-high', analysis: { go_no_go: { score: 80 } }, lhutaNabidek: '2026-07-12T12:00:00Z', nowMs: NOW, validation: { checks: [{ status: 'fail' }] } },
+  ];
+  assert.deepEqual(buildInbox(inputs).map((entry) => entry.tender_id), ['same-high', 'same-low', 'later']);
+  assert.deepEqual(buildInbox(inputs, 'score_deadline').map((entry) => entry.tender_id), ['later', 'same-high', 'same-low']);
+});
+
+test('bulk generate gate: plně attestovaná zakázka projde', () => {
+  const gate = evaluateBulkCandidate({ polozky_match: [item(), item({ polozka_index: 1 })] } as any);
+  assert.deepEqual(gate, { allowed: true });
+});
+
+test('bulk generate gate: nepotvrzená položka se vyřadí se strojovým důvodem a seznamem', () => {
+  const gate = evaluateBulkCandidate({
+    polozky_match: [item(), item({ polozka_index: 1, polozka_nazev: 'Bruska', cenova_uprava: { potvrzeno: false } })],
+  } as any);
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.reason, 'unconfirmed_items');
+  assert.deepEqual(gate.detail, { count: 1, items: ['Bruska'] });
+});
+
+test('bulk generate gate: HARD flag zakázku vyřadí', () => {
+  const gate = evaluateBulkCandidate({
+    polozky_match: [item({ cenova_uprava: { nabidkova_cena_s_dph: 0, potvrzeno: true } })],
+  } as any);
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.reason, 'hard_flag');
+  assert.equal((gate.detail as any).count, 1);
+});
+
+test('bulk generate gate: potvrzený legacy single-product pod nákupem vyřadí HARD flag', () => {
+  const gate = evaluateBulkCandidate({
+    kandidati: [{ cena_bez_dph: 1_000, cena_s_dph: 1_210 }],
+    vybrany_index: 0,
+    cenova_uprava: {
+      nabidkova_cena_bez_dph: 900,
+      nabidkova_cena_s_dph: 1_089,
+      nakupni_cena_bez_dph: 1_000,
+      potvrzeno: true,
+    },
+  } as any);
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.reason, 'hard_flag');
+  assert.equal((gate.detail as any).flags[0].code, 'below_cost');
+});
+
+test('regrese PR #53: bulk gate pouze čte a nikdy nezmění potvrzení položek', () => {
+  const productMatch = {
+    polozky_match: [
+      item({ cenova_uprava: { nabidkova_cena_s_dph: 1210, potvrzeno: true, zkontrolovano_at: '2026-07-11T10:00:00Z', zkontrolovano_kym: 'operator-1' } }),
+      item({ polozka_index: 1, cenova_uprava: { nabidkova_cena_s_dph: 1000, potvrzeno: false } }),
+    ],
+  };
+  const before = structuredClone(productMatch);
+  const gate = evaluateBulkCandidate(productMatch as any);
+  assert.equal(gate.reason, 'unconfirmed_items');
+  assert.deepEqual(productMatch, before);
+  assert.deepEqual(productMatch.polozky_match.map((row) => row.cenova_uprava.potvrzeno), [true, false]);
+});
+
+test('governance: vypnutý generate zablokuje bulk generate před spuštěním', () => {
+  const key = inboxBulkGovernanceKey('generate');
+  const block = governanceSwitchBlock({ ...DEFAULT_GOVERNANCE, generate_enabled: false }, key);
+  assert.match(block ?? '', /generate_enabled/);
+});
+
+test('governance: klíče bulk akcí vynucují guard pro každou jednotlivou akci', () => {
+  const switchedOffMidBatch = { ...DEFAULT_GOVERNANCE, generate_enabled: false, finalize_enabled: false };
+  assert.match(governanceSwitchBlock(switchedOffMidBatch, inboxBulkGovernanceKey('generate')) ?? '', /generate_enabled/);
+  assert.match(governanceSwitchBlock(switchedOffMidBatch, inboxBulkGovernanceKey('finalize')) ?? '', /finalize_enabled/);
+});
+
+test('governance: bulk endpointy kontrolují guard uvnitř iterace bez finalize bypassu', async () => {
+  const source = await readFile(join(__dirname, '..', 'src', 'serve-api.ts'), 'utf-8');
+  const generateRoute = source.slice(
+    source.indexOf("app.post(['/api/inbox/bulk-generate'"),
+    source.indexOf("app.post(['/api/inbox/bulk-finalize'"),
+  );
+  const loop = generateRoute.indexOf('for (const id of ids)');
+  const perTenderGuard = generateRoute.indexOf("enforceGovernance(governanceResponse, 'generate_enabled', true)");
+  const enqueue = generateRoute.indexOf("enqueueStepJob(id, 'generate')");
+  assert.ok(loop >= 0 && perTenderGuard > loop && enqueue > perTenderGuard);
+
+  const finalizeRoute = source.slice(
+    source.indexOf("app.post(['/api/inbox/bulk-finalize'"),
+    source.indexOf('// GET stav podání zakázky'),
+  );
+  assert.match(finalizeRoute, /finalizeTenderHandler\(childRequest, captured\)/);
+  assert.doesNotMatch(finalizeRoute, /finalizeTenderHandler\(childRequest, captured, true\)/);
 });

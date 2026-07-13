@@ -12,7 +12,10 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
 import { clearPriceForProductChange, validateBulkPriceWrites, validatePriceWrite } from './lib/price-review.js';
-import { buildInbox, readInboxJson, type InboxTenderInput } from './lib/inbox.js';
+import {
+  buildInbox, evaluateBulkCandidate, inboxBulkGovernanceKey, readInboxJson,
+  type BulkSkip, type InboxSort, type InboxTenderInput,
+} from './lib/inbox.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
 import { isJwtEnabled, signToken, verifyToken } from './lib/jwt-auth.js';
@@ -348,28 +351,35 @@ async function getUnconfirmedPrices(
   }
 }
 
-async function getStepGateError(tenderId: string, step: string): Promise<string | null> {
-  if (step !== 'generate') return null;
+async function getBulkCandidateGate(tenderId: string) {
   try {
     const matchRaw = await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8');
     const matchData = ProductMatchSchema.parse(JSON.parse(matchRaw));
-
-    if (matchData.polozky_match) {
-      const unconfirmed = matchData.polozky_match.filter((item) => !item.cenova_uprava?.potvrzeno);
-      if (unconfirmed.length > 0) {
-        const names = unconfirmed.map((item) => item.polozka_nazev).join(', ');
-        return `Nejprve potvrďte ceny u všech položek. Nepotvrzené: ${names}`;
-      }
-    } else if (!matchData.cenova_uprava?.potvrzeno) {
-      return 'Nejprve potvrďte ceny v záložce Produkty. Bez potvrzené cenové kalkulace nelze generovat dokumenty.';
-    }
-  } catch (err: any) {
-    if (err.code === 'ENOENT') {
-      return 'Nejprve spusťte krok "Produkty" a potvrďte ceny.';
-    }
-    return `Chyba při čtení product-match.json: ${String(err)}`;
+    let selectedParts: Set<string> | null = null;
+    try {
+      const selection = JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'parts-selection.json'), 'utf-8'));
+      selectedParts = new Set<string>(selection.selected_parts || []);
+    } catch { /* jednočástová zakázka nebo zatím bez výběru */ }
+    return evaluateBulkCandidate(matchData, selectedParts);
+  } catch (error) {
+    return {
+      allowed: false as const,
+      reason: 'invalid_data',
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
-  return null;
+}
+
+async function getStepGateError(tenderId: string, step: string): Promise<string | null> {
+  if (step !== 'generate') return null;
+  const gate = await getBulkCandidateGate(tenderId);
+  if (gate.allowed) return null;
+  if (gate.reason === 'unconfirmed_items') {
+    const detail = gate.detail as { items?: string[] };
+    return `Nejprve potvrďte ceny u všech položek. Nepotvrzené: ${(detail.items ?? []).join(', ')}`;
+  }
+  if (gate.reason === 'hard_flag') return 'Generování blokuje HARD cenový flag. Nejprve opravte cenu.';
+  return 'Nejprve spusťte krok "Produkty" a potvrďte ceny; cenová data chybí nebo jsou poškozená.';
 }
 
 function enqueueStepJob(
@@ -1439,6 +1449,10 @@ app.get('/api/tenders', async (req, res) => {
 // ale zůstane viditelný jako blokující chyba dat.
 app.get('/api/inbox', async (req, res) => {
   try {
+    const requestedSort = String(req.query.sort ?? 'deadline_score');
+    const sort: InboxSort = requestedSort === 'score_deadline' || requestedSort === 'urgency'
+      ? requestedSort
+      : 'deadline_score';
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = (await readdir(INPUT_DIR)).filter((d) => !d.startsWith('.'));
     const crmStatuses = await getAllStatuses();
@@ -1472,7 +1486,7 @@ app.get('/api/inbox', async (req, res) => {
       }),
     );
 
-    res.json(buildInbox(inputs));
+    res.json(buildInbox(inputs, sort));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -2952,7 +2966,7 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
 // stále nepotvrzené ceny → 409 s počtem.
 app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   const { id } = req.params;
-  if (!(await enforceGovernance(res, 'generate_enabled', true))) return;
+  if (!(await enforceGovernance(res, inboxBulkGovernanceKey('generate'), true))) return;
 
   // Bez await mezi nalezením a změnou stavu: první request synchronně claimne parent job,
   // druhý už waiting_approval neuvidí a nemůže zařadit duplicitní generate.
@@ -3397,8 +3411,8 @@ async function buildSubmissionBundle(tenderId: string, snapshot?: BidSnapshot): 
 // POST finalize — gate na kompletní podatelnou nabídku, pak vytvoří IMMUTABILNÍ balík
 // podání (ZIP + manifest se sha256) a přepne zakázku maximálně na 'pripravena'.
 // NEPŘEPÍNÁ na 'odeslana' — to dělá až POST /podano se skutečnou evidencí podání.
-app.post('/api/tenders/:id/finalize', async (req, res) => {
-  const { id } = req.params;
+async function finalizeTenderHandler(req: express.Request, res: express.Response) {
+  const id = String(req.params.id);
   if (!(await enforceGovernance(res, 'finalize_enabled'))) return;
   if (!isSafeTenderId(id)) return res.status(400).json({ error: 'invalid_id' });
   const outputDir = join(OUTPUT_DIR, id);
@@ -3483,6 +3497,107 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+}
+
+app.post('/api/tenders/:id/finalize', (req, res) => finalizeTenderHandler(req, res));
+
+function bulkIds(body: unknown, maxIds: number): string[] | null {
+  const idsSchema = z.array(z.string().trim().min(1)).min(1).max(maxIds);
+  const parsed = z.union([
+    z.object({ ids: idsSchema }),
+    z.object({ tenderIds: idsSchema }),
+    z.object({ tender_ids: idsSchema }),
+  ]).safeParse(body);
+  if (!parsed.success) return null;
+  const ids = 'ids' in parsed.data ? parsed.data.ids
+    : 'tenderIds' in parsed.data ? parsed.data.tenderIds
+    : parsed.data.tender_ids;
+  return [...new Set(ids)];
+}
+
+// POST /api/inbox/bulk-generate — každá zakázka má vlastní čerstvý money/HARD gate.
+// Endpoint nikdy nezapisuje cenová potvrzení; pouze po úspěšné kontrole enqueueuje generate.
+app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, res) => {
+  const ids = bulkIds(req.body, 200);
+  if (!ids) return res.status(400).json({ error: 'invalid_ids' });
+  if (!(await enforceGovernance(res, 'generate_enabled', true))) return;
+
+  const started: string[] = [];
+  const skipped: BulkSkip[] = [];
+  for (const id of ids) {
+    if (!isSafeTenderId(id)) {
+      skipped.push({ id, status: 409, reason: 'invalid_id' });
+      continue;
+    }
+    try {
+      await stat(join(INPUT_DIR, id));
+    } catch {
+      skipped.push({ id, status: 409, reason: 'not_found' });
+      continue;
+    }
+    const active = [...jobs.values()].find((job) =>
+      job.tenderId === id && job.step === 'generate' && (job.status === 'running' || job.status === 'queued'));
+    if (active) {
+      skipped.push({ id, status: 409, reason: 'already_running', detail: { jobId: active.id } });
+      continue;
+    }
+    const gate = await getBulkCandidateGate(id);
+    if (!gate.allowed) {
+      skipped.push({ id, status: 409, reason: gate.reason ?? 'invalid_data', detail: gate.detail });
+      continue;
+    }
+    let governanceStatus = 200;
+    let governanceBody: any = null;
+    const governanceResponse = {
+      status(code: number) { governanceStatus = code; return this; },
+      json(value: unknown) { governanceBody = value; return this; },
+    } as unknown as express.Response;
+    if (!(await enforceGovernance(governanceResponse, 'generate_enabled', true))) {
+      skipped.push({ id, status: governanceStatus, reason: 'governance_disabled', detail: governanceBody });
+      continue;
+    }
+    enqueueStepJob(id, 'generate');
+    started.push(id);
+  }
+  res.json({ started, skipped });
+});
+
+// POST /api/inbox/bulk-finalize — stejný submit gate i finalizační implementace jako single endpoint.
+app.post(['/api/inbox/bulk-finalize', '/api/inbox/bulk/finalize'], async (req, res) => {
+  const ids = bulkIds(req.body, 20);
+  if (!ids) return res.status(400).json({ error: 'invalid_ids' });
+  if (!(await enforceGovernance(res, inboxBulkGovernanceKey('finalize')))) return;
+
+  const started: string[] = [];
+  const skipped: BulkSkip[] = [];
+  for (const id of ids) {
+    if (!isSafeTenderId(id)) {
+      skipped.push({ id, status: 409, reason: 'invalid_id' });
+      continue;
+    }
+    const gate = await getBulkCandidateGate(id);
+    if (!gate.allowed) {
+      skipped.push({ id, status: 409, reason: gate.reason ?? 'invalid_data', detail: gate.detail });
+      continue;
+    }
+
+    let status = 200;
+    let body: any = null;
+    const captured = {
+      status(code: number) { status = code; return this; },
+      json(value: unknown) { body = value; return this; },
+    } as unknown as express.Response;
+    const childRequest = { ...req, params: { ...req.params, id } } as unknown as express.Request;
+    await finalizeTenderHandler(childRequest, captured);
+    if (status >= 200 && status < 300) started.push(id);
+    else skipped.push({
+      id,
+      status,
+      reason: typeof body?.error === 'string' ? body.error : 'finalize_failed',
+      detail: body,
+    });
+  }
+  res.json({ started, skipped });
 });
 
 // GET stav podání zakázky — manifest immutable balíku + případná evidence (public GET, resilientní).
