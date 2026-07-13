@@ -1,5 +1,5 @@
 /** Čisté a defenzivní sestavení feature vektoru nabídky v okamžiku finalize. */
-import { computeBidEconomics } from './go-no-go.js';
+import { computeBidEconomics, type BidEconomics } from './go-no-go.js';
 
 export interface BidSnapshot {
   tender_id: string;
@@ -20,6 +20,7 @@ export interface BidSnapshot {
 export interface BuildBidSnapshotInput {
   tenderId: string; analysis?: unknown; productMatch?: unknown; validationReport?: unknown;
   costLog?: unknown; winPriceBand?: unknown; monitoringItem?: unknown; snapshotAt?: string;
+  bidEconomics?: BidEconomics;
 }
 
 const obj = (v: unknown): Record<string, any> => v != null && typeof v === 'object' ? v as Record<string, any> : {};
@@ -57,8 +58,8 @@ export function buildBidSnapshot(input: BuildBidSnapshotInput): BidSnapshot {
     const items = itemsOf(pm);
     const total = items.length;
     const flags = items.flatMap((item) => Array.isArray(item.sanity_flags) ? item.sanity_flags.map(obj) : []);
-    let economics: ReturnType<typeof computeBidEconomics> | null = null;
-    try { economics = computeBidEconomics(pm as any); } catch { /* vadný legacy vstup */ }
+    let economics: ReturnType<typeof computeBidEconomics> | null = input.bidEconomics ?? null;
+    try { economics ??= computeBidEconomics(pm as any); } catch { /* vadný legacy vstup */ }
     const costEntries = Array.isArray(input.costLog) ? input.costLog.map(obj) : [];
     const aiCost = costEntries.reduce((sum, entry) => sum + (num(entry.costCZK) ?? 0), 0);
     const timestamps = costEntries.map((entry) => Date.parse(str(entry.timestamp) ?? '')).filter(Number.isFinite);

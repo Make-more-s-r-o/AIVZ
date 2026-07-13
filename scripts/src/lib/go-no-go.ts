@@ -43,6 +43,34 @@ interface Factor {
   reason: string;
 }
 
+export const GO_NO_GO_FACTOR_NAMES = ['sector', 'budget', 'priced_items', 'win_price', 'deadline'] as const;
+export const BID_FACTOR_NAMES = [
+  'margin', 'absolute_profit', 'match_quality', 'win_price',
+  'below_market_penalty', 'nonexistent_candidate_penalty', 'hard_flags_cap',
+] as const;
+
+export interface ScoreFeature {
+  nazev: string;
+  surova_hodnota: unknown;
+  normalizovana_hodnota: number | null;
+  vaha: number;
+  prispevek: number;
+  duvod: string | null;
+}
+
+export interface ScoreFeatureVector {
+  typ: 'gonogo' | 'bid';
+  faktory: ScoreFeature[];
+  skore: number;
+  doporuceni: 'GO' | 'ZVAZIT' | 'NOGO';
+}
+
+interface FactorObservation {
+  name: string;
+  raw: unknown;
+  factor: Factor | null;
+}
+
 /**
  * Čisté informativní skóre: pracuje jen s předanými daty a nemění ceny ani stav pipeline.
  * Volitelný kontext `extractedAt`, `obory` a `keyword_filters` používá reálná pole z extrakce
@@ -53,22 +81,8 @@ export function scoreGoNoGo(
   productMatch?: ProductMatch,
   winBand?: PriceBand,
 ): GoNoGoResult {
-  const factors: Factor[] = [];
-
-  const sectorFactor = scoreSectorMatch(analysis);
-  if (sectorFactor) factors.push(sectorFactor);
-
-  const budgetFactor = scoreBudget(analysis.zakazka.predpokladana_hodnota);
-  if (budgetFactor) factors.push(budgetFactor);
-
-  const pricedFactor = scorePricedItems(productMatch);
-  if (pricedFactor) factors.push(pricedFactor);
-
-  const winPriceFactor = scoreWinPrice(analysis, productMatch, winBand);
-  if (winPriceFactor) factors.push(winPriceFactor);
-
-  const deadlineFactor = scoreDeadline(analysis.terminy.lhuta_nabidek, analysis.extractedAt);
-  if (deadlineFactor) factors.push(deadlineFactor);
+  const factors = collectGoNoGoFactors(analysis, productMatch, winBand)
+    .flatMap((observation) => observation.factor ? [observation.factor] : []);
 
   const duvody = factors.map((factor) => factor.reason);
   if (!isPositiveNumber(analysis.zakazka.predpokladana_hodnota)) {
@@ -94,6 +108,97 @@ export function scoreGoNoGo(
       : 'NOGO';
 
   return { score, doporuceni, duvody };
+}
+
+/**
+ * Serializuje všechny vstupy go/no-go skóre, včetně právě nedostupných faktorů.
+ * Funkce je čistá a používá stejné faktorové funkce jako samotný výpočet skóre.
+ */
+export function serializeGoNoGoFeatureVector(
+  analysis: AnalysisWithScoringContext,
+  productMatch?: ProductMatch,
+  winBand?: PriceBand,
+): ScoreFeatureVector {
+  const result = scoreGoNoGo(analysis, productMatch, winBand);
+  const observations = collectGoNoGoFactors(analysis, productMatch, winBand);
+  return {
+    typ: 'gonogo',
+    faktory: weightedFeatures(observations),
+    skore: result.score,
+    doporuceni: result.doporuceni,
+  };
+}
+
+function collectGoNoGoFactors(
+  analysis: AnalysisWithScoringContext,
+  productMatch?: ProductMatch,
+  winBand?: PriceBand,
+): FactorObservation[] {
+  const comparedPrice = totalMatchedPrice(productMatch) ?? analysis.zakazka.predpokladana_hodnota;
+  const pricedItems = productMatch?.polozky_match ?? [];
+  const successfulPricedItems = pricedItems.filter((item) => {
+    const candidate = item.kandidati[item.vybrany_index];
+    const price = item.cenova_uprava?.nabidkova_cena_s_dph ?? candidate?.cena_s_dph;
+    const hard = item.sanity_flags?.some((finding) => finding.level === 'hard') ?? false;
+    return isPositiveNumber(price) && !hard && (item.cena_max_s_dph == null || price <= item.cena_max_s_dph);
+  }).length;
+  const deadlineMs = Date.parse(analysis.terminy.lhuta_nabidek ?? '');
+  const extractedMs = Date.parse(analysis.extractedAt ?? '');
+  const deadlineDays = Number.isFinite(deadlineMs) && Number.isFinite(extractedMs)
+    ? Math.ceil((deadlineMs - extractedMs) / 86_400_000)
+    : null;
+
+  return [
+    {
+      name: GO_NO_GO_FACTOR_NAMES[0],
+      raw: { obory: analysis.obory ?? null, keyword_filters: analysis.keyword_filters ?? null, predmet: analysis.zakazka.predmet },
+      factor: scoreSectorMatch(analysis),
+    },
+    {
+      name: GO_NO_GO_FACTOR_NAMES[1],
+      raw: { predpokladana_hodnota: analysis.zakazka.predpokladana_hodnota ?? null, firemni_limit: COMPANY_PRICE_CEILING_CZK },
+      factor: scoreBudget(analysis.zakazka.predpokladana_hodnota),
+    },
+    {
+      name: GO_NO_GO_FACTOR_NAMES[2],
+      raw: productMatch?.polozky_match?.length
+        ? { polozek_celkem: pricedItems.length, polozek_uspesne: successfulPricedItems }
+        : { legacy_kandidatu: productMatch?.kandidati?.length ?? 0, vybrany_index: productMatch?.vybrany_index ?? null },
+      factor: scorePricedItems(productMatch),
+    },
+    {
+      name: GO_NO_GO_FACTOR_NAMES[3],
+      raw: { porovnavana_cena: comparedPrice ?? null, median: winBand?.median ?? null, pocet: winBand?.pocet ?? null },
+      factor: scoreWinPrice(analysis, productMatch, winBand),
+    },
+    {
+      name: GO_NO_GO_FACTOR_NAMES[4],
+      raw: { lhuta_nabidek: analysis.terminy.lhuta_nabidek ?? null, extracted_at: analysis.extractedAt ?? null, zbyva_dni: deadlineDays },
+      factor: scoreDeadline(analysis.terminy.lhuta_nabidek, analysis.extractedAt),
+    },
+  ];
+}
+
+function weightedFeatures(observations: FactorObservation[]): ScoreFeature[] {
+  const totalWeight = observations.reduce((sum, observation) => sum + (observation.factor?.weight ?? 0), 0);
+  return observations.map(({ name, raw, factor }) => ({
+    nazev: name,
+    surova_hodnota: raw,
+    normalizovana_hodnota: factor?.value ?? null,
+    vaha: factor?.weight ?? factorWeight(name),
+    prispevek: factor && totalWeight > 0 ? (factor.value * factor.weight / totalWeight) * 100 : 0,
+    duvod: factor?.reason ?? null,
+  }));
+}
+
+function factorWeight(name: string): number {
+  const weights: Record<string, number> = {
+    sector: SECTOR_WEIGHT, budget: BUDGET_WEIGHT, priced_items: PRICED_ITEMS_WEIGHT,
+    win_price: WIN_PRICE_WEIGHT, deadline: DEADLINE_WEIGHT,
+    margin: BID_MARGIN_WEIGHT, absolute_profit: BID_ABS_PROFIT_WEIGHT,
+    match_quality: BID_MATCH_QUALITY_WEIGHT,
+  };
+  return weights[name] ?? 0;
 }
 
 function scoreSectorMatch(analysis: AnalysisWithScoringContext): Factor | null {
@@ -412,8 +517,9 @@ export function scoreBid(
   productMatch?: ProductMatch,
   company?: Pick<CompanyData, 'default_marze_procent'> | null,
   winBand?: PriceBand,
+  precomputedEconomics?: BidEconomics,
 ): BidScoreResult {
-  const econ = computeBidEconomics(productMatch);
+  const econ = precomputedEconomics ?? computeBidEconomics(productMatch);
 
   // Bez naceněných položek nemá bid skóre z čeho počítat — neutrální výsledek.
   if (econ.polozek === 0) {
@@ -426,40 +532,11 @@ export function scoreBid(
     };
   }
 
-  const factors: Factor[] = [];
-
-  // (b) Obchodní přirážka (zisk/náklady) vs firemní cíl.
   const target = isPositiveNumber(company?.default_marze_procent)
     ? company!.default_marze_procent!
     : DEFAULT_TARGET_MARGIN_PROCENT;
-  const marginValue = econ.marze_procent <= 0 ? 0 : clamp(econ.marze_procent / target, 0, 1);
-  factors.push({
-    value: marginValue,
-    weight: BID_MARGIN_WEIGHT,
-    reason: econ.marze_procent <= 0
-      ? 'Nabídka nemá kladnou přirážku — hrozí ztrátová zakázka.'
-      : `Obchodní přirážka ${econ.marze_procent.toFixed(1)} % z nákladů (cíl ${target} %).`,
-  });
-
-  // (a) Absolutní hrubý zisk, vážený spolehlivostí cen (nepotvrzené s poloviční vahou).
-  const profitValue = econ.vazeny_zisk <= 0 ? 0 : clamp(econ.vazeny_zisk / BID_TARGET_PROFIT_CZK, 0, 1);
-  factors.push({
-    value: profitValue,
-    weight: BID_ABS_PROFIT_WEIGHT,
-    reason: `Očekávaný hrubý zisk ${formatCzk(econ.zisk_kc)} (spolehlivostí vážený ${formatCzk(Math.round(econ.vazeny_zisk))}).`,
-  });
-
-  // (c) Podíl položek s reálnou shodou a solidní spolehlivostí.
-  const goodItems = econ.polozek - econ.slabych_polozek;
-  factors.push({
-    value: goodItems / econ.polozek,
-    weight: BID_MATCH_QUALITY_WEIGHT,
-    reason: `${goodItems} z ${econ.polozek} položek má spolehlivou reálnou shodu.`,
-  });
-
-  // (e) Win-price: naše celková cena vs historické pásmo výher.
-  const winFactor = scoreBidWinPrice(econ.obrat_bez_dph, winBand);
-  if (winFactor) factors.push(winFactor);
+  const factors = collectBidWeightedFactors(econ, target, winBand)
+    .flatMap((observation) => observation.factor ? [observation.factor] : []);
 
   const totalWeight = factors.reduce((sum, factor) => sum + factor.weight, 0);
   const weightedScore = factors.reduce((sum, factor) => sum + factor.value * factor.weight, 0);
@@ -497,6 +574,76 @@ export function scoreBid(
         : 'NOGO';
 
   return { score, doporuceni, duvody, zisk_kc: econ.zisk_kc, marze_procent: econ.marze_procent };
+}
+
+/** Čistá serializace všech vážených faktorů i následných korekcí bid skóre. */
+export function serializeBidFeatureVector(
+  analysis: TenderAnalysis,
+  productMatch?: ProductMatch,
+  company?: Pick<CompanyData, 'default_marze_procent'> | null,
+  winBand?: PriceBand,
+  precomputedEconomics?: BidEconomics,
+  precomputedResult?: BidScoreResult,
+): ScoreFeatureVector {
+  const econ = precomputedEconomics ?? computeBidEconomics(productMatch);
+  const result = precomputedResult ?? scoreBid(analysis, productMatch, company, winBand, econ);
+  const target = isPositiveNumber(company?.default_marze_procent)
+    ? company!.default_marze_procent!
+    : DEFAULT_TARGET_MARGIN_PROCENT;
+  const weighted = weightedFeatures(collectBidWeightedFactors(econ, target, winBand));
+  const baseScore = Math.round(weighted.reduce((sum, factor) => sum + factor.prispevek, 0));
+  let runningScore = baseScore;
+  const belowMarket = econ.ztratovych_polozek > 0 ? Math.min(BID_BELOW_MARKET_PENALTY, runningScore) : 0;
+  runningScore -= belowMarket;
+  const nonexistentRequested = econ.neexistujicich_kandidatu * BID_NONEXISTENT_CANDIDATE_PENALTY;
+  const nonexistent = Math.min(nonexistentRequested, runningScore);
+  runningScore -= nonexistent;
+  const hardCap = econ.hard_flagu > 0 ? Math.max(0, runningScore - (CONSIDER_SCORE_THRESHOLD - 1)) : 0;
+
+  const corrections: ScoreFeature[] = [
+    {
+      nazev: BID_FACTOR_NAMES[4], surova_hodnota: { ztratovych_polozek: econ.ztratovych_polozek },
+      normalizovana_hodnota: econ.ztratovych_polozek > 0 ? 1 : 0, vaha: BID_BELOW_MARKET_PENALTY,
+      prispevek: -belowMarket, duvod: econ.ztratovych_polozek > 0 ? `${econ.ztratovych_polozek} položek pod nákupní cenou.` : null,
+    },
+    {
+      nazev: BID_FACTOR_NAMES[5], surova_hodnota: { neexistujicich_kandidatu: econ.neexistujicich_kandidatu },
+      normalizovana_hodnota: econ.neexistujicich_kandidatu, vaha: BID_NONEXISTENT_CANDIDATE_PENALTY,
+      prispevek: -nonexistent, duvod: econ.neexistujicich_kandidatu > 0 ? 'Srážka za webem vyvrácené AI kandidáty.' : null,
+    },
+    {
+      nazev: BID_FACTOR_NAMES[6], surova_hodnota: { hard_flagu: econ.hard_flagu, strop: CONSIDER_SCORE_THRESHOLD - 1 },
+      normalizovana_hodnota: econ.hard_flagu > 0 ? 1 : 0, vaha: 0,
+      prispevek: -hardCap, duvod: econ.hard_flagu > 0 ? 'HARD flag omezuje skóre stropem a vynucuje NOGO.' : null,
+    },
+  ];
+  return { typ: 'bid', faktory: [...weighted, ...corrections], skore: result.score, doporuceni: result.doporuceni };
+}
+
+function collectBidWeightedFactors(econ: BidEconomics, target: number, winBand?: PriceBand): FactorObservation[] {
+  const marginValue = econ.marze_procent <= 0 ? 0 : clamp(econ.marze_procent / target, 0, 1);
+  const profitValue = econ.vazeny_zisk <= 0 ? 0 : clamp(econ.vazeny_zisk / BID_TARGET_PROFIT_CZK, 0, 1);
+  const goodItems = econ.polozek - econ.slabych_polozek;
+  return [
+    {
+      name: BID_FACTOR_NAMES[0], raw: { marze_procent: econ.marze_procent, cil_procent: target },
+      factor: econ.polozek === 0 ? null : { value: marginValue, weight: BID_MARGIN_WEIGHT, reason: econ.marze_procent <= 0
+        ? 'Nabídka nemá kladnou přirážku — hrozí ztrátová zakázka.'
+        : `Obchodní přirážka ${econ.marze_procent.toFixed(1)} % z nákladů (cíl ${target} %).` },
+    },
+    {
+      name: BID_FACTOR_NAMES[1], raw: { zisk_kc: econ.zisk_kc, vazeny_zisk: econ.vazeny_zisk, cil_kc: BID_TARGET_PROFIT_CZK },
+      factor: econ.polozek === 0 ? null : { value: profitValue, weight: BID_ABS_PROFIT_WEIGHT, reason: `Očekávaný hrubý zisk ${formatCzk(econ.zisk_kc)} (spolehlivostí vážený ${formatCzk(Math.round(econ.vazeny_zisk))}).` },
+    },
+    {
+      name: BID_FACTOR_NAMES[2], raw: { polozek_celkem: econ.polozek, spolehlivych_polozek: goodItems },
+      factor: econ.polozek === 0 ? null : { value: goodItems / econ.polozek, weight: BID_MATCH_QUALITY_WEIGHT, reason: `${goodItems} z ${econ.polozek} položek má spolehlivou reálnou shodu.` },
+    },
+    {
+      name: BID_FACTOR_NAMES[3], raw: { nase_cena: econ.obrat_bez_dph, median: winBand?.median ?? null, p75: winBand?.p75 ?? null, pocet: winBand?.pocet ?? null },
+      factor: econ.polozek === 0 ? null : scoreBidWinPrice(econ.obrat_bez_dph, winBand),
+    },
+  ];
 }
 
 function scoreBidWinPrice(ourTotal: number, winBand?: PriceBand): Factor | null {

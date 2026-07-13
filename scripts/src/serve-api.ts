@@ -89,10 +89,11 @@ import { runScraping, getScrapeJobs, type ScrapeConfig } from './lib/apify-clien
 import { enrichProductsFromIcecat } from './lib/icecat-client.js';
 import { winPriceBandHandler, winPriceStatsHandler } from './lib/winprice-api.js';
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
-import { scoreBid } from './lib/go-no-go.js';
+import { computeBidEconomics, scoreBid, serializeBidFeatureVector } from './lib/go-no-go.js';
 import { resolvePricingDefaults } from './lib/pricing-defaults.js';
 import { createApplyMarketPricesHandler } from './lib/market-price-api.js';
-import { getOutcome, upsertOutcome, getOutcomeStats, getCalibrationPairs, type VysledekPodani } from './lib/outcomes-store.js';
+import { getOutcome, upsertOutcome, getOutcomeStats, type VysledekPodani } from './lib/outcomes-store.js';
+import { createCalibrationHandler } from './lib/calibration-api.js';
 import { candidatePrefill, getOutcomeCandidate, listOutcomeCandidates, markOutcomeCandidateConfirmed, rejectOutcomeCandidate } from './lib/outcome-kandidati-store.js';
 import { buildBidSnapshot, persistSnapshotBestEffort, type BidSnapshot } from './lib/bid-snapshot.js';
 import { insertSnapshot } from './lib/bid-snapshot-store.js';
@@ -113,7 +114,8 @@ import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
   type MonitoringStav,
 } from './lib/monitoring/monitoring-store.js';
-import { isFeedItemExcluded, scoreFeedItem, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { isFeedItemExcluded, scoreFeedItem, serializeFeedItemFeatureVector, slugifyTender } from './lib/monitoring/monitoring-score.js';
+import { persistScoreSnapshotBestEffort } from './lib/score-snapshot-store.js';
 import { reserveMonitoringTender } from './lib/monitoring/tender-allocation.js';
 import { collectMonitoringInputs, type MonitoringSource } from './lib/monitoring/monitoring-sync.js';
 import { getMonitoringConfig, saveMonitoringConfig } from './lib/monitoring/monitoring-config.js';
@@ -1163,6 +1165,19 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     await setStatus(tenderId, 'nova');
     await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
     await setFeedStav(id, 'prevzata', tenderId);
+
+    // Převzetí je hlavní operace; kalibrační zápis při výpadku DB pouze varuje.
+    try {
+      const now = new Date();
+      const [company, monitoring] = await Promise.all([getCompany('default'), getMonitoringConfig()]);
+      const features = serializeFeedItemFeatureVector(item, company ?? undefined, now, monitoring);
+      await persistScoreSnapshotBestEffort({
+        tender_id: tenderId, typ: 'gonogo', skore: features.skore,
+        doporuceni: features.doporuceni, features, kontext: 'prevzeti',
+      });
+    } catch (error) {
+      console.warn(`Uložení go/no-go feature vektoru při převzetí ${tenderId} selhalo:`, error);
+    }
 
     // Volitelné stažení příloh ZD + spuštění pipeline. Rezervace zakázky je už hotová,
     // takže selhání stahování NIKDY neshodí převzetí — jen doplní varování do odpovědi.
@@ -3381,7 +3396,14 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
     ]);
     let winPriceBand: PriceBand | undefined;
     try { winPriceBand = await priceBandForSubject((analysis as any)?.zakazka?.predmet ?? ''); } catch {}
-    const snapshot = buildBidSnapshot({ tenderId: id, analysis, productMatch, validationReport, costLog, winPriceBand });
+    const companyId = await getTenderCompanyId(id);
+    const company = (companyId ? await getCompany(companyId) : null) ?? await getCompany('default');
+    const bidEconomics = computeBidEconomics(productMatch as any);
+    const currentBidScore = scoreBid(analysis as any, productMatch as any, company, winPriceBand, bidEconomics);
+    const productMatchAtFinalize = { ...(productMatch as any), bid_score: currentBidScore };
+    const snapshot = buildBidSnapshot({
+      tenderId: id, analysis, productMatch: productMatchAtFinalize, validationReport, costLog, winPriceBand, bidEconomics,
+    });
 
     // Immutable balík + manifest; snapshot je přímo součástí ZIPu a content_hash.
     const { manifest, reused } = await buildSubmissionBundle(id, snapshot);
@@ -3389,6 +3411,17 @@ app.post('/api/tenders/:id/finalize', async (req, res) => {
       await writeFile(join(outputDir, 'podani', 'bid-snapshot.json'), JSON.stringify(snapshot, null, 2));
       await insertSnapshot(snapshot);
     }, (message, error) => console.warn(`${message} pro ${id}:`, error));
+    try {
+      const features = serializeBidFeatureVector(
+        analysis as any, productMatchAtFinalize, company, winPriceBand, bidEconomics, currentBidScore,
+      );
+      await persistScoreSnapshotBestEffort({
+        tender_id: id, typ: 'bid', skore: features.skore,
+        doporuceni: features.doporuceni, features, kontext: 'finalize',
+      });
+    } catch (error) {
+      console.warn(`Uložení bid feature vektoru při finalize ${id} selhalo:`, error);
+    }
 
     // Stav: posun jen dopředu na 'pripravena' (z pozdějších/terminálních stavů nesnižujeme).
     const pipeline = await getPipelineStatus(id);
@@ -4054,10 +4087,7 @@ app.get('/api/outcomes/stats', async (_req, res) => {
 });
 
 // GET kalibrační data — pouze přesně spárované snapshoty a skutečné výsledky.
-app.get('/api/analytics/kalibrace', async (_req, res) => {
-  try { res.json(await getCalibrationPairs()); }
-  catch { res.json([]); }
-});
+app.get('/api/analytics/kalibrace', createCalibrationHandler());
 
 // --- Nákupní seznam po výhře -----------------------------------------------
 // Auth/RBAC zajišťují stejné globální middleware jako u endpointů Výsledku:

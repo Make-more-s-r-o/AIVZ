@@ -9,8 +9,10 @@
 import {
   CONSIDER_SCORE_THRESHOLD,
   GO_SCORE_THRESHOLD,
+  serializeGoNoGoFeatureVector,
   scoreGoNoGo,
   type GoNoGoResult,
+  type ScoreFeatureVector,
 } from '../go-no-go.js';
 import type { TenderAnalysis } from '../types.js';
 import { categorizeCommodity, type KomoditaKategorie } from '../winprice-store.js';
@@ -36,33 +38,9 @@ export function scoreFeedItem(
   now: Date = new Date(),
   monitoring?: MonitoringConfig,
 ): GoNoGoResult {
-  // Minimální validní TenderAnalysis — vyplníme jen to, co feed reálně zná.
-  const analysis = {
-    zakazka: {
-      nazev: item.nazev,
-      zadavatel: { nazev: item.zadavatel ?? 'Neznámý zadavatel' },
-      predmet: item.nazev,
-      predpokladana_hodnota: item.predpokladana_hodnota ?? null,
-      typ_zakazky: '',
-      typ_rizeni: '',
-    },
-    kvalifikace: [],
-    hodnotici_kriteria: [],
-    terminy: { lhuta_nabidek: item.lhuta_nabidek },
-    casti: [],
-    polozky: [{ nazev: item.nazev, specifikace: '' }],
-    technicke_pozadavky: [],
-    rizika: [],
-    doporuceni: { rozhodnuti: 'ZVAZIT', oduvodneni: '', klicove_body: [] },
-  } as unknown as TenderAnalysis;
+  const analysis = buildFeedAnalysis(item, company, now);
 
-  const base = scoreGoNoGo({
-    ...analysis,
-    // extractedAt = referenční „teď", aby faktor lhůty počítal zbývající dny.
-    extractedAt: now.toISOString(),
-    obory: company?.obory,
-    keyword_filters: company?.keyword_filters,
-  });
+  const base = scoreGoNoGo(analysis);
 
   if (!monitoring) return base;
 
@@ -103,6 +81,82 @@ export function scoreFeedItem(
       ? 'ZVAZIT'
       : 'NOGO';
   return { score, doporuceni, duvody };
+}
+
+function buildFeedAnalysis(item: FeedScoreInput, company: CompanyScoringProfile | undefined, now: Date) {
+  // Minimální validní TenderAnalysis — vyplníme jen to, co feed reálně zná.
+  const analysis = {
+    zakazka: {
+      nazev: item.nazev,
+      zadavatel: { nazev: item.zadavatel ?? 'Neznámý zadavatel' },
+      predmet: item.nazev,
+      predpokladana_hodnota: item.predpokladana_hodnota ?? null,
+      typ_zakazky: '',
+      typ_rizeni: '',
+    },
+    kvalifikace: [],
+    hodnotici_kriteria: [],
+    terminy: { lhuta_nabidek: item.lhuta_nabidek },
+    casti: [],
+    polozky: [{ nazev: item.nazev, specifikace: '' }],
+    technicke_pozadavky: [],
+    rizika: [],
+    doporuceni: { rozhodnuti: 'ZVAZIT', oduvodneni: '', klicove_body: [] },
+  } as unknown as TenderAnalysis;
+  return {
+    ...analysis,
+    // extractedAt = referenční „teď", aby faktor lhůty počítal zbývající dny.
+    extractedAt: now.toISOString(),
+    obory: company?.obory,
+    keyword_filters: company?.keyword_filters,
+  };
+}
+
+/** Feature vektor přesně odpovídající skóre uloženému při převzetí z monitoringu. */
+export function serializeFeedItemFeatureVector(
+  item: FeedScoreInput,
+  company?: CompanyScoringProfile,
+  now: Date = new Date(),
+  monitoring?: MonitoringConfig,
+): ScoreFeatureVector {
+  const analysis = buildFeedAnalysis(item, company, now);
+  const vector = serializeGoNoGoFeatureVector(analysis);
+  const result = scoreFeedItem(item, company, now, monitoring);
+  if (monitoring) {
+    const category = item.kategorie ?? categorizeCommodity(item.nazev);
+    const categoryActive = monitoring.kategorie_zajmu.length > 0;
+    const categoryMatches = categoryActive && monitoring.kategorie_zajmu.includes(category);
+    const belowMinimum = item.predpokladana_hodnota != null && monitoring.min_hodnota != null
+      && item.predpokladana_hodnota < monitoring.min_hodnota;
+    const aboveMaximum = item.predpokladana_hodnota != null && monitoring.max_hodnota != null
+      && item.predpokladana_hodnota > monitoring.max_hodnota;
+    vector.faktory.push(
+      {
+        nazev: 'monitoring_category',
+        surova_hodnota: { kategorie: category, kategorie_zajmu: monitoring.kategorie_zajmu },
+        normalizovana_hodnota: categoryActive ? (categoryMatches ? 1 : 0) : null,
+        vaha: categoryActive ? 60 : 0, prispevek: 0,
+        duvod: categoryActive ? 'Kategorie upravuje monitoringové skóre.' : null,
+      },
+      {
+        nazev: 'monitoring_value_range',
+        surova_hodnota: { hodnota: item.predpokladana_hodnota, minimum: monitoring.min_hodnota, maximum: monitoring.max_hodnota },
+        normalizovana_hodnota: belowMinimum || aboveMaximum ? 0 : 1,
+        vaha: 20, prispevek: belowMinimum || aboveMaximum ? -20 : 0,
+        duvod: belowMinimum || aboveMaximum ? 'Hodnota je mimo monitoringové pásmo.' : null,
+      },
+      {
+        nazev: 'monitoring_excluded_word',
+        surova_hodnota: { nazev: item.nazev, vyloucena_slova: monitoring.vyloucena_slova },
+        normalizovana_hodnota: isFeedItemExcluded(item, monitoring) ? 0 : 1,
+        vaha: 0, prispevek: isFeedItemExcluded(item, monitoring) ? -vector.skore : 0,
+        duvod: isFeedItemExcluded(item, monitoring) ? 'Vyloučené slovo vynutilo NOGO.' : null,
+      },
+    );
+  }
+  vector.skore = result.score;
+  vector.doporuceni = result.doporuceni;
+  return vector;
 }
 
 /** Tvrdý filtr názvu; bez diakritiky a bez ohledu na velikost písmen. */
