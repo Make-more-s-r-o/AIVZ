@@ -6,7 +6,29 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { computeBidEconomics } from './go-no-go.js';
+import { findUnconfirmedPrices } from './price-confirmation.js';
+import { checkPriceSanity, productMatchPriceSanityItems } from './price-sanity.js';
 import type { ProductMatch } from './types.js';
+
+export type InboxSort = 'deadline_score' | 'score_deadline' | 'urgency';
+export type InboxBulkAction = 'generate' | 'finalize';
+
+export function inboxBulkGovernanceKey(action: InboxBulkAction): 'generate_enabled' | 'finalize_enabled' {
+  return action === 'generate' ? 'generate_enabled' : 'finalize_enabled';
+}
+
+export interface BulkSkip {
+  id: string;
+  status: number;
+  reason: string;
+  detail?: unknown;
+}
+
+export interface BulkCandidateGate {
+  allowed: boolean;
+  reason?: 'unconfirmed_items' | 'hard_flag';
+  detail?: unknown;
+}
 
 export type InboxJsonReadResult =
   | { state: 'ok'; data: unknown }
@@ -72,6 +94,8 @@ export interface InboxEntry {
   deadline_alarm: boolean;
   // Hodin do lhůty podání (záporné = po lhůtě); null když lhůta chybí/je nečitelná.
   hodin_do_lhuty: number | null;
+  // Nejlepší dostupné skóre: bid score po nacenění, jinak analytické go/no-go score.
+  score: number | null;
 }
 
 // Alarm okno: připravený nepodaný balík s lhůtou do 48 hodin (i po lhůtě).
@@ -169,6 +193,8 @@ export function computeInboxEntry(input: InboxTenderInput): InboxEntry {
 
   // Hrubý zisk počítáme stejnou logikou jako bid skóre (jediný zdroj kupní ceny je cenova_uprava).
   const econ = match ? computeBidEconomics(match as ProductMatch) : null;
+  const rawScore = match?.bid_score?.score ?? analysis?.go_no_go?.score;
+  const score = typeof rawScore === 'number' && Number.isFinite(rawScore) ? rawScore : null;
 
   return {
     tender_id: input.tenderId,
@@ -184,7 +210,48 @@ export function computeInboxEntry(input: InboxTenderInput): InboxEntry {
     data_error_files: input.dataErrors ?? [],
     deadline_alarm,
     hodin_do_lhuty,
+    score,
   };
+}
+
+/**
+ * Serverový předlet bulk akcí. Kontrolu attestací záměrně deleguje na stejný
+ * findUnconfirmedPrices jako generate money-gate. Funkce pouze čte a nikdy nic nepotvrzuje.
+ */
+export function evaluateBulkCandidate(
+  productMatch: ProductMatch,
+  selectedPartIds?: ReadonlySet<string> | null,
+): BulkCandidateGate {
+  const unconfirmed = findUnconfirmedPrices(productMatch, selectedPartIds);
+  if (unconfirmed.count > 0) {
+    return {
+      allowed: false,
+      reason: 'unconfirmed_items',
+      detail: { count: unconfirmed.count, items: unconfirmed.names },
+    };
+  }
+
+  const relevantItems = productMatchPriceSanityItems(productMatch).filter((item) => {
+    if (!selectedPartIds || selectedPartIds.size === 0 || !item.cast_id) return true;
+    return selectedPartIds.has(item.cast_id);
+  });
+  // Přepočet z aktuálních cen brání průchodu při zastaralém snapshotu sanity_flags.
+  const names = new Map(relevantItems.map((item) => [item.polozka_index, item.polozka_nazev]));
+  const hardFlags = checkPriceSanity(relevantItems, {})
+    .filter((flag) => flag.level === 'hard')
+    .map((flag) => ({
+      item: names.get(flag.polozka_index) ?? `Položka #${flag.polozka_index + 1}`,
+      code: flag.code,
+      message: flag.message,
+    }));
+  if (hardFlags.length > 0) {
+    return {
+      allowed: false,
+      reason: 'hard_flag',
+      detail: { count: hardFlags.length, flags: hardFlags },
+    };
+  }
+  return { allowed: true };
 }
 
 // Zakázka vyžaduje akci operátora při vadných datech, nepotvrzené ceně, HARD flagu, fail checku nebo deadline alarmu.
@@ -195,11 +262,20 @@ export function needsAction(entry: InboxEntry): boolean {
 
 // Sestaví celý inbox: spočítá řádky a nechá jen ty, které čekají na akci,
 // seřazené "nejnaléhavější první" (vadná data > hard flagy > fails > nepotvrzené ceny).
-export function buildInbox(inputs: InboxTenderInput[]): InboxEntry[] {
+export function buildInbox(inputs: InboxTenderInput[], sort: InboxSort = 'deadline_score'): InboxEntry[] {
   return inputs
     .map(computeInboxEntry)
     .filter(needsAction)
     .sort((a, b) => {
+      const deadline = (left: InboxEntry, right: InboxEntry) => {
+        const leftHours = left.hodin_do_lhuty ?? Number.POSITIVE_INFINITY;
+        const rightHours = right.hodin_do_lhuty ?? Number.POSITIVE_INFINITY;
+        return leftHours - rightHours;
+      };
+      const score = (left: InboxEntry, right: InboxEntry) =>
+        (right.score ?? Number.NEGATIVE_INFINITY) - (left.score ?? Number.NEGATIVE_INFINITY);
+      if (sort === 'deadline_score') return deadline(a, b) || score(a, b) || a.tender_id.localeCompare(b.tender_id);
+      if (sort === 'score_deadline') return score(a, b) || deadline(a, b) || a.tender_id.localeCompare(b.tender_id);
       // Deadline alarm je nejnaléhavější (hrozí propadnutí lhůty u připravené nabídky).
       if (a.deadline_alarm !== b.deadline_alarm) return a.deadline_alarm ? -1 : 1;
       if (a.data_error !== b.data_error) return a.data_error ? -1 : 1;

@@ -44,8 +44,8 @@ export interface PriceSanityOptions {
  * Legacy single-product formát vrací nálezy volajícímu, ale nemá kam `sanity_flags`
  * perzistovat bez změny historického schématu.
  */
-export function refreshProductMatchPriceSanity(productMatch: ProductMatch): PriceSanityFlag[] {
-  const items: PolozkaMatch[] = Array.isArray(productMatch.polozky_match)
+export function productMatchPriceSanityItems(productMatch: ProductMatch): PolozkaMatch[] {
+  return Array.isArray(productMatch.polozky_match)
     ? productMatch.polozky_match
     : Array.isArray(productMatch.kandidati)
       ? [{
@@ -60,6 +60,10 @@ export function refreshProductMatchPriceSanity(productMatch: ProductMatch): Pric
           overeni_ceny: productMatch.overeni_ceny,
         }]
       : [];
+}
+
+export function refreshProductMatchPriceSanity(productMatch: ProductMatch): PriceSanityFlag[] {
+  const items = productMatchPriceSanityItems(productMatch);
   const findings = checkPriceSanity(items, {});
   if (Array.isArray(productMatch.polozky_match)) {
     for (const item of productMatch.polozky_match) {
