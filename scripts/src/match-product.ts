@@ -10,9 +10,10 @@ import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricing
 import { searchWarehouse, warehouseMatchToCandidate, type MatchRequest, type WarehouseMatch } from './lib/warehouse-matcher.js';
 import { getCompany, getTenderCompanyId, resolveDefaultMarzeProcent } from './lib/company-store.js';
 import { applyPricePrefill } from './lib/price-prefill.js';
-import { scoreBid } from './lib/go-no-go.js';
+import { computeBidEconomics, scoreBid, serializeBidFeatureVector } from './lib/go-no-go.js';
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { closePool } from './lib/db.js';
+import { persistScoreSnapshotBestEffort } from './lib/score-snapshot-store.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -820,11 +821,23 @@ async function main() {
   } catch {
     console.warn('  Win-price historie není dostupná — bid skóre ji vynechá.');
   }
-  productMatch.bid_score = scoreBid(analysis, productMatch, company, winBand);
+  const bidEconomics = computeBidEconomics(productMatch);
+  productMatch.bid_score = scoreBid(analysis, productMatch, company, winBand, bidEconomics);
   console.log(`  Bid skóre: ${productMatch.bid_score.score}/100 (${productMatch.bid_score.doporuceni}), zisk ${Math.round(productMatch.bid_score.zisk_kc).toLocaleString('cs-CZ')} Kč, přirážka ${productMatch.bid_score.marze_procent} %`);
 
   const outputPath = join(outputDir, 'product-match.json');
   await writeFile(outputPath, JSON.stringify(productMatch, null, 2), 'utf-8');
+
+  // Kalibrační stopa je best-effort: hotový matching zůstává úspěšný i při výpadku DB.
+  try {
+    const features = serializeBidFeatureVector(analysis, productMatch, company, winBand, bidEconomics, productMatch.bid_score);
+    await persistScoreSnapshotBestEffort({
+      tender_id: tenderId, typ: 'bid', skore: features.skore,
+      doporuceni: features.doporuceni, features, kontext: 'match',
+    });
+  } catch (error) {
+    console.warn(`Uložení bid feature vektoru po matchi pro ${tenderId} selhalo:`, error);
+  }
 
   // Summary logging — defenzivně: product-match.json je už úspěšně uložen VÝŠE, takže
   // pouhý výpis NESMÍ shodit celý krok (dřív undefined `selected` → TypeError → exit 1 →

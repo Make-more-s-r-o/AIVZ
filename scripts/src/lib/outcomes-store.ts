@@ -83,7 +83,7 @@ export interface CalibrationRow {
   tender_id: string; vysledek: VysledekPodani; nase_cena: number | null; vitezna_cena: number | null;
   odchylka_procent: number | null; go_no_go_score: number | null; bid_score: number | null;
   winprice_median: number | null; podil_overenych_cen: number | null; snapshot_id: string;
-  snapshot_at: string; [key: string]: unknown;
+  snapshot_at: string; feature_vector: unknown | null; [key: string]: unknown;
 }
 
 /** Přesné dvojice outcome + snapshot navázaný při uložení výsledku. */
@@ -100,8 +100,13 @@ export async function getCalibrationPairs(): Promise<CalibrationRow[]> {
               s.go_no_go_score, s.bid_score, s.winprice_median::float8, s.podil_overenych_cen::float8,
               s.marze_procent::float8, s.zisk_kc::float8, s.pocet_hard_flagu, s.pocet_warn_flagu,
               s.pocet_kandidat_neexistuje, s.validation_fails, s.ai_naklad_czk::float8,
-              s.id::text AS snapshot_id, s.snapshot_at
+              s.id::text AS snapshot_id, s.snapshot_at, score.features AS feature_vector
        FROM crm_vysledky o JOIN bid_snapshots s ON s.id = o.snapshot_id
+       LEFT JOIN LATERAL (
+         SELECT features FROM crm_score_snapshots
+         WHERE tender_id = o.tender_id AND typ = 'bid'
+         ORDER BY created_at DESC, id DESC LIMIT 1
+       ) score ON TRUE
        ORDER BY s.snapshot_at DESC`,
     )).rows;
   } catch { return []; }

@@ -4,6 +4,10 @@ import test from 'node:test';
 import {
   BID_BELOW_MARKET_PENALTY,
   BID_NONEXISTENT_CANDIDATE_PENALTY,
+  BID_FACTOR_NAMES,
+  GO_NO_GO_FACTOR_NAMES,
+  serializeBidFeatureVector,
+  serializeGoNoGoFeatureVector,
   scoreGoNoGo,
   scoreBid,
 } from '../src/lib/go-no-go.js';
@@ -317,4 +321,31 @@ test('chybějící volitelné vstupy nespadnou a vrátí neutrální výsledek',
     doporuceni: 'ZVAZIT',
     duvody: ['Zadavatel neuvedl předpokládanou hodnotu — rozpočtový faktor nezapočítán'],
   });
+});
+
+test('go/no-go feature vektor obsahuje přesně všechny faktory výpočtu', () => {
+  const vector = serializeGoNoGoFeatureVector(
+    analysis(), productMatch(4, 4, 1_250_000), winBand(5_000_000),
+  );
+  assert.deepEqual(vector.faktory.map((factor) => factor.nazev), [...GO_NO_GO_FACTOR_NAMES]);
+  assert.equal(vector.skore, scoreGoNoGo(analysis(), productMatch(4, 4, 1_250_000), winBand(5_000_000)).score);
+  for (const factor of vector.faktory) {
+    assert.ok('surova_hodnota' in factor);
+    assert.equal(typeof factor.normalizovana_hodnota, 'number');
+    assert.equal(typeof factor.vaha, 'number');
+    assert.equal(typeof factor.prispevek, 'number');
+  }
+});
+
+test('bid feature vektor obsahuje vážené faktory i všechny korekce skóre', () => {
+  const match = bidMatch([
+    pricedItem({ index: 0, belowMarketFlag: true, candidateNonexistent: true }),
+    pricedItem({ index: 1, hardFlag: true }),
+  ]);
+  const vector = serializeBidFeatureVector(analysis(), match, { default_marze_procent: 10 }, winBand(2_000_000));
+  const result = scoreBid(analysis(), match, { default_marze_procent: 10 }, winBand(2_000_000));
+  assert.deepEqual(vector.faktory.map((factor) => factor.nazev), [...BID_FACTOR_NAMES]);
+  assert.equal(vector.skore, result.score);
+  assert.equal(vector.doporuceni, result.doporuceni);
+  assert.ok(vector.faktory.some((factor) => factor.prispevek < 0));
 });
