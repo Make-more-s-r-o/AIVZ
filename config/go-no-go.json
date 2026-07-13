@@ -1,0 +1,9 @@
+{
+  "weights": {
+    "sector": 20,
+    "budget": 20,
+    "priced_items": 25,
+    "win_price": 20,
+    "deadline": 15
+  }
+}
