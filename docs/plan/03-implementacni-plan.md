@@ -117,7 +117,7 @@ samotné podání (provoz, lhůty v týdnech) se s vývojem nečeká.*
   - **Závislosti:** žádné. **Velikost:** S (dokument). **Kdo:** Sonnet draft + **Dan verifikace na NEN** (lidský vstup nutný — přístup k účtu).
   - **Rizika:** žádné kódové; právní rámec ověřen (§211/7).
 
-- [ ] **A-03 — Logování feature vektorů go/no-go a bid skóre** (zpětně nejde dohnat — udělat HNED)
+- [x] **A-03 — Logování feature vektorů go/no-go a bid skóre** — **HOTOVO (PR #82, nasazeno, migrace 022)**. Živě ověřeno: po převzetí zakázky se zapsal gonogo vektor (8 faktorů, skóre 90) a po matchi bid vektor (7 faktorů, skóre 80). Kalibrační endpoint je vrací spolu se snapshotem a výsledkem.
   - **Proč:** F2.5/F3.2; bez zalogovaných vstupů skóre v momentě podání nelze později kalibrovat. Dimenze: autonomie, business.
   - **Soubory:** `scripts/src/lib/go-no-go.ts` (export feature vektoru — dnes počítá vážené
     faktory, přidat serializaci vstupů); nová migrace `scripts/migrations/018_score_snapshots.sql`
@@ -307,7 +307,7 @@ Tohle je hlavní KÓDOVÁ práce nejbližších týdnů — přímý důsledek n
   - **Závislosti:** B-02 (úroveň jistoty ve schématu). **Velikost:** S–M. **Kdo:** Codex, review Fable (money-adjacent: cache nesmí obejít HARD gate pod nákupem — gate počítá vždy z aktuálně použitého zdroje).
   - **Rizika:** stale cena z cache → TTL + viditelné datum + gate zůstává na potvrzení.
 
-- [ ] **B-05 — Auto-run-all po převzetí z monitoringu**
+- [x] **B-05 — Auto-run-all po převzetí z monitoringu** — **HOTOVO (PR #83, nasazeno)**. Živě ověřeno na reálné zakázce: převzetí → stažení ZD → pipeline běží sama → zastaví se na `waiting_approval`; pokus o generování bez potvrzených cen vrátil HTTP 400 se seznamem nepotvrzených položek. Governance ai_jobs=false převzetí nerozbije (jen nespustí pipeline).
   - **Proč:** F2.3; checkpoint `waiting_approval` už existuje a je fail-closed → nízké riziko,
     velká úspora klikání. Dimenze: autonomie, UX.
   - **Soubory:** `scripts/src/lib/monitoring/tender-allocation.ts` (po převzetí + úspěšném
