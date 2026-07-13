@@ -138,9 +138,12 @@ import {
 import {
   RUN_ALL_STEPS,
   ApprovalRequiredError,
+  BudgetPausedError,
   advanceRunAllChain,
+  claimBudgetPaused,
   claimWaitingApproval,
   loadPipelineJobs,
+  restoreBudgetPaused,
   restoreWaitingApproval,
   savePipelineJobs,
   selectJobsToStart,
@@ -422,7 +425,8 @@ function enqueueRunAllPipeline(
 ): { job: Job; created: boolean } {
   const existing = [...jobs.values()].find((job) =>
     job.tenderId === tenderId && job.kind === 'pipeline'
-    && (job.status === 'running' || job.status === 'queued' || job.status === 'waiting_approval'));
+    && (job.status === 'running' || job.status === 'queued'
+      || job.status === 'waiting_approval' || job.status === 'budget_paused'));
   if (existing) return { job: existing, created: false };
 
   let parentId = randomUUID().slice(0, 8);
@@ -606,8 +610,9 @@ function startJob(job: Job) {
       return;
     }
     void advanceRunAllChain(parent, job, async (nextStep) => {
-      const governanceError = await aiEnqueueBlock(nextStep);
-      if (governanceError) throw new Error(governanceError);
+      const governanceDecision = await pipelineEnqueueBlock(nextStep);
+      if (governanceDecision?.budget) throw new BudgetPausedError(governanceDecision.reason);
+      if (governanceDecision) throw new Error(governanceDecision.reason);
       // Money-gate před generate: nepotvrzené ceny řetězec NEshodí do error, ale PAUZNOU
       // ho do waiting_approval (ApprovalRequiredError). Lidský checkpoint, ne chyba.
       if (nextStep === 'generate') {
@@ -894,6 +899,28 @@ async function aiEnqueueBlock(step: string): Promise<string | null> {
     if (generateError) return generateError;
   }
   return dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+}
+
+/** Fail-closed rozlišení rozpočtu pro checkpointovaný řetězec. */
+async function pipelineEnqueueBlock(
+  step: string,
+): Promise<{ reason: string; budget: boolean } | null> {
+  try {
+    const governance = await getGovernance();
+    const aiError = governanceSwitchBlock(governance, 'ai_jobs_enabled');
+    if (aiError) return { reason: aiError, budget: false };
+    if (step === 'generate') {
+      const generateError = governanceSwitchBlock(governance, 'generate_enabled');
+      if (generateError) return { reason: generateError, budget: false };
+    }
+    const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+    return limitError ? { reason: limitError, budget: true } : null;
+  } catch (error) {
+    return {
+      reason: `AI rozpočet nelze bezpečně ověřit; pipeline je pozastavena: ${String(error)}`,
+      budget: true,
+    };
+  }
 }
 
 // GET /api/auth/status - check if setup is required
@@ -2960,18 +2987,16 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
   res.json({ jobId: parent.id, status: parent.status, currentStep: parent.currentStep });
 });
 
-// POST /api/tenders/:id/run-all/resume - pokračování run-all řetězce po lidském potvrzení cen.
-// Pauznutý řetězec (waiting_approval na generate) se rozjede až po potvrzení VŠECH cen —
-// money-gate zůstává lidský, žádné automatické spuštění. Idempotentní: bez waiting jobu → 404,
-// stále nepotvrzené ceny → 409 s počtem.
+// POST /api/tenders/:id/run-all/resume - společné pokračování po money-gate i budget pauze.
+// Guard se provede PŘED claimem, takže nad 100 % zůstane parent bezpečně budget_paused.
 app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   const { id } = req.params;
-  if (!(await enforceGovernance(res, inboxBulkGovernanceKey('generate'), true))) return;
 
   // Bez await mezi nalezením a změnou stavu: první request synchronně claimne parent job,
-  // druhý už waiting_approval neuvidí a nemůže zařadit duplicitní generate.
+  // druhý už pauznutý stav neuvidí a nemůže zařadit duplicitní krok.
   const waiting = [...jobs.values()].find((job) =>
-    job.tenderId === id && job.kind === 'pipeline' && job.status === 'waiting_approval');
+    job.tenderId === id && job.kind === 'pipeline'
+    && (job.status === 'waiting_approval' || job.status === 'budget_paused'));
   if (!waiting) {
     const active = [...jobs.values()].find((job) =>
       job.tenderId === id && job.kind === 'pipeline'
@@ -2984,36 +3009,44 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
     }
     return res.status(404).json({ error: 'Žádný pozastavený pipeline řetězec pro tuto zakázku.' });
   }
-  if (!claimWaitingApproval(waiting)) {
+
+  const resumeStep = waiting.currentStep;
+  if (!resumeStep) {
+    return res.status(409).json({ error: 'Pozastavená pipeline nemá uložený krok pro pokračování.', jobId: waiting.id });
+  }
+  const governanceKey: GovernanceSwitch = resumeStep === 'generate' ? 'generate_enabled' : 'ai_jobs_enabled';
+  if (!(await enforceGovernance(res, governanceKey, true))) return;
+
+  const wasBudgetPaused = waiting.status === 'budget_paused';
+  const claimed = wasBudgetPaused ? claimBudgetPaused(waiting) : claimWaitingApproval(waiting);
+  if (!claimed) {
     return res.status(409).json({ error: 'Pipeline už pokračuje.', jobId: waiting.id });
   }
   scheduleJobsPersist();
 
-  // Ověř, že ceny jsou skutečně potvrzené (nespoléhej na FE) — money-gate se drží na serveru.
-  const pending = await getUnconfirmedPrices(id);
-  if (pending === null) {
-    const message = 'Nelze ověřit potvrzení cen — product-match.json chybí nebo je poškozený.';
-    restoreWaitingApproval(waiting, message);
-    scheduleJobsPersist();
-    return res.status(422).json({ error: message, jobId: waiting.id });
-  }
-  if (pending.count > 0) {
-    const message = `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`;
-    restoreWaitingApproval(waiting, message);
-    scheduleJobsPersist();
-    return res.status(409).json({
-      error: message,
-      pendingCount: pending.count,
-      jobId: waiting.id,
-    });
+  // Generate vždy znovu projde money-gate, i když původní důvod pauzy byl rozpočet.
+  if (resumeStep === 'generate') {
+    const pending = await getUnconfirmedPrices(id);
+    if (pending === null || pending.count > 0) {
+      const message = pending === null
+        ? 'Nelze ověřit potvrzení cen — product-match.json chybí nebo je poškozený.'
+        : `Stále je nepotvrzeno ${pending.count} cen. Potvrďte je v záložce Ocenění a zkuste znovu.`;
+      if (wasBudgetPaused) restoreBudgetPaused(waiting, message);
+      else restoreWaitingApproval(waiting, message);
+      scheduleJobsPersist();
+      return res.status(pending === null ? 422 : 409).json({
+        error: message,
+        pendingCount: pending?.count,
+        jobId: waiting.id,
+      });
+    }
   }
 
-  // Rozjeď řetězec: zařaď generate krok pod původní parent job (chain pokračuje generate→validate).
-  enqueueStepJob(id, 'generate', waiting.id, true, waiting.initiator);
+  enqueueStepJob(id, resumeStep, waiting.id, true, waiting.initiator);
   scheduleJobsPersist();
 
-  console.log(`Pipeline job ${waiting.id} resumed (generate) for ${id}`);
-  res.json({ jobId: waiting.id, status: 'running', currentStep: 'generate' });
+  console.log(`Pipeline job ${waiting.id} resumed (${resumeStep}) for ${id}`);
+  res.json({ jobId: waiting.id, status: 'running', currentStep: resumeStep });
 });
 
 // POST /api/tenders/:id/run/:step - enqueue a pipeline step

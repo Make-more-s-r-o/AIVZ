@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, Loader2, AlertCircle, Play, ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import { cn } from '../lib/cn';
 import {
-  runStep, runAllSteps, getJobStatus, getCost, JobNotFoundError,
+  runStep, runAllSteps, resumeRunAll, getJobStatus, getCost, JobNotFoundError,
   type PipelineSteps, type StepName, type StepStatus, type CostSummary, type RunAllStatus,
 } from '../lib/api';
 import { pipelineObservationKey } from '../lib/pipeline-observation';
@@ -59,6 +59,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
   const [failedStep, setFailedStep] = useState<StepName | null>(null);
   // Run-all pauznutý na money-gate (nepotvrzené ceny před generate) — žlutý stav, ne chyba.
   const [waitingApproval, setWaitingApproval] = useState<string | null>(null);
+  const [budgetPaused, setBudgetPaused] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [jobError, setJobError] = useState<string | null>(null);
   const [showLogs, setShowLogs] = useState(true);
@@ -91,6 +92,8 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
     if (observedRunAllRef.current === observationKey) return;
     observedRunAllRef.current = observationKey;
     if (runAll.status === 'queued' || runAll.status === 'running') {
+      setWaitingApproval(null);
+      setBudgetPaused(null);
       setActiveJobId(runAll.jobId);
       setActiveStep(runAll.currentStep ?? null);
       activeStepRef.current = runAll.currentStep ?? null;
@@ -104,7 +107,17 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
       setActiveStep(null);
       activeStepRef.current = null;
       setRunningAll(false);
+      setBudgetPaused(null);
       setWaitingApproval(runAll.error || 'Pipeline čeká na potvrzení cen v záložce Ocenění.');
+      return;
+    }
+    if (runAll.status === 'budget_paused') {
+      setActiveJobId(null);
+      setActiveStep(null);
+      activeStepRef.current = null;
+      setRunningAll(false);
+      setWaitingApproval(null);
+      setBudgetPaused(runAll.error || 'Pipeline je pozastavena kvůli dennímu AI rozpočtu.');
       return;
     }
     if (runAll.status === 'error' || runAll.status === 'interrupted') {
@@ -141,8 +154,9 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
           setRunningAll(false);
           setJobError(null);
           setFailedStep(null);
+          setBudgetPaused(null);
           onStepCompleteRef.current();
-        } else if (job.status === 'waiting_approval') {
+        } else if (job.status === 'waiting_approval' || job.status === 'budget_paused') {
           // Řetězec narazil na money-gate → zastav spinner, ukaž žlutý stav (ne chyba).
           clearInterval(interval);
           setActiveJobId(null);
@@ -151,7 +165,11 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
           setRunningAll(false);
           setJobError(null);
           setFailedStep(null);
-          setWaitingApproval(job.error || 'Pipeline čeká na potvrzení cen v záložce Ocenění.');
+          if (job.status === 'budget_paused') {
+            setBudgetPaused(job.error || 'Pipeline je pozastavena kvůli dennímu AI rozpočtu.');
+          } else {
+            setWaitingApproval(job.error || 'Pipeline čeká na potvrzení cen v záložce Ocenění.');
+          }
           onStepCompleteRef.current();
         } else if (job.status === 'error' || job.status === 'interrupted') {
           // Zastav spinner (vyprázdni activeJobId/activeStep) a ukaž chybu + krok k restartu.
@@ -206,6 +224,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
     setJobError(null);
     setFailedStep(null);
     setWaitingApproval(null);
+    setBudgetPaused(null);
     setLogs([]);
     logSeenRef.current = 0;
     failedPollsRef.current = 0;
@@ -230,6 +249,7 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
     setJobError(null);
     setFailedStep(null);
     setWaitingApproval(null);
+    setBudgetPaused(null);
     setLogs([]);
     logSeenRef.current = 0;
     failedPollsRef.current = 0;
@@ -358,6 +378,36 @@ export default function PipelineStatus({ tenderId, steps, runAll, onStepComplete
                   Přejít na Ocenění
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {budgetPaused && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="flex items-start gap-2">
+            <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">Pozastaveno kvůli AI rozpočtu</div>
+              <div className="mt-0.5 break-words text-amber-700">{budgetPaused}</div>
+              <button
+                onClick={async () => {
+                  try {
+                    const result = await resumeRunAll(tenderId);
+                    setBudgetPaused(null);
+                    setActiveJobId(result.jobId);
+                    setActiveStep(result.currentStep ?? null);
+                    activeStepRef.current = result.currentStep ?? null;
+                    setRunningAll(true);
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Pokračování pipeline se nezdařilo.');
+                  }
+                }}
+                className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100"
+              >
+                <Play className="h-3 w-3" />
+                Pokračovat
+              </button>
             </div>
           </div>
         </div>

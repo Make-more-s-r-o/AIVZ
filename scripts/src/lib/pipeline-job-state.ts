@@ -4,7 +4,7 @@ import { dirname } from 'path';
 export const RUN_ALL_STEPS = ['extract', 'analyze', 'match', 'generate', 'validate'] as const;
 
 export type PipelineStep = typeof RUN_ALL_STEPS[number];
-export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval';
+export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval' | 'budget_paused';
 
 /**
  * Signál z run-all řetězce, že další krok (generate) narazil na lidský money-gate —
@@ -15,6 +15,14 @@ export class ApprovalRequiredError extends Error {
   constructor(public readonly pendingCount: number, message: string) {
     super(message);
     this.name = 'ApprovalRequiredError';
+  }
+}
+
+/** Rozpočtový checkpoint: dokončený child krok zůstává done, parent čeká před dalším krokem. */
+export class BudgetPausedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BudgetPausedError';
   }
 }
 
@@ -53,6 +61,23 @@ export function claimWaitingApproval(job: PipelineJob): boolean {
 export function restoreWaitingApproval(job: PipelineJob, error: string): void {
   job.status = 'waiting_approval';
   job.currentStep = 'generate';
+  job.error = error;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+}
+
+/** Synchronní claim společný pro rozpočtovou pauzu; resume krok je uložen v currentStep. */
+export function claimBudgetPaused(job: PipelineJob): boolean {
+  if (job.kind !== 'pipeline' || job.status !== 'budget_paused' || !job.currentStep) return false;
+  job.status = 'running';
+  job.error = undefined;
+  job.failedStep = undefined;
+  job.finishedAt = undefined;
+  return true;
+}
+
+export function restoreBudgetPaused(job: PipelineJob, error: string): void {
+  job.status = 'budget_paused';
   job.error = error;
   job.failedStep = undefined;
   job.finishedAt = undefined;
@@ -156,8 +181,7 @@ export async function loadPipelineJobs(
   for (const rawJob of rawJobs) {
     if (!isPipelineJob(rawJob)) continue;
     const job: PipelineJob = { ...rawJob, logs: [...rawJob.logs] };
-    // waiting_approval NENÍ 'running' → restart ho ZACHOVÁ (řetězec zůstane pauznutý na
-    // money-gate, po restartu ho lze pořád resumnout). Neflipuje se na interrupted.
+    // Pauznuté stavy NEJSOU 'running' → restart je zachová a existující resume je může obnovit.
     if (job.status === 'running') {
       job.status = 'interrupted';
       job.finishedAt = now;
@@ -226,6 +250,14 @@ export async function advanceRunAllChain(
     // aby restore snapshot nepovažoval job za dokončený.
     if (err instanceof ApprovalRequiredError) {
       parent.status = 'waiting_approval';
+      parent.currentStep = nextStep;
+      parent.failedStep = undefined;
+      parent.error = err.message;
+      parent.finishedAt = undefined;
+      return;
+    }
+    if (err instanceof BudgetPausedError) {
+      parent.status = 'budget_paused';
       parent.currentStep = nextStep;
       parent.failedStep = undefined;
       parent.error = err.message;

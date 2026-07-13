@@ -4,6 +4,8 @@
  */
 import { access, readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { join } from 'path';
+import { getGovernance } from './governance.js';
+import { maybeSendDailyBudgetWarning } from './ai-budget.js';
 
 const ROOT = new URL('../../../', import.meta.url).pathname;
 
@@ -53,6 +55,18 @@ export async function logCost(
   });
 
   await writeFile(logPath, JSON.stringify(entries, null, 2), 'utf-8');
+
+  // Alert nesmí shodit úspěšné AI volání ani zápis nákladů. Persistentní claim uvnitř
+  // maybeSend... současně brání spamu při restartu nebo paralelních jobech.
+  try {
+    const [governance, costs] = await Promise.all([getGovernance(), getCostsOverview()]);
+    await maybeSendDailyBudgetWarning({
+      todayCzk: costs.dnes_czk,
+      limitCzk: governance.denni_ai_limit_czk,
+    });
+  } catch (error) {
+    console.error('AI budget warning failed:', error);
+  }
 }
 
 export async function getCostSummary(tenderId: string): Promise<CostSummary> {

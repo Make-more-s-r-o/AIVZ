@@ -10,6 +10,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6}
+      - VZ_WATCHDOG_SLACK_WEBHOOK_URL=${VZ_WATCHDOG_SLACK_WEBHOOK_URL:-}
       - GOTENBERG_URL=http://gotenberg:3000
     volumes:
       - vz-input:/app/input
