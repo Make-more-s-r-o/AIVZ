@@ -3,6 +3,12 @@ import type { PriceBand } from './winprice-query.js';
 import { candidateHasRealProduct } from './price-prefill.js';
 import { checkPriceSanity } from './price-sanity.js';
 import type { ExtractedText, ProductMatch, TenderAnalysis } from './types.js';
+import {
+  DEFAULT_GO_NO_GO_WEIGHTS,
+  GO_NO_GO_WEIGHTS,
+  type GoNoGoWeightName,
+  type GoNoGoWeights,
+} from './go-no-go-config.js';
 
 export const GO_SCORE_THRESHOLD = 75;
 export const CONSIDER_SCORE_THRESHOLD = 45;
@@ -10,11 +16,12 @@ export const CONSIDER_SCORE_THRESHOLD = 45;
 // Firemní limit odpovídá horní hranici preferovaného pásma v existujícím monitorovacím filtru.
 export const COMPANY_PRICE_CEILING_CZK = 10_000_000;
 
-export const SECTOR_WEIGHT = 20;
-export const BUDGET_WEIGHT = 20;
-export const PRICED_ITEMS_WEIGHT = 25;
-export const WIN_PRICE_WEIGHT = 20;
-export const DEADLINE_WEIGHT = 15;
+// Zachované exporty kvůli kompatibilitě; aktivní váhy načítá GO_NO_GO_WEIGHTS z configu.
+export const SECTOR_WEIGHT = DEFAULT_GO_NO_GO_WEIGHTS.sector;
+export const BUDGET_WEIGHT = DEFAULT_GO_NO_GO_WEIGHTS.budget;
+export const PRICED_ITEMS_WEIGHT = DEFAULT_GO_NO_GO_WEIGHTS.priced_items;
+export const WIN_PRICE_WEIGHT = DEFAULT_GO_NO_GO_WEIGHTS.win_price;
+export const DEADLINE_WEIGHT = DEFAULT_GO_NO_GO_WEIGHTS.deadline;
 
 export const COMFORTABLE_DEADLINE_DAYS = 14;
 export const TIGHT_DEADLINE_DAYS = 7;
@@ -80,8 +87,9 @@ export function scoreGoNoGo(
   analysis: AnalysisWithScoringContext,
   productMatch?: ProductMatch,
   winBand?: PriceBand,
+  weights: GoNoGoWeights = GO_NO_GO_WEIGHTS,
 ): GoNoGoResult {
-  const factors = collectGoNoGoFactors(analysis, productMatch, winBand)
+  const factors = collectGoNoGoFactors(analysis, productMatch, winBand, weights)
     .flatMap((observation) => observation.factor ? [observation.factor] : []);
 
   const duvody = factors.map((factor) => factor.reason);
@@ -118,12 +126,13 @@ export function serializeGoNoGoFeatureVector(
   analysis: AnalysisWithScoringContext,
   productMatch?: ProductMatch,
   winBand?: PriceBand,
+  weights: GoNoGoWeights = GO_NO_GO_WEIGHTS,
 ): ScoreFeatureVector {
-  const result = scoreGoNoGo(analysis, productMatch, winBand);
-  const observations = collectGoNoGoFactors(analysis, productMatch, winBand);
+  const result = scoreGoNoGo(analysis, productMatch, winBand, weights);
+  const observations = collectGoNoGoFactors(analysis, productMatch, winBand, weights);
   return {
     typ: 'gonogo',
-    faktory: weightedFeatures(observations),
+    faktory: weightedFeatures(observations, weights),
     skore: result.score,
     doporuceni: result.doporuceni,
   };
@@ -133,6 +142,7 @@ function collectGoNoGoFactors(
   analysis: AnalysisWithScoringContext,
   productMatch?: ProductMatch,
   winBand?: PriceBand,
+  weights: GoNoGoWeights = GO_NO_GO_WEIGHTS,
 ): FactorObservation[] {
   const comparedPrice = totalMatchedPrice(productMatch) ?? analysis.zakazka.predpokladana_hodnota;
   const pricedItems = productMatch?.polozky_match ?? [];
@@ -176,25 +186,32 @@ function collectGoNoGoFactors(
       raw: { lhuta_nabidek: analysis.terminy.lhuta_nabidek ?? null, extracted_at: analysis.extractedAt ?? null, zbyva_dni: deadlineDays },
       factor: scoreDeadline(analysis.terminy.lhuta_nabidek, analysis.extractedAt),
     },
-  ];
+  ].map((observation) => ({
+    ...observation,
+    factor: observation.factor
+      ? { ...observation.factor, weight: weights[observation.name as GoNoGoWeightName] }
+      : null,
+  }));
 }
 
-function weightedFeatures(observations: FactorObservation[]): ScoreFeature[] {
+function weightedFeatures(
+  observations: FactorObservation[],
+  goNoGoWeights: GoNoGoWeights = GO_NO_GO_WEIGHTS,
+): ScoreFeature[] {
   const totalWeight = observations.reduce((sum, observation) => sum + (observation.factor?.weight ?? 0), 0);
   return observations.map(({ name, raw, factor }) => ({
     nazev: name,
     surova_hodnota: raw,
     normalizovana_hodnota: factor?.value ?? null,
-    vaha: factor?.weight ?? factorWeight(name),
+    vaha: factor?.weight ?? factorWeight(name, goNoGoWeights),
     prispevek: factor && totalWeight > 0 ? (factor.value * factor.weight / totalWeight) * 100 : 0,
     duvod: factor?.reason ?? null,
   }));
 }
 
-function factorWeight(name: string): number {
+function factorWeight(name: string, goNoGoWeights: GoNoGoWeights): number {
   const weights: Record<string, number> = {
-    sector: SECTOR_WEIGHT, budget: BUDGET_WEIGHT, priced_items: PRICED_ITEMS_WEIGHT,
-    win_price: WIN_PRICE_WEIGHT, deadline: DEADLINE_WEIGHT,
+    ...goNoGoWeights,
     margin: BID_MARGIN_WEIGHT, absolute_profit: BID_ABS_PROFIT_WEIGHT,
     match_quality: BID_MATCH_QUALITY_WEIGHT,
   };

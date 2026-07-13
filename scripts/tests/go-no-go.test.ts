@@ -11,6 +11,12 @@ import {
   scoreGoNoGo,
   scoreBid,
 } from '../src/lib/go-no-go.js';
+import {
+  DEFAULT_GO_NO_GO_WEIGHTS,
+  GO_NO_GO_CONFIG_PATH,
+  loadGoNoGoWeights,
+  resolveGoNoGoWeights,
+} from '../src/lib/go-no-go-config.js';
 import { TenderAnalysisSchema, type ProductMatch, type TenderAnalysis } from '../src/lib/types.js';
 import type { PriceBand } from '../src/lib/winprice-query.js';
 
@@ -106,6 +112,54 @@ test('hraniční kombinace vrací ZVAZIT', () => {
   );
   assert.equal(result.doporuceni, 'ZVAZIT');
   assert.ok(result.score >= 45 && result.score < 75);
+});
+
+test('výchozí config zachovává původní go/no-go výsledek bit-perfect', () => {
+  const weights = loadGoNoGoWeights(GO_NO_GO_CONFIG_PATH, () => {});
+  assert.deepEqual(weights, DEFAULT_GO_NO_GO_WEIGHTS);
+
+  const result = scoreGoNoGo(
+    analysis({ expectedValue: 11_000_000, deadline: '2026-07-06T00:00:00.000Z' }),
+    productMatch(1, 2, 6_000_000),
+    winBand(8_000_000, 4),
+    weights,
+  );
+  assert.deepEqual(result, {
+    score: 59,
+    doporuceni: 'ZVAZIT',
+    duvody: [
+      'Předmět zakázky odpovídá oborům firmy.',
+      'Předpokládaná hodnota mírně překračuje firemní cenový limit.',
+      '1 z 2 položek je úspěšně naceněno v mezích.',
+      'Cena je 24 % od mediánu 4 historických výher.',
+      'Na přípravu zbývá jen 5 dní.',
+    ],
+  });
+});
+
+test('custom váhy z configu mění skóre dle očekávání', () => {
+  const weights = resolveGoNoGoWeights({
+    weights: { sector: 1, budget: 100, priced_items: 1, win_price: 1, deadline: 1 },
+  });
+  const result = scoreGoNoGo(
+    analysis({ expectedValue: 11_000_000, deadline: '2026-07-06T00:00:00.000Z' }),
+    productMatch(1, 2, 6_000_000),
+    winBand(8_000_000, 4),
+    weights,
+  );
+  assert.equal(result.score, 41);
+  assert.equal(result.doporuceni, 'NOGO');
+});
+
+test('nevalidní config použije výchozí váhy a zapíše warn', () => {
+  const warnings: string[] = [];
+  const weights = resolveGoNoGoWeights({
+    weights: { sector: -1, budget: 0, priced_items: '25', win_price: Number.NaN, deadline: Infinity },
+  }, (message) => warnings.push(message));
+
+  assert.deepEqual(weights, DEFAULT_GO_NO_GO_WEIGHTS);
+  assert.equal(warnings.length, 5);
+  assert.ok(warnings.every((message) => message.startsWith('[go-no-go] Neplatná váha')));
 });
 
 test('zjevně nevhodná zakázka vrací NOGO', () => {
