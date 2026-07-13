@@ -1,6 +1,10 @@
 # Bugs & TODOs — VZ AI Tool Pipeline
 
-*Aktualizováno: 2026-02-21*
+*Aktualizováno: 2026-07-13 (audit proti aktuálnímu kódu; původní stav 2026-02-21)*
+
+> **Audit 2026-07-13:** většina položek níže je už vyřešená pozdějším vývojem (pipeline joby,
+> parse-soupis, batch matching, fallback šablony, LibreOffice v image). Stav je vyznačen u
+> každé položky. **BUG-05 je trvale ZAMÍTNUT — porušuje invariant lidské kontroly cen.**
 
 ---
 
@@ -26,7 +30,8 @@
 
 ## OTEVŘENÉ BUGY
 
-### 🐛 BUG-01: Soupis-based zakázky — match timeout
+### ✅ BUG-01: Soupis-based zakázky — match timeout — VYŘEŠENO (audit 2026-07-13)
+`scripts/src/parse-soupis.ts` existuje a je integrovaný do `analyze-tender.ts` (soupis se extrahuje po řádcích), match dávkuje. Ověřeno E2E na n-485400 (57/57 položek).
 - **Popis:** Zakázky s XLSX soupisy vybavení (Bill of Quantities) mají stovky položek. Analyze je sloučí do 3 abstraktních kategorií (Část A/B/C) místo extrakce jednotlivých řádků.
 - **Dopad:** match-product.ts dostane 3 velké "položky" místo konkrétních produktů → match timeout nebo nesmyslné výsledky
 - **Příklad:** `varyte-vybaveni` — 87 položek Část B, 127 položek Část C
@@ -36,7 +41,8 @@
   3. Batch matching — 200+ položek se musí zpracovat po dávkách (max ~20 najednou)
   4. Filter by category — IT firma by měla matchovat jen technologické položky, ne nábytek/nářadí
 
-### 🐛 BUG-02: spawnSync ETIMEDOUT v serve-api.ts
+### ✅ BUG-02: spawnSync ETIMEDOUT v serve-api.ts — VYŘEŠENO (audit 2026-07-13)
+Async job systém existuje (`pipeline-job-state.ts`, enqueue + persistentní joby, POST vrací jobId). Původní popis níže.
 - **Popis:** Při spuštění pipeline přes API (HTTP) dochází k timeoutu `spawnSync` dříve než projde AI volání
 - **Příčina:** Při souběžném spuštění dvou AI kroků (pro 2 různé zakázky) se API volání navzájem zdržují kvůli rate limitům Anthropic
 - **Dopad:** analyze/match selhávají s `ETIMEDOUT` i přes 10min SDK timeout
@@ -50,13 +56,18 @@
 - **Příčina:** neznámá — 50KB text, Anthropic API flaky v daný čas, nebo velký XLSX (cenová nabídka se stovkami řádků)
 - **Workaround:** opakovat pokus
 
-### 🐛 BUG-04: servery-hostinne — chybí generované dokumenty
+### ✅ BUG-04: servery-hostinne — chybí generované dokumenty — VYŘEŠENO (audit 2026-07-13)
+Fallback globálních šablon z `templates/` je v `generate-bid.ts` (ř. ~329). Původní popis níže.
 - **Popis:** Generate vytvořil jen `cenova_nabidka.docx` a `technicky_navrh.docx`. Chybí: `cestne_prohlaseni.docx`, `seznam_poddodavatelu.docx`
 - **Příčina:** Input folder neobsahuje template soubory (žádný "kryci list" ani "cestne prohlaseni") → generate nemá co vyplnit
 - **Dopad:** Validation score 3/10 — chybí klíčové dokumenty
 - **Potřeba:** Fallback — pokud tender nemá template, vygenerovat AI-based čestné prohlášení ze šablony v `templates/` adresáři projektu
 
-### 🐛 BUG-05: Automatické potvrzení cen chybí
+### ⛔ BUG-05: Automatické potvrzení cen — TRVALE ZAMÍTNUTO (2026-07-13)
+**NIKDY neimplementovat.** Porušuje nepřekročitelný invariant majitele: každá cena v nabídce
+musí být potvrzena člověkem (per-item attestace se serverovou auditní stopou z JWT, C-01/PR #63).
+Jakýkoli `AUTO_CONFIRM_PRICES` přepínač je zakázán i „dočasně pro testování" — pro E2E existuje
+řízená cesta `E2E_UNSAFE_AUTOCONFIRM=1` v e2e.sh mimo produkci. Původní (zamítnutý) návrh níže.
 - **Popis:** Generate vyžaduje `cenova_uprava.potvrzeno = true` pro každou položku, ale match ho nenastavuje automaticky
 - **Dopad:** Uživatel musí ručně potvrdit každou položku přes PUT endpoint nebo UI — brzdí testování
 - **Řešení:** Přidat příznak `AUTO_CONFIRM_PRICES=true` v .env nebo parametr v API — match step automaticky nastaví `potvrzeno: true` s AI-recommended cenou
@@ -72,30 +83,30 @@
 
 ## ARCHITEKTURÁLNÍ TODO
 
-### 🏗️ TODO-01: Soupis XLSX parser
+### ✅ TODO-01: Soupis XLSX parser — HOTOVO (`parse-soupis.ts`, viz BUG-01)
 - Nový script: `scripts/src/parse-soupis.ts`
 - Input: XLSX soupis soubor
 - Output: `{polozky: [{nazev, specifikace, mnozstvi, jednotka, kategorie}]}`
 - Kategorie: `nabytek | nastroj | it | av | elektro | ostatni`
 - IT firma matchuje pouze: `it | av | elektro`
 
-### 🏗️ TODO-02: Batch product matching
+### ✅ TODO-02: Batch product matching — HOTOVO (dávkování v match-product.ts)
 - Aktuální limit: ~10 položek najednou (token limit)
 - Potřeba: rozdělit velké soupisy do dávek, sloučit výsledky
 - Implementace v `match-product.ts` — detekuje pokud items > 15 → dávkuje
 
-### 🏗️ TODO-03: Async job queue pro API
+### ✅ TODO-03: Async job queue pro API — HOTOVO (pipeline-job-state.ts, jobs API)
 - Aktuální: `execSync` blokuje Node.js event loop
 - Potřeba: `child_process.spawn` + job store (JSON file nebo Redis)
 - Endpoint: `POST /api/tenders/:id/run/:step` → `{jobId: "..."}`
 - Endpoint: `GET /api/jobs/:jobId` → `{status, progress, logs}`
 
-### 🏗️ TODO-04: Global templates fallback
+### ✅ TODO-04: Global templates fallback — HOTOVO (generate-bid.ts, viz BUG-04)
 - Pokud tender nemá template soubory v `input/:id/`, použít globální šablony z `templates/`
 - Šablony: `kryci_list.docx`, `cestne_prohlaseni.docx`, `seznam_poddodavatelu.docx`
 - Doplnit AI-powered filling pro globální šablony
 
-### 🏗️ TODO-05: .doc → .docx konverze
+### ✅ TODO-05: .doc → .docx konverze — HOTOVO (soffice v Docker image, document-parser.ts)
 - Soubory `.doc` jsou přeskočeny parserem
 - `kancelarsky-material` má `.doc` soubory
 - Potřeba: auto-konverze přes LibreOffice při extrakci
