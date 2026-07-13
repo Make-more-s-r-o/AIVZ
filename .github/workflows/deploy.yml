@@ -63,6 +63,8 @@ jobs:
   deploy-hetzner:
     needs: build-and-push
     runs-on: ubuntu-latest
+    env:
+      NGINX_CONTAINER: makemore-nginx
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,11 +97,71 @@ jobs:
             docker compose pull
             # 40 s odpovídá stop_grace_period; API má 25 s na drain + persist snapshotu.
             docker compose up -d --remove-orphans --timeout 40
-            sleep 15
-            docker exec vz-api wget --spider -q http://localhost:3001/api/health
 
-      - name: External health check
-        continue-on-error: true
-        run: |
-          sleep 15
-          curl -sf --max-time 10 "https://vz.ludone.cz/api/health" || echo "External check failed (may be DNS)"
+      - name: Post-deploy smoke test
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 23.88.61.12
+          username: root
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          command_timeout: 3m
+          script: |
+            set -eu
+
+            API_CONTAINER="vz-api"
+            NGINX_CONTAINER="${{ env.NGINX_CONTAINER }}"
+            BASE_URL="https://vz.ludone.cz"
+
+            echo "Waiting for ${API_CONTAINER} to become healthy (maximum ~90 s)..."
+            healthy=false
+            for attempt in $(seq 1 18); do
+              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${API_CONTAINER}" 2>/dev/null || echo missing)
+              echo "Health attempt ${attempt}/18: ${status}"
+              if [ "${status}" = "healthy" ]; then
+                healthy=true
+                break
+              fi
+              if [ "${attempt}" -lt 18 ]; then
+                sleep 5
+              fi
+            done
+
+            if [ "${healthy}" != "true" ]; then
+              echo "ERROR: ${API_CONTAINER} did not become healthy in time."
+              docker ps --filter "name=${API_CONTAINER}" --format 'table {{.Names}}\t{{.Status}}'
+              docker inspect --format '{{json .State.Health}}' "${API_CONTAINER}" 2>/dev/null || true
+              exit 1
+            fi
+
+            echo "Reloading nginx container ${NGINX_CONTAINER} to refresh upstream IPs..."
+            docker exec "${NGINX_CONTAINER}" nginx -s reload
+
+            echo "Checking public API health..."
+            health_body=$(curl -fsS --max-time 15 "${BASE_URL}/api/health")
+            echo "Health response: ${health_body}"
+            echo "${health_body}" | grep -q '"db":"ok"' || {
+              echo 'ERROR: health response does not contain "db":"ok".'
+              exit 1
+            }
+
+            echo "Checking SPA root (expected HTTP 200)..."
+            spa_status=$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 15 "${BASE_URL}/")
+            echo "SPA response status: ${spa_status}"
+            if [ "${spa_status}" != "200" ]; then
+              echo "ERROR: SPA root returned HTTP ${spa_status}, expected 200."
+              exit 1
+            fi
+
+            echo "Checking auth guard without a token (expected HTTP 401)..."
+            auth_body=$(mktemp)
+            trap 'rm -f "${auth_body}"' EXIT
+            auth_status=$(curl -sS -o "${auth_body}" -w '%{http_code}' --max-time 15 "${BASE_URL}/api/auth/me")
+            echo "Auth response status: ${auth_status}"
+            if [ "${auth_status}" != "401" ]; then
+              echo "ERROR: protected endpoint returned HTTP ${auth_status}, expected 401."
+              echo "Response body:"
+              cat "${auth_body}"
+              exit 1
+            fi
+
+            echo "Post-deploy smoke test passed."
