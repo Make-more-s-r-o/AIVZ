@@ -144,7 +144,7 @@ export interface PipelineSteps {
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'error';
 export type StepName = keyof PipelineSteps;
-export type JobStatusValue = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval';
+export type JobStatusValue = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval' | 'budget_paused';
 
 export interface RunAllStatus {
   jobId: string;
