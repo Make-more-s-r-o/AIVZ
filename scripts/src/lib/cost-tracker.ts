@@ -2,7 +2,7 @@
  * Cost tracker for AI API calls.
  * Logs per-step token usage and CZK costs to output/{tender}/cost-log.json.
  */
-import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
+import { access, readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { join } from 'path';
 
 const ROOT = new URL('../../../', import.meta.url).pathname;
@@ -97,6 +97,8 @@ export interface CostsAggregateTenderInput {
   tenderId: string;
   /** Zobrazovaný název zakázky (z tender-meta.json), null když neznámý. */
   name?: string | null;
+  /** Generate úspěšně vytvořil kanonický artefakt cenova_nabidka.docx. */
+  hasGeneratedOffer?: boolean;
   entries: CostEntry[];
 }
 
@@ -107,6 +109,8 @@ export interface CostsAggregate {
   /** Posledních 30 dní (rolling), včetně dneška. */
   mesic_czk: number;
   celkem_czk: number;
+  /** Průměrné celkové AI náklady na jednu vygenerovanou cenovou nabídku. */
+  kc_na_cn: number | null;
   top_zakazky: Array<{ tender_id: string; nazev: string | null; celkem_czk: number }>;
   /** Posledních 14 dní, chronologicky, nulami doplněné dny bez záznamu. */
   po_dnech: Array<{ den: string; czk: number }>;
@@ -140,10 +144,12 @@ export function computeCostsAggregate(
   let tyden = 0;
   let mesic = 0;
   let celkem = 0;
+  let generatedOffers = 0;
   const perTender = new Map<string, { nazev: string | null; czk: number }>();
   const perDay = new Map<string, number>();
 
   for (const t of tenders) {
+    if (t.hasGeneratedOffer) generatedOffers += 1;
     let tenderCzk = 0;
     for (const e of t.entries) {
       if (!e || typeof e.costCZK !== 'number' || Number.isNaN(e.costCZK)) continue;
@@ -184,6 +190,7 @@ export function computeCostsAggregate(
     tyden_czk: round2(tyden),
     mesic_czk: round2(mesic),
     celkem_czk: round2(celkem),
+    kc_na_cn: generatedOffers > 0 ? round2(celkem / generatedOffers) : null,
     top_zakazky,
     po_dnech,
   };
@@ -219,7 +226,17 @@ export async function getCostsOverview(now: Date = new Date()): Promise<CostsAgg
       } catch {
         // bez meta jména — top_zakazky ukáže jen tender_id
       }
-      return { tenderId, name, entries };
+      // Kanonický výstup generate je spolehlivější než job historie: .jobs.json
+      // drží jen posledních 100 jobů a nemusí existovat po migraci/starším CLI běhu.
+      // Soubor vzniká až v generate pipeline a přežije restart serveru.
+      let hasGeneratedOffer = false;
+      try {
+        await access(join(outputRoot, tenderId, 'cenova_nabidka.docx'));
+        hasGeneratedOffer = true;
+      } catch {
+        // Bez kanonické CN se zakázka do jmenovatele nepočítá.
+      }
+      return { tenderId, name, entries, hasGeneratedOffer };
     }),
   );
 
