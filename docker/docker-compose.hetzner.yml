@@ -7,6 +7,7 @@ services:
     image: ${VZ_IMAGE:-ghcr.io/make-more-s-r-o/aivz:latest}
     container_name: vz-api
     restart: unless-stopped
+    stop_grace_period: 40s
     environment:
       - NODE_ENV=production
       - API_PORT=3001
@@ -14,6 +15,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - AI_MODEL=${AI_MODEL:-claude-sonnet-4-6}
+      - PIPELINE_DRAIN_TIMEOUT_MS=${PIPELINE_DRAIN_TIMEOUT_MS:-25000}
       - VZ_WATCHDOG_SLACK_WEBHOOK_URL=${VZ_WATCHDOG_SLACK_WEBHOOK_URL:-}
       - GOTENBERG_URL=http://vz-gotenberg:3000
       - DATABASE_URL=postgresql://vz:${POSTGRES_PASSWORD}@vz-postgres:5432/vz_warehouse
