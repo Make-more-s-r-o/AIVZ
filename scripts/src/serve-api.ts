@@ -4838,6 +4838,31 @@ startup().then(() => {
   void runReminderSweep();
   reminderTimer = setInterval(() => { void runReminderSweep(); }, 15 * 60 * 1000);
 
+  // Monitoring auto-sync: hodinově natáhne nové zakázky ze zdrojů (NEN/Hlídač) podle
+  // nastavených klíčových slov — stejná logika jako ruční POST /api/monitoring/sync.
+  // Best-effort, guard bez DB i na governance kill-switch; timer se ruší při shutdownu.
+  let monitoringSyncTimer: NodeJS.Timeout | null = null;
+  const runMonitoringSync = async () => {
+    if (!(await isDbAvailable())) return;
+    try {
+      const governance = await getGovernance();
+      if (governanceSwitchBlock(governance, 'ingest_enabled')) return;
+      const monitoringConfig = await getMonitoringConfig();
+      const queries = monitoringConfig.klicova_slova.length > 0
+        ? [...new Set(monitoringConfig.klicova_slova)]
+        : [''];
+      const sync = await collectMonitoringInputs('both', queries, Boolean(process.env.HLIDAC_TOKEN), {
+        fetchNen: fetchNenTenders, fetchHlidac: fetchNewTenders,
+      });
+      const inserted = await upsertFeed(sync.inputs);
+      console.log(`[monitoring] auto-sync: nalezeno ${sync.inputs.length}, novych ${inserted}, zdroje ${sync.zdroje_pouzite.join('+')}`);
+    } catch (error) {
+      console.warn('[monitoring] auto-sync selhal:', error);
+    }
+  };
+  void runMonitoringSync();
+  monitoringSyncTimer = setInterval(() => { void runMonitoringSync(); }, 60 * 60 * 1000);
+
   // Graceful shutdown
   const DRAIN_TIMEOUT_MS = (() => {
     const raw = Number(process.env.PIPELINE_DRAIN_TIMEOUT_MS);
@@ -4850,6 +4875,7 @@ startup().then(() => {
       draining = true;
       console.log(`\nSIGTERM: draining pipeline jobs for up to ${DRAIN_TIMEOUT_MS}ms...`);
       if (reminderTimer) clearInterval(reminderTimer);
+      if (monitoringSyncTimer) clearInterval(monitoringSyncTimer);
 
       const deadline = Date.now() + DRAIN_TIMEOUT_MS;
       while (runningJobs.size > 0 && Date.now() < deadline) {

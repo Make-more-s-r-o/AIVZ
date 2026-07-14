@@ -53,7 +53,9 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
     const needle = search.trim().toLocaleLowerCase('cs');
     const threshold = Number(minScore);
     return feed.filter((item) => item.go_no_go.score >= threshold
-      && (!needle || item.nazev.toLocaleLowerCase('cs').includes(needle)));
+      && (!needle
+        || item.nazev.toLocaleLowerCase('cs').includes(needle)
+        || (item.zadavatel ?? '').toLocaleLowerCase('cs').includes(needle)));
   }, [feed, minScore, search]);
 
   async function handleSync() {
@@ -64,10 +66,13 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
       localStorage.setItem(LAST_SYNC_KEY, result.synchronizovano_at);
       setLastSync(result.synchronizovano_at);
       await qc.invalidateQueries({ queryKey: ['monitoring-feed'] });
-      if (result.varovani) toast(result.varovani, 'danger');
-      else toast(result.novych > 0
+      const summary = result.novych > 0
         ? `Načteno ${result.novych} nových zakázek (${result.nalezeno} unikátních).`
-        : `Žádné nové zakázky (${result.nalezeno} unikátních zkontrolováno).`, 'success');
+        : `Žádné nové zakázky (${result.nalezeno} unikátních zkontrolováno).`;
+      // varovani ze /sync je informativní (typicky „NEN prázdný, doplněno z Hlídače"), sync
+      // samotný přitom uspěl (HTTP 200) — nezobrazovat jako chybu.
+      if (result.varovani) toast(`${summary} ${result.varovani}`, 'info');
+      else toast(summary, 'success');
     } catch (error) {
       toast(error instanceof Error ? error.message : 'Synchronizace selhala.', 'danger');
     } finally {
@@ -157,7 +162,7 @@ export default function MonitoringPage({ onOpen }: MonitoringPageProps) {
             ))}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 1fr) 190px', gap: 10, maxWidth: 650 }}>
-            <Input iconLeft={<Search size={15} />} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Hledat v názvu zakázky…" />
+            <Input iconLeft={<Search size={15} />} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Hledat v názvu zakázky nebo zadavateli…" />
             <Select value={minScore} onChange={(event) => setMinScore(event.target.value)} options={[
               { value: '0', label: 'Všechna skóre' },
               { value: '45', label: 'Skóre alespoň 45' },
