@@ -3,6 +3,27 @@ import { open, unlink } from 'node:fs/promises';
 
 import type { NenAttachment } from './nen-client.js';
 import { fetchAllowedNenUrl, isAllowedNenUrl } from './nen-client.js';
+import type { HlidacTenderDocument } from './hlidac-client.js';
+
+/**
+ * SSRF pojistka pro přílohy z Hlídače státu — ten agreguje dokumenty z různých
+ * profilů zadavatelů, ne jen z NEN. Zatím ověřeno reálně jen proti TenderArena
+ * (`api.tenderarena.cz`, 2026-07-14); další hostitele profilů přidávat sem
+ * teprve po ověření reálné URL, ne dopředu naslepo.
+ */
+const ALLOWED_HLIDAC_DOC_HOSTS = new Set(['api.tenderarena.cz']);
+
+export function isAllowedHlidacDocUrl(value: string | URL): boolean {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    return url.protocol === 'https:'
+      && ALLOWED_HLIDAC_DOC_HOSTS.has(url.hostname)
+      && url.username === ''
+      && url.password === '';
+  } catch {
+    return false;
+  }
+}
 
 /** Limity stahování příloh ZD — pojistka proti runaway zakázce / DoS. */
 export const MAX_ZD_FILES = 30;
@@ -221,14 +242,37 @@ function uniqueName(name: string, used: Set<string>): string {
   }
 }
 
+interface UrlGuard {
+  /** Lidsky čitelný popis zamítnutého zdroje v hlášce (např. „mimo nen.nipez.cz"). */
+  odmitnutiDuvod: string;
+  isAllowed(url: string): boolean;
+  fetchAllowed(url: string, fetchFn: typeof fetch, init: RequestInit): Promise<Response>;
+}
+
+const NEN_GUARD: UrlGuard = {
+  odmitnutiDuvod: 'mimo nen.nipez.cz',
+  isAllowed: isAllowedNenUrl,
+  fetchAllowed: fetchAllowedNenUrl,
+};
+
+const HLIDAC_GUARD: UrlGuard = {
+  odmitnutiDuvod: 'mimo ověřené profily zadavatelů',
+  isAllowed: isAllowedHlidacDocUrl,
+  async fetchAllowed(url, fetchFn, init) {
+    if (!isAllowedHlidacDocUrl(url)) throw new Error(`nepovolená URL přílohy: ${url}`);
+    return fetchFn(url, init);
+  },
+};
+
 /**
  * Stáhne přílohy ZD do cílové složky. Robustní vůči selhání jednotlivého souboru
  * (zaloguje varování a pokračuje). Vynucuje limity: max počet souborů, max velikost
  * jednoho souboru i souhrnná velikost. Vrací počet úspěšně stažených + varování.
  */
-export async function downloadNenAttachments(
+async function downloadAttachments(
   attachments: NenAttachment[],
   destDir: string,
+  guard: UrlGuard,
   options: DownloadZdOptions = {},
 ): Promise<DownloadZdResult> {
   const fetchFn = options.fetchFn ?? fetch;
@@ -248,8 +292,8 @@ export async function downloadNenAttachments(
     }
 
     const displayName = attachment.nazev || 'bez názvu';
-    if (!isAllowedNenUrl(attachment.url)) {
-      varovani.push(`Příloha „${displayName}" přeskočena (nepovolená URL mimo nen.nipez.cz).`);
+    if (!guard.isAllowed(attachment.url)) {
+      varovani.push(`Příloha „${displayName}" přeskočena (nepovolená URL ${guard.odmitnutiDuvod}).`);
       continue;
     }
 
@@ -258,7 +302,7 @@ export async function downloadNenAttachments(
     let filePath: string | null = null;
     let safeName: string | null = sanitizeAttachmentName(attachment.nazev);
     try {
-      const response = await fetchAllowedNenUrl(attachment.url, fetchFn, {
+      const response = await guard.fetchAllowed(attachment.url, fetchFn, {
         headers: { 'User-Agent': 'vz-ai-tool/monitoring' },
         signal: controller.signal,
       });
@@ -338,4 +382,24 @@ export async function downloadNenAttachments(
   }
 
   return { pocet_stazenych, varovani };
+}
+
+export function downloadNenAttachments(
+  attachments: NenAttachment[],
+  destDir: string,
+  options: DownloadZdOptions = {},
+): Promise<DownloadZdResult> {
+  return downloadAttachments(attachments, destDir, NEN_GUARD, options);
+}
+
+/**
+ * Stáhne přílohy ZD nalezené přes detail Hlídače státu (viz fetchHlidacTenderDocuments).
+ * Hlídač agreguje víc zdrojů než NEN — proto vlastní SSRF allowlist (ALLOWED_HLIDAC_DOC_HOSTS).
+ */
+export function downloadHlidacAttachments(
+  attachments: HlidacTenderDocument[],
+  destDir: string,
+  options: DownloadZdOptions = {},
+): Promise<DownloadZdResult> {
+  return downloadAttachments(attachments, destDir, HLIDAC_GUARD, options);
 }
