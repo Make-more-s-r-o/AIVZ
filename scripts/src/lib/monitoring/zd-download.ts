@@ -313,6 +313,19 @@ async function downloadAttachments(
         continue;
       }
 
+      // Odkaz s platnou příponou v názvu (fromLink) jinak projde beze čtení obsahu — ale
+      // profil (typicky TenderArena) občas na „přímý" odkaz vrátí HTML shell (bot ochrana /
+      // vyžaduje session), ne soubor. To nikdy tiše nepřijímat jako úspěch.
+      const contentType = responseContentType(response);
+      if (contentType === 'text/html' || contentType === 'text/plain') {
+        controller.abort();
+        await response.body?.cancel().catch(() => {});
+        varovani.push(
+          `Příloha „${displayName}" přeskočena — server vrátil stránku místo souboru (pravděpodobně ochrana proti botům nebo vyžaduje přihlášení); stáhněte ručně.`,
+        );
+        continue;
+      }
+
       const resolved = resolveAttachmentName(attachment.nazev, response);
       safeName = resolved.name;
       if (!safeName) {
