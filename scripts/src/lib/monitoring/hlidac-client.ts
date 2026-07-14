@@ -89,6 +89,54 @@ function toCandidate(value: unknown): HlidacTenderCandidate | null {
   };
 }
 
+const HLIDAC_DETAIL_URL = 'https://api.hlidacstatu.cz/api/v2/verejnezakazky';
+
+/**
+ * Natáhne přílohy ZD pro jednu zakázku z detail endpointu Hlídače státu.
+ * Bulk `hledat` endpoint (fetchNewTenders) dokumenty nevrací — jsou jen v detailu.
+ * Graceful degradace: chybějící token / chyba / žádné dokumenty → prázdné pole,
+ * volající to bere jako „přílohy nejsou k dispozici", ne jako pád.
+ */
+export async function fetchHlidacTenderDocuments(zdrojId: string): Promise<HlidacTenderDocument[]> {
+  const token = process.env.HLIDAC_TOKEN;
+  if (!token || !zdrojId) return [];
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HLIDAC_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${HLIDAC_DETAIL_URL}/${encodeURIComponent(zdrojId)}`, {
+      headers: { Authorization: `Token ${token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.warn(`Hlídač státu detail vrátil HTTP ${response.status} pro ${zdrojId} — přílohy přeskočeny.`);
+      return [];
+    }
+    const body = await response.json() as Record<string, unknown>;
+    const rawDocuments = Array.isArray(body.dokumenty) ? body.dokumenty : [];
+    return rawDocuments.map(toDetailDocument).filter((doc): doc is HlidacTenderDocument => doc !== null);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Hlídač státu detail není dostupný (${message}) pro ${zdrojId} — přílohy přeskočeny.`);
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function toDetailDocument(value: unknown): HlidacTenderDocument | null {
+  if (!value || typeof value !== 'object') return null;
+  const document = value as Record<string, unknown>;
+  const directUrls = Array.isArray(document.directUrls) ? document.directUrls : [];
+  const oficialUrls = Array.isArray(document.oficialUrls) ? document.oficialUrls : [];
+  const url = asString(directUrls[0]) ?? asString(oficialUrls[0]);
+  if (!url) return null;
+  return {
+    nazev: asString(document.name) ?? asString(document.typDokumentu) ?? 'Dokument',
+    url,
+  };
+}
+
 function toDocument(value: unknown): HlidacTenderDocument | null {
   if (!value || typeof value !== 'object') return null;
   const document = value as Record<string, unknown>;

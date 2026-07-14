@@ -112,10 +112,10 @@ import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
 import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
 import {
-  downloadNenAttachments, incompleteDownloadWarning, monitoringAutoStartGovernanceDecision,
-  shouldAutoStartDownloadedPipeline,
+  downloadNenAttachments, downloadHlidacAttachments, incompleteDownloadWarning,
+  monitoringAutoStartGovernanceDecision, shouldAutoStartDownloadedPipeline,
 } from './lib/monitoring/zd-download.js';
-import { fetchNewTenders } from './lib/monitoring/hlidac-client.js';
+import { fetchNewTenders, fetchHlidacTenderDocuments } from './lib/monitoring/hlidac-client.js';
 import {
   upsertFeed, listFeed, getFeedItem, setFeedStav,
   type MonitoringStav,
@@ -1250,9 +1250,7 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     let jobId: string | null = null;
 
     if (stahnoutZd) {
-      if (item.zdroj !== 'nen' || !item.url) {
-        varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN — nahrajte dokumenty ručně.');
-      } else {
+      if (item.zdroj === 'nen' && item.url) {
         const attachments = await fetchNenAttachments(item.url);
         pocetNalezenych = attachments.length;
         if (attachments.length === 0) {
@@ -1265,6 +1263,23 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
             await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
           }
         }
+      } else if (item.zdroj === 'hlidac' && item.zdroj_id) {
+        // Hlídač agreguje víc profilů (TenderArena aj.) — dokumenty jen v detail endpointu,
+        // ne v bulk hledání, a stahování povoleno jen z ověřených hostitelů (ALLOWED_HLIDAC_DOC_HOSTS).
+        const attachments = await fetchHlidacTenderDocuments(item.zdroj_id);
+        pocetNalezenych = attachments.length;
+        if (attachments.length === 0) {
+          varovani.push('Hlídač státu nevrátil žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
+        } else {
+          const result = await downloadHlidacAttachments(attachments, join(INPUT_DIR, tenderId));
+          pocetStazenych = result.pocet_stazenych;
+          varovani.push(...result.varovani);
+          if (pocetStazenych > 0) {
+            await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+          }
+        }
+      } else {
+        varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN nebo Hlídače státu — nahrajte dokumenty ručně.');
       }
     }
 
