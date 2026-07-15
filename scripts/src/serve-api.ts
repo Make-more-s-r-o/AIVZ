@@ -1803,10 +1803,18 @@ app.post<{ id: string }>('/api/tenders/:id/purge', requireJwt, requireRole('admi
   const { id } = req.params;
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    // Nejdřív DB úklid (transakčně), pak soubory — při selhání DB soubory zůstanou.
-    await purgeTenderData(id);
+    // Purge je povolen jen na zakázce, která už je v koši (soft-smazaná). Nutí to
+    // dvoukrokový destruktivní flow (smazat → koš → trvale smazat) a brání přímému
+    // trvalému smazání aktivní zakázky.
+    const crm = await getStatus(id);
+    if (!crm?.deleted) {
+      return res.status(409).json({ error: 'not_in_trash', reason: 'Zakázku lze trvale smazat až z koše (nejdřív ji smažte).' });
+    }
+    // Nejdřív soubory, pak DB úklid: kdyby rm selhal, DB řádek (deleted) zůstane
+    // a zakázka je stále v koši → akci lze zopakovat, žádný ztracený CRM stav.
     await rm(join(INPUT_DIR, id), { recursive: true, force: true });
     await rm(join(OUTPUT_DIR, id), { recursive: true, force: true });
+    await purgeTenderData(id);
     console.log(`[purge] tender ${id} trvale smazán uživatelem ${(req as any).user?.sub ?? '?'}`);
     res.json({ success: true, purged: id });
   } catch (err) {
