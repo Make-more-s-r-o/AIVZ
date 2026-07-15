@@ -79,7 +79,7 @@ export default function KalendarPage() {
     retry: false,
     staleTime: 30_000,
   });
-  const { data: tenders = [] } = useQuery({ queryKey: ['tenders'], queryFn: getTenders });
+  const { data: tenders = [] } = useQuery({ queryKey: ['tenders'], queryFn: () => getTenders() });
 
   const tenderName = (id: string): string => tenders.find((t) => t.id === id)?.name ?? id;
 

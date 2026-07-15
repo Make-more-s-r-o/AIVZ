@@ -4,3 +4,5 @@ export { DeadlineCountdown, formatDeadline, type DeadlineCountdownProps } from '
 export { ConfidenceBadge, type ConfidenceBadgeProps, type ConfidenceLevel } from './ConfidenceBadge';
 export { StageStepper, type StageStepperProps, type StepItem } from './StageStepper';
 export { KpiCard, type KpiCardProps } from './KpiCard';
+export { default as ConfirmNameDialog, type ConfirmNameDialogProps } from './ConfirmNameDialog';
+export { default as TenderDangerActions, type TenderDangerActionsProps } from './TenderDangerActions';

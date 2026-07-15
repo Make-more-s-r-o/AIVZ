@@ -42,7 +42,7 @@ export default function PipelinePage({ onOpen }: PipelinePageProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   // Jeden request se souhrnem analýzy embednutým na každé zakázce (zrušení N+1 getAnalysis).
-  const { data: tenders = [] } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
+  const { data: tenders = [] } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: () => getTendersSummary() });
 
   // Řešitelé pro avatar na kartě (degraduje na holé ID / dashed kolečko, když chybí).
   const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });

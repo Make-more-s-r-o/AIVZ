@@ -10,6 +10,8 @@ import type { StageKey } from './stage-machine.js';
 export interface TenderStatus {
   status: StageKey;
   assignee: string | null;
+  archived: boolean;
+  deleted: boolean;
 }
 
 export interface ActivityEntry {
@@ -28,11 +30,13 @@ function dbReady(): boolean {
 export async function getStatus(tenderId: string): Promise<TenderStatus | null> {
   if (!dbReady()) return null;
   try {
-    const row = await queryOne<{ status: StageKey; assignee: string | null }>(
-      'SELECT status, assignee FROM crm_tender_status WHERE tender_id = $1',
+    const row = await queryOne<{ status: StageKey; assignee: string | null; archived_at: string | null; deleted_at: string | null }>(
+      'SELECT status, assignee, archived_at, deleted_at FROM crm_tender_status WHERE tender_id = $1',
       [tenderId],
     );
-    return row ? { status: row.status, assignee: row.assignee } : null;
+    return row
+      ? { status: row.status, assignee: row.assignee, archived: row.archived_at != null, deleted: row.deleted_at != null }
+      : null;
   } catch {
     return null;
   }
@@ -42,10 +46,15 @@ export async function getAllStatuses(): Promise<Map<string, TenderStatus>> {
   const map = new Map<string, TenderStatus>();
   if (!dbReady()) return map;
   try {
-    const r = await query<{ tender_id: string; status: StageKey; assignee: string | null }>(
-      'SELECT tender_id, status, assignee FROM crm_tender_status',
+    const r = await query<{ tender_id: string; status: StageKey; assignee: string | null; archived_at: string | null; deleted_at: string | null }>(
+      'SELECT tender_id, status, assignee, archived_at, deleted_at FROM crm_tender_status',
     );
-    for (const row of r.rows) map.set(row.tender_id, { status: row.status, assignee: row.assignee });
+    for (const row of r.rows) map.set(row.tender_id, {
+      status: row.status,
+      assignee: row.assignee,
+      archived: row.archived_at != null,
+      deleted: row.deleted_at != null,
+    });
   } catch {
     // degrade silently
   }
@@ -72,6 +81,72 @@ export async function setAssignee(
      ON CONFLICT (tender_id) DO UPDATE SET assignee = EXCLUDED.assignee, updated_at = NOW()`,
     [tenderId, fallbackStatus, assignee],
   );
+}
+
+/** Archivace / odarchivace zakázky (příznak ortogonální ke stavu). Upsertuje řádek. */
+export async function setArchived(
+  tenderId: string,
+  archived: boolean,
+  actorId: string | null,
+  fallbackStatus: StageKey,
+): Promise<void> {
+  if (!dbReady()) throw new Error('db_unavailable');
+  await query(
+    `INSERT INTO crm_tender_status (tender_id, status, archived_at, archived_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tender_id) DO UPDATE SET archived_at = $3, archived_by = $4, updated_at = NOW()`,
+    [tenderId, fallbackStatus, archived ? new Date().toISOString() : null, archived ? actorId : null],
+  );
+}
+
+/** Soft-delete / obnova zakázky (přesun do Koše, vratné). Upsertuje řádek. */
+export async function setDeleted(
+  tenderId: string,
+  deleted: boolean,
+  actorId: string | null,
+  fallbackStatus: StageKey,
+): Promise<void> {
+  if (!dbReady()) throw new Error('db_unavailable');
+  await query(
+    `INSERT INTO crm_tender_status (tender_id, status, deleted_at, deleted_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tender_id) DO UPDATE SET deleted_at = $3, deleted_by = $4, updated_at = NOW()`,
+    [tenderId, fallbackStatus, deleted ? new Date().toISOString() : null, deleted ? actorId : null],
+  );
+}
+
+/**
+ * Trvalý úklid VŠECH DB dat navázaných na zakázku (tender_id) v jedné transakci.
+ * Zakázka není DB entita → žádné FK CASCADE, mažeme ručně napříč tabulkami.
+ * POZOR: při přidání nové tabulky s `tender_id` ji doplnit i sem (viz CLAUDE.md).
+ * monitoring_zakazky se nemaže, jen odpojí (zachovat historii monitoringu).
+ */
+export async function purgeTenderData(tenderId: string): Promise<void> {
+  if (!dbReady()) throw new Error('db_unavailable');
+  const pool = getPool();
+  if (!pool) throw new Error('db_unavailable');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const tables = [
+      'crm_activity', 'crm_tasks', 'crm_terminy', 'crm_notifikace', 'crm_komentare',
+      'zakazka_stitky', 'crm_vysledky', 'crm_nakupy', 'tender_product_matches',
+      'warehouse_web_findings', 'bid_snapshots', 'crm_score_snapshots', 'outcome_kandidati',
+    ];
+    for (const t of tables) {
+      await client.query(`DELETE FROM ${t} WHERE tender_id = $1`, [tenderId]);
+    }
+    // Monitoring: zachovat záznam, jen odpojit vazbu na smazanou zakázku.
+    await client.query('UPDATE monitoring_zakazky SET tender_id = NULL WHERE tender_id = $1', [tenderId]);
+    // Nakonec status řádek samotný.
+    await client.query('DELETE FROM crm_tender_status WHERE tender_id = $1', [tenderId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function logActivity(

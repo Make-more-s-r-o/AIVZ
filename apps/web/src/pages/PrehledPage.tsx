@@ -45,7 +45,7 @@ const priorityLabel: Record<Task['priorita'], string> = {
  */
 export default function PrehledPage({ onOpen, currentUserId }: PrehledPageProps) {
   // Jeden agregovaný request (souhrn analýzy + AI náklady embednuté) místo N+1 per-zakázku.
-  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
+  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: () => getTendersSummary() });
 
   const { data: activity = [] } = useQuery({
     queryKey: ['recent-activity'], queryFn: getRecentActivity, retry: false, staleTime: 30_000,

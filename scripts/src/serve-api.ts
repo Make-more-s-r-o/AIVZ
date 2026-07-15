@@ -49,6 +49,7 @@ import { runMigrations } from './lib/db-migrate.js';
 import {
   getStatus, getAllStatuses, setStatus, setAssignee, logActivity, getActivity, getRecentActivity,
   getTask, getTasks, getMyTasks, getTaskCounts, createTask, updateTask, deleteTask, seedChecklist,
+  setArchived, setDeleted, purgeTenderData,
 } from './lib/crm-store.js';
 import {
   canTransition, allowedTransitions, deriveStageFromSteps, ALL_STAGES, ACTIVE_ORDER, isTerminal,
@@ -1418,6 +1419,14 @@ app.get('/api/tenders', async (req, res) => {
     const wantAnalysis = include.includes('analysis');
     const wantCost = include.includes('cost');
 
+    // Viditelnost archivovaných / smazaných zakázek:
+    //   default        → aktivní (skryje archivované i smazané)
+    //   ?filter=archived → jen archivované (ne smazané)
+    //   ?filter=trash    → jen soft-smazané (Koš)
+    //   ?include=archived → aktivní + archivované (Koš stále skrytý)
+    const filter = String(req.query.filter ?? '').trim();
+    const includeArchived = include.includes('archived');
+
     await mkdir(INPUT_DIR, { recursive: true });
     const dirs = await readdir(INPUT_DIR);
     const crmStatuses = await getAllStatuses();
@@ -1443,6 +1452,8 @@ app.get('/api/tenders', async (req, res) => {
             ...pipeline,
             status: crm?.status ?? null,
             assignee: crm?.assignee ?? null,
+            archived: crm?.archived ?? false,
+            deleted: crm?.deleted ?? false,
             tasks: taskCounts.get(tenderId) ?? { done: 0, total: 0 },
             stitky: tenderTags.get(tenderId) ?? [],
           };
@@ -1487,7 +1498,15 @@ app.get('/api/tenders', async (req, res) => {
           return base;
         })
     );
-    res.json(tenders);
+    const visible = tenders.filter((t) => {
+      const arch = t.archived === true;
+      const del = t.deleted === true;
+      if (filter === 'trash') return del;
+      if (filter === 'archived') return arch && !del;
+      if (includeArchived) return !del;
+      return !del && !arch; // default: jen aktivní
+    });
+    res.json(visible);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1505,8 +1524,11 @@ app.get('/api/inbox', async (req, res) => {
       ? requestedSort
       : 'deadline_score';
     await mkdir(INPUT_DIR, { recursive: true });
-    const dirs = (await readdir(INPUT_DIR)).filter((d) => !d.startsWith('.'));
     const crmStatuses = await getAllStatuses();
+    // Archivované a smazané zakázky do schvalovacího inboxu nepatří.
+    const dirs = (await readdir(INPUT_DIR))
+      .filter((d) => !d.startsWith('.'))
+      .filter((d) => { const c = crmStatuses.get(d); return !c?.deleted && !c?.archived; });
 
     const inputs: InboxTenderInput[] = await Promise.all(
       dirs.map(async (tenderId) => {
@@ -1723,15 +1745,78 @@ app.post('/api/tenders/upload-url', async (req, res) => {
   }
 });
 
-// DELETE /api/tenders/:id - delete a tender (input + output)
-app.delete('/api/tenders/:id', async (req, res) => {
+/** Fallback stav pro upsert crm_tender_status (řádek nemusí existovat). */
+async function tenderFallbackStatus(id: string): Promise<StageKey> {
+  const pipeline = await getPipelineStatus(id);
+  const crm = await getStatus(id);
+  return crm?.status ?? deriveStageFromSteps(stepsDone(pipeline.steps));
+}
+
+// POST /api/tenders/:id/archive — archivace / odarchivace (příznak, ne stav).
+app.post<{ id: string }>('/api/tenders/:id/archive', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
   const { id } = req.params;
+  const archived = (req.body?.archived ?? true) === true;
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const inputPath = join(INPUT_DIR, id);
-    const outputPath = join(OUTPUT_DIR, id);
-    await rm(inputPath, { recursive: true, force: true });
-    await rm(outputPath, { recursive: true, force: true });
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await setArchived(id, archived, actor, await tenderFallbackStatus(id));
+    await logActivity(id, archived ? 'archived' : 'unarchived', actor, { actor_name: actorName });
+    res.json({ success: true, archived });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// DELETE /api/tenders/:id — soft-delete (přesun do Koše, vratné). Nemaže soubory.
+app.delete<{ id: string }>('/api/tenders/:id', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const { id } = req.params;
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await setDeleted(id, true, actor, await tenderFallbackStatus(id));
+    await logActivity(id, 'deleted', actor, { actor_name: actorName });
     res.json({ success: true, deleted: id });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/tenders/:id/restore — obnova z Koše.
+app.post<{ id: string }>('/api/tenders/:id/restore', requireJwt, requireRole('admin', 'analytik'), async (req, res) => {
+  const { id } = req.params;
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    const actor = (req as any).user?.sub ?? null;
+    const actorName = (req as any).user?.name ?? null;
+    await setDeleted(id, false, actor, await tenderFallbackStatus(id));
+    await logActivity(id, 'restored', actor, { actor_name: actorName });
+    res.json({ success: true, restored: id });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/tenders/:id/purge — TRVALÉ smazání: soubory + všechna DB data. Jen admin.
+app.post<{ id: string }>('/api/tenders/:id/purge', requireJwt, requireRole('admin'), async (req, res) => {
+  const { id } = req.params;
+  if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
+  try {
+    // Purge je povolen jen na zakázce, která už je v koši (soft-smazaná). Nutí to
+    // dvoukrokový destruktivní flow (smazat → koš → trvale smazat) a brání přímému
+    // trvalému smazání aktivní zakázky.
+    const crm = await getStatus(id);
+    if (!crm?.deleted) {
+      return res.status(409).json({ error: 'not_in_trash', reason: 'Zakázku lze trvale smazat až z koše (nejdřív ji smažte).' });
+    }
+    // Nejdřív soubory, pak DB úklid: kdyby rm selhal, DB řádek (deleted) zůstane
+    // a zakázka je stále v koši → akci lze zopakovat, žádný ztracený CRM stav.
+    await rm(join(INPUT_DIR, id), { recursive: true, force: true });
+    await rm(join(OUTPUT_DIR, id), { recursive: true, force: true });
+    await purgeTenderData(id);
+    console.log(`[purge] tender ${id} trvale smazán uživatelem ${(req as any).user?.sub ?? '?'}`);
+    res.json({ success: true, purged: id });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1799,6 +1884,8 @@ app.get('/api/tenders/:id/status', async (req, res) => {
       pdfAvailable,
       status: crm?.status ?? null,
       assignee: crm?.assignee ?? null,
+      archived: crm?.archived ?? false,
+      deleted: crm?.deleted ?? false,
       effectiveStatus,
       allowedNext: allowedTransitions(effectiveStatus, done),
     });
