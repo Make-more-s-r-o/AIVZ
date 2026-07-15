@@ -120,6 +120,9 @@ export interface TenderSummary {
   tasks?: { done: number; total: number };
   // CRM (M9b): štítky zakázky (chips na řádcích Zakázek); bez DB → [].
   stitky?: Stitek[];
+  // Archivace + soft-delete (příznaky ortogonální ke stavu). Default false.
+  archived?: boolean;
+  deleted?: boolean;
   // Přítomné jen při ?include=analysis / ?include=cost (getTendersSummary). null = nezanalyzováno.
   analysis?: TenderAnalysisSummary | null;
   costTotalCZK?: number | null;
@@ -191,8 +194,9 @@ async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
-export async function getTenders(): Promise<TenderSummary[]> {
-  return fetchJson('/tenders');
+/** filter: undefined = aktivní; 'archived' = jen archivované; 'trash' = Koš (soft-smazané). */
+export async function getTenders(filter?: 'archived' | 'trash'): Promise<TenderSummary[]> {
+  return fetchJson(`/tenders${filter ? `?filter=${filter}` : ''}`);
 }
 
 export async function getHlidacTenders(query: string): Promise<HlidacTenderCandidate[]> {
@@ -370,8 +374,8 @@ export async function getBidScore(id: string): Promise<BidScore> {
  * Používají Přehled/Zakázky/Pipeline. Vlastní query key (['tenders','summary']), ať se
  * needostane do kolize s holým getTenders() cache.
  */
-export async function getTendersSummary(): Promise<TenderSummary[]> {
-  return fetchJson('/tenders?include=analysis,cost');
+export async function getTendersSummary(filter?: 'archived' | 'trash'): Promise<TenderSummary[]> {
+  return fetchJson(`/tenders?include=analysis,cost${filter ? `&filter=${filter}` : ''}`);
 }
 
 /** Náhled obsahu nahraného ZIPu (bez rozbalení) — kolik souborů archiv obsahuje. */
@@ -414,6 +418,9 @@ export interface TenderStatusResponse {
   assignee?: string | null;
   effectiveStatus?: StageKey;
   allowedNext?: StageKey[];
+  // Archivace + soft-delete (příznaky ortogonální ke stavu).
+  archived?: boolean;
+  deleted?: boolean;
   // Vygenerované dokumenty jsou starší než poslední změna/potvrzení ceny — je třeba
   // spustit krok Generování znovu (viz lib/stale-check.ts na backendu).
   stale?: boolean;
@@ -842,11 +849,46 @@ export async function selectProductCandidate(
   return res.json();
 }
 
+/** Soft-delete zakázky (přesun do Koše, vratné). Nemaže soubory. */
 export async function deleteTender(id: string): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/tenders/${id}`, { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || 'Failed to delete tender');
+    throw new Error(err.error || 'Zakázku se nepodařilo smazat');
+  }
+  return res.json();
+}
+
+/** Archivace / odarchivace zakázky (příznak, ne stav). */
+export async function archiveTender(id: string, archived: boolean): Promise<{ success: boolean; archived: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/archive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ archived }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Archivace zakázky selhala');
+  }
+  return res.json();
+}
+
+/** Obnova zakázky z Koše. */
+export async function restoreTender(id: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/restore`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Obnovení zakázky selhalo');
+  }
+  return res.json();
+}
+
+/** TRVALÉ smazání zakázky — soubory + všechna DB data. Jen admin. Nevratné. */
+export async function purgeTender(id: string): Promise<{ success: boolean; purged: string }> {
+  const res = await fetch(`${API_BASE}/tenders/${id}/purge`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Trvalé smazání zakázky selhalo');
   }
   return res.json();
 }

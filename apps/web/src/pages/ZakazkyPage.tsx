@@ -2,7 +2,7 @@ import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Search, Plus, Inbox, Save, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 import { Button, Input, Select, Avatar, Badge, useToast } from '../components/ui';
-import { StageBadge, DecisionPill, DeadlineCountdown } from '../components/crm';
+import { StageBadge, DecisionPill, DeadlineCountdown, TenderDangerActions } from '../components/crm';
 import {
   getTendersSummary, getUsers,
   getViews, createView, deleteView, getTags,
@@ -29,9 +29,12 @@ const DECISION_OPTIONS = [
 ];
 
 // Mřížka sloupců — sdílená hlavičkou i řádky pro přesné zarovnání.
-// Název · Zadavatel · Hodnota · Lhůta · Stav · Skóre · Řeší.
-const GRID = 'minmax(220px, 2.4fr) minmax(170px, 1.7fr) 150px 132px 138px 96px 64px';
-const MIN_WIDTH = 940;
+// Název · Zadavatel · Hodnota · Lhůta · Stav · Skóre · Řeší · Akce.
+const GRID = 'minmax(220px, 2.4fr) minmax(170px, 1.7fr) 150px 132px 138px 96px 64px 92px';
+const MIN_WIDTH = 1040;
+
+// Buckety (zdroj dat): aktivní / archivované / koš (soft-smazané).
+type Bucket = 'active' | 'archived' | 'trash';
 
 interface Row {
   id: string;
@@ -48,6 +51,8 @@ interface Row {
   days: number | null;
   assignee: string | null;
   stitky: Stitek[];
+  archived: boolean;
+  deleted: boolean;
 }
 
 type SortKey = 'nazev' | 'zadavatel' | 'hodnota' | 'lhuta' | 'stage' | 'score';
@@ -60,6 +65,7 @@ const HEAD: { label: string; align?: 'right'; sortKey?: SortKey }[] = [
   { label: 'Stav', sortKey: 'stage' },
   { label: 'Skóre', sortKey: 'score' },
   { label: 'Řeší' },
+  { label: '' },
 ];
 
 // Pořadí pro řazení stavů dle životního cyklu.
@@ -69,6 +75,7 @@ const mono: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 'var(--f
 
 export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const [query, setQuery] = useState('');
+  const [bucket, setBucket] = useState<Bucket>('active');
   const [view, setView] = useState<View>('Všechny');
   const [decision, setDecision] = useState('');
   const [tagId, setTagId] = useState('');
@@ -83,7 +90,12 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
   const { toast } = useToast();
 
   // Jeden request se souhrnem analýzy embednutým na každé zakázce (zrušení N+1 getAnalysis).
-  const { data: tenders = [], isLoading } = useQuery({ queryKey: ['tenders', 'summary'], queryFn: getTendersSummary });
+  // Bucket určuje zdroj: aktivní (default) / archivované / koš (soft-smazané).
+  const bucketFilter = bucket === 'active' ? undefined : bucket;
+  const { data: tenders = [], isLoading } = useQuery({
+    queryKey: ['tenders', 'summary', bucket],
+    queryFn: () => getTendersSummary(bucketFilter),
+  });
   // Řešitel = jméno z user-store; enrichment, degraduje na prázdno (getUsers je resilientní).
   const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: getUsers, retry: false, staleTime: 60_000 });
   const usersMap = useMemo(() => new Map(users.map((u): [string, string] => [u.id, u.name || u.email])), [users]);
@@ -116,6 +128,8 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           days: deadlineDays(lhuta),
           assignee: t.assignee ?? null,
           stitky: t.stitky ?? [],
+          archived: t.archived ?? false,
+          deleted: t.deleted ?? false,
         };
       }),
     [tenders],
@@ -269,7 +283,31 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
         </Button>
       </div>
 
-      {/* Uložená zobrazení (saved views) */}
+      {/* Přepínač bucketů: Aktivní / Archivované / Koš */}
+      <div style={{ display: 'flex', gap: 6, marginTop: 16 }}>
+        {([['active', 'Aktivní'], ['archived', 'Archivované'], ['trash', 'Koš']] as [Bucket, string][]).map(([b, label]) => {
+          const active = bucket === b;
+          return (
+            <button
+              key={b}
+              onClick={() => { setBucket(b); if (b !== 'active') { setView('Všechny'); } }}
+              style={{
+                padding: '6px 14px', borderRadius: 'var(--radius-md)', cursor: 'pointer',
+                fontFamily: 'var(--font-sans)', fontSize: 'var(--font-size-sm)', whiteSpace: 'nowrap',
+                fontWeight: active ? 'var(--weight-semibold)' : 'var(--weight-medium)',
+                color: active ? 'var(--accent-on)' : 'var(--text-secondary)',
+                background: active ? 'var(--accent)' : 'var(--surface-card)',
+                border: `1px solid ${active ? 'transparent' : 'var(--border-default)'}`,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Uložená zobrazení (saved views) — jen pro aktivní bucket */}
+      {bucket === 'active' && (
       <div className="vz-scroll" style={{ display: 'flex', gap: 2, alignItems: 'center', borderBottom: '1px solid var(--border-default)', overflowX: 'auto', marginTop: 16 }}>
         {VIEWS.map((v) => {
           const active = v === view;
@@ -322,6 +360,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
           );
         })}
       </div>
+      )}
 
       {/* Filtr bar */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 16, flexWrap: 'wrap' }}>
@@ -460,6 +499,7 @@ export default function ZakazkyPage({ onOpen }: ZakazkyPageProps) {
                 <span />
                 <span />
                 <span />
+                <span />
               </div>
             )}
           </div>
@@ -573,6 +613,17 @@ function TableRow({ row, usersMap, onOpen }: { row: Row; usersMap: Map<string, s
           dash
         )}
       </div>
+
+      {/* Akce — archivovat/smazat/obnovit; zobrazí se na hover (řeší stopPropagation samo). */}
+      <div style={{ display: 'flex', gap: 2, justifyContent: 'flex-end', opacity: hover ? 1 : 0, transition: 'opacity var(--duration-fast)' }}>
+        <TenderDangerActions
+          tenderId={row.id}
+          tenderName={row.nazev}
+          archived={row.archived}
+          deleted={row.deleted}
+          compact
+        />
+      </div>
     </div>
   );
 }
@@ -598,6 +649,7 @@ function SkeletonRows() {
           <Bar w={80} h={18} />
           <Bar w={56} h={18} />
           <Bar w={26} h={26} />
+          <Bar w={70} h={26} />
         </div>
       ))}
     </>

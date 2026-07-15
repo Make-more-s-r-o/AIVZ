@@ -80,6 +80,7 @@ import {
   DecisionPill,
   DeadlineCountdown,
   StageStepper,
+  TenderDangerActions,
 } from '../components/crm';
 import { Button, Card, Tabs, Badge, Avatar, Select, Checkbox, Input, useToast, type SelectOption, type BadgeTone } from '../components/ui';
 import AnalysisView from '../components/AnalysisView';
@@ -185,7 +186,7 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
   const allowedNext: StageKey[] = statusData?.allowedNext ?? allowedNextStages(currentStage, steps);
 
   // Seznam zakázek pro název + vstupní soubory (zdroj).
-  const { data: tenders } = useQuery({ queryKey: ['tenders'], queryFn: getTenders, staleTime: 30000 });
+  const { data: tenders } = useQuery({ queryKey: ['tenders'], queryFn: () => getTenders(), staleTime: 30000 });
   const summary = tenders?.find((t) => t.id === tenderId);
 
   // Analýza — nemusí ještě existovat (404), proto retry:false.
@@ -278,13 +279,36 @@ export default function TenderDetailPage({ tenderId, initialTab, onBack }: Tende
             {nazev}
           </h1>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
           <Button variant="secondary" iconLeft={<Sparkles size={16} />} onClick={() => setTab('analyza')}>
             Analyzovat
           </Button>
           <StatusChangeButton tenderId={tenderId} allowedNext={allowedNext} />
+          <TenderDangerActions
+            tenderId={tenderId}
+            tenderName={nazev}
+            archived={statusData?.archived}
+            deleted={statusData?.deleted}
+            onChanged={(action) => { if (action === 'deleted' || action === 'purged') onBack?.(); }}
+          />
         </div>
       </div>
+
+      {/* Banner pro archivované / smazané zakázky */}
+      {(statusData?.deleted || statusData?.archived) && (
+        <div
+          style={{
+            marginTop: 12, padding: '10px 14px', borderRadius: 'var(--radius-md)',
+            background: statusData?.deleted ? 'var(--danger-bg)' : 'var(--surface-sunken)',
+            color: statusData?.deleted ? 'var(--danger-fg)' : 'var(--text-secondary)',
+            border: '1px solid var(--border-default)', fontSize: 'var(--font-size-sm)',
+          }}
+        >
+          {statusData?.deleted
+            ? 'Tato zakázka je v koši (smazaná). Můžete ji obnovit, nebo trvale smazat.'
+            : 'Tato zakázka je archivovaná — je skrytá z výchozího seznamu, ale zachovaná pro referenci.'}
+        </div>
+      )}
 
       {/* Krokovací proces */}
       <Card padding={20} style={{ marginTop: 16 }}>
