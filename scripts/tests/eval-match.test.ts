@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { calculateEvalMetrics, calculateMetricsDelta, type EvalItem, type GoldenItem } from '../src/lib/eval-metrics.js';
 
 const golden: GoldenItem[] = [
@@ -78,14 +81,54 @@ test('generický kandidát zahrnuje placeholder i zadna_shoda', () => {
 });
 
 test('offline eval projde bez AI klíče', async () => {
-  const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', 'src/eval-match.ts', '--tenders=n-485400-naradi'], {
-      cwd: new URL('../', import.meta.url).pathname, env: { ...process.env, ANTHROPIC_API_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'],
+  // The repository intentionally does not version `output/`; relying on a developer's
+  // n-485400-naradi result made this test fail in a clean worktree. Build an isolated
+  // offline input and remove only the artifacts produced by this test.
+  const scriptsDir = new URL('../', import.meta.url).pathname;
+  const repositoryRoot = new URL('../../', import.meta.url).pathname;
+  const outputRoot = join(repositoryRoot, 'output');
+  const reportsDir = join(outputRoot, 'eval');
+  const tenderId = `eval-offline-test-${process.pid}`;
+  const tenderDir = join(outputRoot, tenderId);
+  const outputRootExisted = existsSync(outputRoot);
+  const reportsDirExisted = existsSync(reportsDir);
+  const reportsBefore = new Set(reportsDirExisted ? await readdir(reportsDir) : []);
+  await mkdir(tenderDir, { recursive: true });
+  await writeFile(join(tenderDir, 'product-match.json'), JSON.stringify({
+    polozky_match: [{
+      polozka_index: 0,
+      vybrany_index: 0,
+      kandidati: [{ vyrobce: 'Offline', model: 'Fixture', cena_bez_dph: 100 }],
+    }],
+  }), 'utf8');
+
+  let result: { code: number | null; output: string };
+  try {
+    result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', 'src/eval-match.ts', `--tenders=${tenderId}`], {
+        cwd: scriptsDir, env: { ...process.env, ANTHROPIC_API_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (chunk) => { output += chunk; }); child.stderr.on('data', (chunk) => { output += chunk; });
+      child.on('error', reject); child.on('exit', (code) => resolve({ code, output }));
     });
-    let output = '';
-    child.stdout.on('data', (chunk) => { output += chunk; }); child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', reject); child.on('exit', (code) => resolve({ code, output }));
-  });
+  } finally {
+    await rm(tenderDir, { recursive: true, force: true });
+    if (existsSync(reportsDir)) {
+      const reportsAfter = await readdir(reportsDir);
+      for (const report of reportsAfter.filter((name) => !reportsBefore.has(name))) {
+        const reportPath = join(reportsDir, report);
+        try {
+          const parsed = JSON.parse(await readFile(reportPath, 'utf8'));
+          if (Array.isArray(parsed.tenders) && parsed.tenders.includes(tenderId)) await rm(reportPath);
+        } catch {
+          // Unknown concurrent artifacts are not ours to remove.
+        }
+      }
+    }
+    if (!reportsDirExisted) await rmdir(reportsDir).catch(() => {});
+    if (!outputRootExisted) await rmdir(outputRoot).catch(() => {});
+  }
   assert.equal(result.code, 0, result.output);
   assert.match(result.output, /Identifikace výrobce/);
   assert.match(result.output, /Pokrytí verify/);

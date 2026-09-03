@@ -15,6 +15,15 @@ V poli pozadovane_dokumenty vypiš JEN dokumenty, které zadávací dokumentace 
 požaduje odevzdat jako součást nabídky. NEVYMÝŠLEJ. Když si nejsi jistý povinností,
 uveď povinny: true (konzervativně).
 
+Pole zakazka.predpokladana_hodnota vždy vyplň jedním číslem za CELOU zakázku bez DPH,
+jen pokud je tento celek v dokumentaci výslovně uveden; hodnoty částí nesčítej a
+částkové hodnoty uveď v casti[].predpokladana_hodnota.
+
+Všechna pole v terminy vyplň jako skalární hodnotu za CELOU zakázku, nikdy jako objekt.
+U dělené zakázky použij pro doba_plneni_od nejčasnější datum, pro doba_plneni_do nejzazší
+datum a pro lhůty nejbližší/nejčasnější datum. Termíny jednotlivých částí zachovej v
+casti[].terminy. U nedělené zakázky vrať casti: [].
+
 Odpověz POUZE validním JSON. Žádný další text.`;
 
 export function buildAnalyzeUserMessage(extractedText: string): string {
@@ -51,6 +60,21 @@ Odpověz ve formátu:
     "doba_plneni_do": null,
     "prohlidka_mista": null
   },
+  "casti": [
+    {
+      "id": "1",
+      "nazev": "Část 1 - ...",
+      "predpokladana_hodnota": null,
+      "pocet_polozek": 0,
+      "terminy": {
+        "lhuta_nabidek": null,
+        "otevirani_obalek": null,
+        "doba_plneni_od": null,
+        "doba_plneni_do": null,
+        "prohlidka_mista": null
+      }
+    }
+  ],
   "polozky": [
     {"nazev": "...", "mnozstvi": 10, "jednotka": "ks", "specifikace": "..."}
   ],
