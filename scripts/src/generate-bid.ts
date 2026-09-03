@@ -109,8 +109,10 @@ async function main() {
     );
   }
 
-  // Tvrdý money-gate i pro přímé/ruční spuštění skriptu. Musí proběhnout před
-  // smazáním starých dokumentů a respektovat pouze části, které se skutečně podávají.
+  // Defense in depth i pro přímé/ruční spuštění skriptu: potvrzení samo
+  // nestačí, sdílený gate znovu vyžaduje doložený, povolený a nepropadlý
+  // snapshot provenience. Kontrola musí proběhnout před prvním zápisem dokumentu
+  // i před smazáním starých dokumentů a respektovat jen podávané části.
   let generationPartIds: Set<string> | null = null;
   if (analysis.casti && analysis.casti.length > 1) {
     try {

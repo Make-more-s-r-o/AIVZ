@@ -1,9 +1,11 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
+import { join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { config } from 'dotenv';
 import { callClaude, AICallTimeoutError, getMatchCallDeadlineMs } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
-import { ProductMatchSchema, type TenderAnalysis } from './lib/types.js';
+import { PriceProvenanceSchema, ProductMatchSchema, type PriceProvenance, type TenderAnalysis } from './lib/types.js';
+import { candidateFingerprint } from './lib/candidate-fingerprint.js';
 import { readPartsSelectionSnapshot } from './lib/parts-selection-guard.js';
 import { checkPriceSanity } from './lib/price-sanity.js';
 import { PRODUCT_MATCH_SYSTEM, buildProductMatchUserMessage, buildServicePricingMessage, type MatchableItem } from './prompts/product-match.js';
@@ -38,6 +40,59 @@ export function extractJsonBlock(raw: string): string {
   const end = Math.max(s.lastIndexOf('}'), s.lastIndexOf(']'));
   if (start !== -1 && end !== -1 && end > start) s = s.slice(start, end + 1);
   return s.trim();
+}
+
+interface ModelPricedCandidate {
+  vyrobce?: unknown;
+  model?: unknown;
+  cena_bez_dph?: unknown;
+  cena_s_dph?: unknown;
+  zdroj_ceny?: unknown;
+  reference_urls?: unknown;
+  price_provenance?: PriceProvenance;
+  [key: string]: unknown;
+}
+
+/**
+ * Přidá kandidátovi serverem vytvořenou provenienci modelového odhadu. Model tento
+ * autoritativní blok nikdy nevytváří sám a jeho případné falešné citace zahodíme.
+ */
+export function attachModelPriceProvenance(
+  candidate: ModelPricedCandidate,
+  candidateIndex: number,
+  modelId: string,
+  estimatedAt: string,
+  runId: string,
+): PriceProvenance {
+  const vyrobce = String(candidate.vyrobce ?? '');
+  const model = String(candidate.model ?? '');
+  const priceProvenance = PriceProvenanceSchema.parse({
+    verze: 1,
+    typ: 'odhad_modelu',
+    stav: 'informacni',
+    url: null,
+    zjisteno_at: estimatedAt,
+    cena_v_okamziku: {
+      bez_dph: Number(candidate.cena_bez_dph),
+      s_dph: Number(candidate.cena_s_dph),
+      mena: 'CZK',
+      sazba_dph: 21,
+      baleni_ks: 1,
+    },
+    zjistil: {
+      typ: 'model',
+      id: 'match-product',
+      model: modelId,
+      run_id: runId,
+    },
+    kandidat_fingerprint: candidateFingerprint({ vyrobce, model }, candidateIndex),
+    poznamka: 'Modelový cenový odhad bez ověření aktuálního e-shopu nebo ceníku.',
+  });
+
+  candidate.price_provenance = priceProvenance;
+  candidate.zdroj_ceny = `Modelový odhad ${modelId} bez ověření aktuální tržní ceny`;
+  delete candidate.reference_urls;
+  return priceProvenance;
 }
 
 // Cenový sklad při matchingu: DEFAULTNĚ VYPNUTO (rozhodnutí Dan 2026-07-09 — sklad je stale,
@@ -404,6 +459,10 @@ async function main() {
   }
 
   let polozkyMatch: any[] = [];
+  // Metadata držíme mimo AI JSON, aby model nemohl ovlivnit identitu producenta.
+  // Provenienci připojíme až po vložení skladových kandidátů, kdy známe finální index
+  // používaný ve fingerprintu.
+  const modelEstimateMetadata = new WeakMap<object, { modelId: string; estimatedAt: string }>();
 
   // Step 0: Warehouse search — hledej produkty ve skladu PŘED AI
   const warehouseResults = new Map<number, any[]>(); // index → warehouse candidates
@@ -432,7 +491,7 @@ async function main() {
         console.log(`  Warehouse: "${item.nazev}" → ${result.matches.length} shod pod prahem (${WAREHOUSE_MIN_SCORE}), ignoruji (nesouvisí s položkou)`);
         continue;
       }
-      const candidates = relevant.map(warehouseMatchToCandidate);
+      const candidates = relevant.map((match, candidateIndex) => warehouseMatchToCandidate(match, candidateIndex));
       warehouseResults.set(i, candidates);
 
       // Kontext pro AI — ať nenavrhuje stejné produkty
@@ -624,6 +683,20 @@ async function main() {
         throw new Error(`AI matching vrátilo neúplný výsledek (${gotCount}/${sliceItems.length} položek, dávka ${label}) i po zmenšení dávky. Zkuste krok spustit znovu.`);
       }
 
+      const estimatedAt = new Date().toISOString();
+      const rememberModelCandidates = (candidates: unknown): void => {
+        if (!Array.isArray(candidates)) return;
+        for (const candidate of candidates) {
+          if (candidate && typeof candidate === 'object') {
+            modelEstimateMetadata.set(candidate, { modelId: result.modelId, estimatedAt });
+          }
+        }
+      };
+      rememberModelCandidates(parsed.kandidati);
+      if (Array.isArray(parsed.polozky_match)) {
+        for (const item of parsed.polozky_match) rememberModelCandidates(item?.kandidati);
+      }
+
       // Enrich and collect results from this slice
       if (parsed.kandidati) {
         const srcItem = matchableItems[globalOffset];
@@ -724,6 +797,23 @@ async function main() {
 
     for (let si = 0; si < serviceItems.length; si++) {
       const svc = serviceItems[si];
+      const serviceCandidate = {
+        vyrobce: '-',
+        model: svc.nazev,
+        popis: svc.popis || svc.nazev,
+        parametry: {},
+        shoda_s_pozadavky: [],
+        cena_bez_dph: svc.cena_bez_dph,
+        cena_s_dph: svc.cena_s_dph,
+        cena_spolehlivost: svc.cena_spolehlivost || 'stredni',
+        cena_komentar: svc.cena_komentar || 'Odhad ceny služby',
+        dodavatele: [],
+        dostupnost: 'dle dohody',
+      };
+      modelEstimateMetadata.set(serviceCandidate, {
+        modelId: serviceResult.modelId,
+        estimatedAt: new Date().toISOString(),
+      });
       polozkyMatch.push({
         polozka_nazev: svc.nazev,
         polozka_index: services[si]?.originalIndex ?? polozkyMatch.length,
@@ -731,19 +821,7 @@ async function main() {
         jednotka: svc.jednotka,
         typ: 'sluzba',
         cast_id: services[si]?.cast_id,
-        kandidati: [{
-          vyrobce: '-',
-          model: svc.nazev,
-          popis: svc.popis || svc.nazev,
-          parametry: {},
-          shoda_s_pozadavky: [],
-          cena_bez_dph: svc.cena_bez_dph,
-          cena_s_dph: svc.cena_s_dph,
-          cena_spolehlivost: svc.cena_spolehlivost || 'stredni',
-          cena_komentar: svc.cena_komentar || 'Odhad ceny služby',
-          dodavatele: [],
-          dostupnost: 'dle dohody',
-        }],
+        kandidati: [serviceCandidate],
         vybrany_index: 0,
         oduvodneni_vyberu: svc.oduvodneni || 'Standardní služba',
       });
@@ -778,13 +856,25 @@ async function main() {
     }
   }
 
-  // Předvyplň ceny z AI kandidáta (logika v lib/price-prefill.ts — testovatelná bez AI).
+  // Autoritativní označení všech cen vyprodukovaných modelem. Voláme až po merge
+  // skladu, aby fingerprint odpovídal skutečnému indexu kandidáta ve výstupu.
+  for (const pm of polozkyMatch) {
+    for (let candidateIndex = 0; candidateIndex < (pm.kandidati?.length ?? 0); candidateIndex++) {
+      const candidate = pm.kandidati[candidateIndex];
+      const metadata = candidate && typeof candidate === 'object'
+        ? modelEstimateMetadata.get(candidate)
+        : undefined;
+      if (metadata) {
+        attachModelPriceProvenance(candidate, candidateIndex, metadata.modelId, metadata.estimatedAt, tenderId);
+      }
+    }
+  }
+
+  // Předvyplň jen cenu kandidáta s doloženou, povolenou proveniencí. Modelové odhady
+  // jsou informační a draft z nich nevznikne (logika v lib/price-prefill.ts).
   // Výchozí marže firmy má v kódu fallback 10 %, protože produkční volume může obsahovat
   // starý config bez nového klíče.
   // potvrzeno=false zůstává záměrně — závaznou cenu musí uživatel zkontrolovat (H3).
-  // Kandidát bez reálné shody (zadna_shoda / placeholder / nulová cena) dostane NULOVOU
-  // nepotvrzenou cenu → HARD sanity flag zero_price blokuje potvrzení i podání, dokud
-  // operátor nezadá reálnou cenu ručně (nikdy nepřebíráme AI odhad jiného rozsahu).
   const defaultMarze = resolveDefaultMarzeProcent(company.default_marze_procent);
   applyPricePrefill(polozkyMatch, defaultMarze);
 
@@ -860,14 +950,16 @@ async function main() {
   console.log(`\nReview product-match.json and adjust prices before generating documents!`);
 }
 
-main()
-  .then(async () => {
-    // priceBandForSubject/getCompany otevřou pooled DB spojení; bez zavření drží
-    // event loop ~30 s (idleTimeoutMillis) → match krok by končil o 30 s později.
-    await closePool();
-  })
-  .catch(async (err) => {
-    console.error('Product matching failed:', err);
-    await closePool();
-    process.exit(1);
-  });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+    .then(async () => {
+      // priceBandForSubject/getCompany otevřou pooled DB spojení; bez zavření drží
+      // event loop ~30 s (idleTimeoutMillis) → match krok by končil o 30 s později.
+      await closePool();
+    })
+    .catch(async (err) => {
+      console.error('Product matching failed:', err);
+      await closePool();
+      process.exit(1);
+    });
+}

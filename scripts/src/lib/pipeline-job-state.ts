@@ -1,7 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 
-export const RUN_ALL_STEPS = ['extract', 'analyze', 'match', 'generate', 'validate'] as const;
+// Cenový řetězec je záměrně sériový: modelový match je jen informační,
+// teprve verify-prices smí dodat doklad a generate následně znovu projde money-gatem.
+export const RUN_ALL_STEPS = [
+  'extract', 'analyze', 'match', 'verify-prices', 'generate', 'validate',
+] as const;
 
 export type PipelineStep = typeof RUN_ALL_STEPS[number];
 export type JobStatus = 'queued' | 'running' | 'done' | 'error' | 'interrupted' | 'waiting_approval' | 'budget_paused';
@@ -360,7 +364,10 @@ export async function loadPipelineJobs(
   return { jobs: restored, queuedJobIds, interruptedCount };
 }
 
-/** Posune run-all řetězec až po úspěchu child kroku; chyba řetězec okamžitě zastaví. */
+/**
+ * Posune run-all řetězec až po úspěchu child kroku. Běžná chyba řetězec zastaví;
+ * chyba verifieru je fail-closed cenový checkpoint a čeká na doložení ceny.
+ */
 export async function advanceRunAllChain(
   parent: PipelineJob,
   child: PipelineJob,
@@ -369,6 +376,17 @@ export async function advanceRunAllChain(
 ): Promise<void> {
   const childStep = child.step as PipelineStep;
   if (child.status !== 'done') {
+    // Selhání webového verifieru nesmí obejít money-gate ani proměnit modelový
+    // odhad v "ověřenou" cenu. Match zůstává informační a řetězec čeká,
+    // až operátor doplní doloženou cenu; resume pak znovu ověří gate před generate.
+    if (childStep === 'verify-prices' && child.status === 'error') {
+      parent.status = 'waiting_approval';
+      parent.currentStep = 'generate';
+      parent.failedStep = undefined;
+      parent.error = `Ověření cen selhalo; čeká na doklad. ${child.error || 'Verifier nedodal doloženou cenu.'}`;
+      parent.finishedAt = undefined;
+      return;
+    }
     parent.status = child.status === 'interrupted' ? 'interrupted' : 'error';
     parent.currentStep = childStep;
     parent.failedStep = childStep;

@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { calculateEvalMetrics, calculateMetricsDelta, type EvalItem, type GoldenItem } from '../src/lib/eval-metrics.js';
 
@@ -81,18 +81,24 @@ test('generický kandidát zahrnuje placeholder i zadna_shoda', () => {
 });
 
 test('offline eval projde bez AI klíče', async () => {
-  // The repository intentionally does not version `output/`; relying on a developer's
-  // n-485400-naradi result made this test fail in a clean worktree. Build an isolated
-  // offline input and remove only the artifacts produced by this test.
+  // `output/` jsou sdílená produkční data pouze pro čtení. CLI proto spouštíme
+  // nad dočasnou minimální kopií zdrojů a fixture, kde smí report bezpečně vzniknout.
   const scriptsDir = new URL('../', import.meta.url).pathname;
-  const repositoryRoot = new URL('../../', import.meta.url).pathname;
-  const outputRoot = join(repositoryRoot, 'output');
-  const reportsDir = join(outputRoot, 'eval');
+  const isolatedRoot = await mkdtemp(join(tmpdir(), 'vz-eval-offline-'));
+  const isolatedScripts = join(isolatedRoot, 'scripts');
+  const outputRoot = join(isolatedRoot, 'output');
   const tenderId = `eval-offline-test-${process.pid}`;
   const tenderDir = join(outputRoot, tenderId);
-  const outputRootExisted = existsSync(outputRoot);
-  const reportsDirExisted = existsSync(reportsDir);
-  const reportsBefore = new Set(reportsDirExisted ? await readdir(reportsDir) : []);
+  await mkdir(join(isolatedScripts, 'src/lib'), { recursive: true });
+  await mkdir(join(isolatedScripts, 'tests/fixtures'), { recursive: true });
+  await cp(join(scriptsDir, 'src/eval-match.ts'), join(isolatedScripts, 'src/eval-match.ts'));
+  await cp(join(scriptsDir, 'src/lib/eval-metrics.ts'), join(isolatedScripts, 'src/lib/eval-metrics.ts'));
+  await cp(join(scriptsDir, 'src/lib/fill-report.ts'), join(isolatedScripts, 'src/lib/fill-report.ts'));
+  await cp(
+    join(scriptsDir, 'tests/fixtures/golden-set'),
+    join(isolatedScripts, 'tests/fixtures/golden-set'),
+    { recursive: true },
+  );
   await mkdir(tenderDir, { recursive: true });
   await writeFile(join(tenderDir, 'product-match.json'), JSON.stringify({
     polozky_match: [{
@@ -105,7 +111,9 @@ test('offline eval projde bez AI klíče', async () => {
   let result: { code: number | null; output: string };
   try {
     result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', 'tsx', 'src/eval-match.ts', `--tenders=${tenderId}`], {
+      const child = spawn(process.execPath, [
+        '--import', 'tsx', join(isolatedScripts, 'src/eval-match.ts'), `--tenders=${tenderId}`,
+      ], {
         cwd: scriptsDir, env: { ...process.env, ANTHROPIC_API_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let output = '';
@@ -113,21 +121,7 @@ test('offline eval projde bez AI klíče', async () => {
       child.on('error', reject); child.on('exit', (code) => resolve({ code, output }));
     });
   } finally {
-    await rm(tenderDir, { recursive: true, force: true });
-    if (existsSync(reportsDir)) {
-      const reportsAfter = await readdir(reportsDir);
-      for (const report of reportsAfter.filter((name) => !reportsBefore.has(name))) {
-        const reportPath = join(reportsDir, report);
-        try {
-          const parsed = JSON.parse(await readFile(reportPath, 'utf8'));
-          if (Array.isArray(parsed.tenders) && parsed.tenders.includes(tenderId)) await rm(reportPath);
-        } catch {
-          // Unknown concurrent artifacts are not ours to remove.
-        }
-      }
-    }
-    if (!reportsDirExisted) await rmdir(reportsDir).catch(() => {});
-    if (!outputRootExisted) await rmdir(outputRoot).catch(() => {});
+    await rm(isolatedRoot, { recursive: true, force: true });
   }
   assert.equal(result.code, 0, result.output);
   assert.match(result.output, /Identifikace výrobce/);

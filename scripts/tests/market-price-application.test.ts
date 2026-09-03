@@ -88,6 +88,14 @@ test('výběr zdroje zohlední celá balení a zachová stávající marži', ()
   assert.equal(price?.zkontrolovano_at, undefined);
   assert.deepEqual(result.zrusena_potvrzeni, [0]);
   assert.equal(price?.poznamka, 'původní poznámka; cena z ověřeného zdroje (Levné balení)');
+  assert.equal(price?.price_provenance?.typ, 'overeny_eshop');
+  assert.equal(price?.price_provenance?.stav, 'dolozena');
+  assert.equal(price?.price_provenance?.url, 'https://shop.test/Levné balení');
+  assert.equal(price?.price_provenance?.zjisteno_at, '2026-07-11T10:00:00.000Z');
+  assert.equal(price?.price_provenance?.kandidat_fingerprint, candidateFingerprint(productMatch.polozky_match![0]!.kandidati[0]!, 0));
+  assert.deepEqual(price?.price_provenance?.cena_v_okamziku, {
+    bez_dph: 1_000, s_dph: 1_210, mena: 'CZK', sazba_dph: 21, baleni_ks: 10,
+  });
 });
 
 test('způsobilost odmítne orientační zdroj a změněný fingerprint, default marži použije jen bez stávající', () => {

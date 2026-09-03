@@ -3,15 +3,17 @@
  * do čisté funkce bez side-effectů (kromě console.warn), aby šla logika testovat
  * bez AI volání a souborového systému.
  *
- * MONEY-PATH INVARIANT: kandidát bez reálné shody (zadna_shoda, placeholder název,
- * nulová/chybějící cena) NIKDY nedostane předvyplněnou cenu z AI odhadu. Dostane
- * nulovou nepotvrzenou cenu → nula spadne do HARD sanity flagu `zero_price`
+ * MONEY-PATH INVARIANT: explicitně informační cena NIKDY nevytvoří potvrditelný
+ * draft. Legacy kandidát bez provenience zachovává původní chování kvůli zpětné
+ * kompatibilitě. Kandidát bez reálné shody dostane nulovou nepotvrzenou cenu →
+ * nula spadne do HARD sanity flagu `zero_price`
  * (price-sanity.ts), takže potvrzení i podání jsou blokované, dokud operátor
  * nezadá reálnou cenu ručně. Reálný prod případ: položka „Rázová redukce 3/4"×1/2""
  * (adaptér ~200 Kč) dostala halucinovaného kandidáta „kompletní sada nářadí"
  * za 280 000 Kč — extrém chytil sanity gate, ale mírné přecenění 2–3× by prošlo.
  */
 import { calculateItemPrice } from './price-calculator.js';
+import { getPriceProvenanceGateReasons, type PriceProvenance } from './types.js';
 
 // Zástupná / prázdná hodnota názvu produktu (AI někdy vrátí „None", „-", prázdno místo reálného
 // produktu). Kandidát bez reálného produktu NESMÍ dostat auto-předvyplněnou závaznou cenu k podání.
@@ -62,6 +64,7 @@ export interface PrefillCandidate {
   cena_spolehlivost?: string;
   katalogove_cislo?: string;
   zadna_shoda?: boolean;
+  price_provenance?: PriceProvenance;
   [key: string]: unknown;
 }
 
@@ -98,6 +101,20 @@ export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: num
     const selected = pm.kandidati?.[pm.vybrany_index ?? -1];
     if (!selected || pm.cenova_uprava) continue;
 
+    // Noví producenti zapisují provenienci vždy. Informační/modelový/historický
+    // údaj nesmí vytvořit draft, který by šel pouhým klikem potvrdit. Kandidáti bez
+    // pole jsou legacy READ data a zachovávají dosavadní zobrazení/prefill chování.
+    if (selected.price_provenance
+      && getPriceProvenanceGateReasons(selected.price_provenance).length > 0) {
+      continue;
+    }
+
+    // Snapshot musí být nezávislá kopie; pozdější přepnutí nebo změna kandidáta
+    // nesmí zpětně přepsat původ již vytvořené cenové úpravy.
+    const provenanceSnapshot = selected.price_provenance
+      ? structuredClone(selected.price_provenance)
+      : undefined;
+
     // Deterministický scale-mismatch guard: název položky sadu NEzmiňuje, ale vybraný
     // kandidát (model+popis) ano → pravděpodobně navržen jiný rozsah. Cenu neměníme —
     // jen forceneme nízkou spolehlivost a varujeme (extrémy blokuje sanity gate).
@@ -132,6 +149,7 @@ export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: num
         nabidkova_cena_s_dph: 0,
         potvrzeno: false,
         poznamka: scaleMismatch ? `${baseNote} ${SCALE_MISMATCH_POZNAMKA}` : baseNote,
+        ...(provenanceSnapshot ? { price_provenance: provenanceSnapshot } : {}),
       };
       console.warn(unidentifiedProduct
         ? `  ⚠ Neidentifikovaný kandidát: "${pm.polozka_nazev}" — chybí model i katalogové číslo, cenu je nutné doložit nebo zadat ručně.`
@@ -152,6 +170,7 @@ export function applyPricePrefill(polozkyMatch: PrefillItem[], defaultMarze: num
       ...calculatedPrice,
       potvrzeno: false,
       poznamka,
+      ...(provenanceSnapshot ? { price_provenance: provenanceSnapshot } : {}),
     };
     if (overCap) console.warn(`  ⚠ Cap exceeded: "${pm.polozka_nazev}" ${nabS} Kč s DPH > limit ${cap} Kč`);
   }

@@ -10,6 +10,23 @@ import { resolveDefaultMarzeProcent } from '../src/lib/company-store.js';
 import { calculateItemPrice } from '../src/lib/price-calculator.js';
 import { PriceOverrideSchema } from '../src/lib/types.js';
 
+const documentedPrice = {
+  verze: 1,
+  typ: 'lidsky_vstup',
+  stav: 'dolozena',
+  url: 'https://supplier.example.cz/produkt/test-1',
+  zjisteno_at: '2026-07-11T09:00:00.000Z',
+  cena_v_okamziku: {
+    bez_dph: 1_000,
+    s_dph: 1_210,
+    mena: 'CZK',
+    sazba_dph: 21,
+    baleni_ks: 1,
+  },
+  zjistil: { typ: 'uzivatel', id: 'jan-novak', jmeno: 'Jan Novák' },
+  kandidat_fingerprint: 'test|1',
+} as const;
+
 const cases = [
   {
     name: '0 % marže zachová nákupní cenu',
@@ -79,6 +96,7 @@ const auditedOverride = PriceOverrideSchema.safeParse({
   potvrzeno: true,
   zkontrolovano_at: '2026-07-11T10:00:00.000Z',
   zkontrolovano_kym: 'Jan Novák',
+  price_provenance: documentedPrice,
   override_pod_nakupem: {
     potvrzeno: true,
     duvod: 'Mám lepší nákup u vlastního dodavatele',
@@ -93,6 +111,9 @@ const shortReason = PriceOverrideSchema.safeParse({
   nabidkova_cena_bez_dph: 900,
   nabidkova_cena_s_dph: 1_089,
   potvrzeno: true,
+  zkontrolovano_at: '2026-07-11T10:00:00.000Z',
+  zkontrolovano_kym: 'Jan Novák',
+  price_provenance: documentedPrice,
   override_pod_nakupem: { potvrzeno: true, duvod: 'krátké' },
 });
 assert.equal(shortReason.success, false);

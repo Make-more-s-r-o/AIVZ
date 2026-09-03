@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   ApprovalRequiredError,
+  RUN_ALL_STEPS,
   advanceRunAllChain,
   checkpointJobsForDrain,
   claimInterrupted,
@@ -199,6 +200,25 @@ test('run-all po úspěchu kroku zařadí následující krok (sériové řetěz
   assert.equal(parent.currentStep, 'analyze');
 });
 
+test('run-all cenový řetězec má povinné pořadí match → verify-prices → generate', async () => {
+  const matchIndex = RUN_ALL_STEPS.indexOf('match');
+  assert.deepEqual(
+    RUN_ALL_STEPS.slice(matchIndex, matchIndex + 3),
+    ['match', 'verify-prices', 'generate'],
+  );
+
+  const parent = job({
+    id: 'pipeline-price-chain', step: 'all', status: 'running', kind: 'pipeline', currentStep: 'match',
+  });
+  const doneMatch = job({ step: 'match', status: 'done', parentJobId: parent.id });
+  const started: PipelineStep[] = [];
+
+  await advanceRunAllChain(parent, doneMatch, (step) => { started.push(step); });
+
+  assert.deepEqual(started, ['verify-prices']);
+  assert.equal(parent.currentStep, 'verify-prices');
+});
+
 test('run-all po posledním kroku označí pipeline jako done', async () => {
   const parent = job({
     id: 'pipeline-1',
@@ -222,9 +242,9 @@ test('run-all: money-gate před generate pauzne řetězec do waiting_approval (n
     step: 'all',
     status: 'running',
     kind: 'pipeline',
-    currentStep: 'match',
+    currentStep: 'verify-prices',
   });
-  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id });
+  const doneChild = job({ step: 'verify-prices', status: 'done', parentJobId: parent.id });
   const started: PipelineStep[] = [];
 
   await advanceRunAllChain(parent, doneChild, (step) => {
@@ -247,9 +267,9 @@ test('run-all: jiná chyba při startu generate zůstává tvrdou chybou řetěz
     step: 'all',
     status: 'running',
     kind: 'pipeline',
-    currentStep: 'match',
+    currentStep: 'verify-prices',
   });
-  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id });
+  const doneChild = job({ step: 'verify-prices', status: 'done', parentJobId: parent.id });
 
   await advanceRunAllChain(parent, doneChild, () => {
     throw new Error('generate-bid selhal');
@@ -260,12 +280,34 @@ test('run-all: jiná chyba při startu generate zůstává tvrdou chybou řetěz
   assert.equal(parent.finishedAt, '2026-07-10T12:00:00.000Z');
 });
 
+test('run-all: selhání verify-prices skončí čekáním na doklad, ne modelem vydávaným za ověření', async () => {
+  const parent = job({
+    id: 'pipeline-verifier-failed', step: 'all', status: 'running', kind: 'pipeline',
+    currentStep: 'verify-prices',
+  });
+  const failedVerifier = job({
+    step: 'verify-prices', status: 'error', parentJobId: parent.id,
+    error: 'Web search nebyl dostupný.',
+  });
+  let nextStarted = false;
+
+  await advanceRunAllChain(parent, failedVerifier, () => { nextStarted = true; });
+
+  assert.equal(nextStarted, false);
+  assert.equal(parent.status, 'waiting_approval');
+  assert.equal(parent.currentStep, 'generate');
+  assert.equal(parent.failedStep, undefined);
+  assert.equal(parent.finishedAt, undefined);
+  assert.match(parent.error ?? '', /čeká na doklad/);
+  assert.match(parent.error ?? '', /Web search nebyl dostupný/);
+});
+
 test('monitoring run-all zachová initiator a bez potvrzení cen nespustí generate', async () => {
   const parent = job({
     id: 'pipeline-monitoring', step: 'all', status: 'running', kind: 'pipeline',
-    currentStep: 'match', initiator: 'monitoring',
+    currentStep: 'verify-prices', initiator: 'monitoring',
   });
-  const doneChild = job({ step: 'match', status: 'done', parentJobId: parent.id, initiator: 'monitoring' });
+  const doneChild = job({ step: 'verify-prices', status: 'done', parentJobId: parent.id, initiator: 'monitoring' });
   let generateStarted = false;
 
   await advanceRunAllChain(parent, doneChild, (step) => {

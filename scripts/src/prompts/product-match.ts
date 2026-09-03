@@ -19,8 +19,8 @@ Pro každý produkt uveď:
 - Zdroj cenového odhadu ("zdroj_ceny") — na čem je cena založená (katalogová cena výrobce, odhad z distribuce, apod.)
 - Katalogové číslo ("katalogove_cislo") — přesné katalogové/objednací číslo výrobce (např. "BL-P001", "40B0S5N100", "DERA-180-W"). Důležité pro ověření produktu.
 - Jistotu identifikace ("identifikace_jistota") — "vysoka" / "stredni" / "nizka" podle toho, jak jistý je přesný model a katalogové číslo.
-- Dostupné dodavatele v ČR
-- Dostupnost (skladem / na objednávku / dodací lhůta)
+- Možné dodavatele v ČR (jen orientační příklady, nikoli ověřené nabídky)
+- Neověřený předpoklad dostupnosti; bez živých dat použij hodnotu "neověřeno"
 
 Seřaď kandidáty od NEJLEVNĚJŠÍHO. vybrany_index = index nejlevnějšího produktu, který splňuje VŠECHNY povinné požadavky.
 U veřejných zakázek je nejčastější hodnotící kritérium NEJNIŽŠÍ NABÍDKOVÁ CENA — proto preferuj levnější produkt, pokud splňuje všechny povinné požadavky.
@@ -57,7 +57,10 @@ EFEKTIVITA VÝSTUPU (KRITICKÉ — délka odpovědi je hlavní příčina pomalo
 - To výrazně zkrátí odpověď, zrychlí generaci a zabrání oříznutí.
 
 DŮLEŽITÉ PRAVIDLA PRO CENY:
-- Ceny jsou ORIENTAČNÍ ODHAD — nemáš přístup k aktuálním e-shopům
+- Ceny jsou VÝHRADNĚ ORIENTAČNÍ ODHAD — v tomto kroku nemáš přístup k aktuálním e-shopům ani k živým ceníkům.
+- NIKDY netvrď, že jsi cenu, dostupnost nebo konkrétního dodavatele ověřil. Nepoužívej formulace „ověřená cena", „aktuálně stojí", „skladem u" ani podobná tvrzení o živém trhu.
+- NIKDY nevymýšlej ani nevracej pole reference_urls či jiné odkazy. Vyhledávací ani produktová URL z paměti modelu nejsou doklad ceny.
+- Pole dodavatele obsahuje jen orientační příklady možných prodejců; jejich uvedení neznamená, že u nich byla cena nebo dostupnost zjištěna.
 - U každého produktu uveď "cena_spolehlivost": "vysoka" / "stredni" / "nizka"
   - "vysoka" = běžný produkt, jehož cenu dobře znáš (např. standardní kancelářský HW)
   - "stredni" = znáš přibližnou cenovou kategorii, ale přesná cena se může lišit ±30%
@@ -117,8 +120,8 @@ Navrhni ${candidateCount} konkrétní produkty ve formátu:
       "cena_komentar": "Odhad na základě ..., může se lišit ±30%",
       "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
       "katalogove_cislo": "ABC-12345",
-      "dodavatele": ["dodavatel1", "dodavatel2"],
-      "dostupnost": "skladem / 2-3 týdny",
+      "dodavatele": ["možný dodavatel1", "možný dodavatel2"],
+      "dostupnost": "neověřeno",
       "zadna_shoda": false
     }
   ],
@@ -170,8 +173,8 @@ Odpověz ve formátu (KAŽDÁ položka má vlastní pole kandidátů):
           "cena_komentar": "Odhad na základě ...",
           "zdroj_ceny": "Katalogová cena výrobce + odhad marže distribuce",
           "katalogove_cislo": "ABC-12345",
-          "dodavatele": ["dodavatel1", "dodavatel2"],
-          "dostupnost": "skladem / 2-3 týdny",
+          "dodavatele": ["možný dodavatel1", "možný dodavatel2"],
+          "dostupnost": "neověřeno",
           "zadna_shoda": false
         }
       ],
@@ -200,6 +203,7 @@ export function buildServicePricingMessage(
 ${budgetLine}
 Následující položky jsou SLUŽBY (doprava, instalace, školení, apod.). Nejsou to fyzické produkty — nemají kandidáty.
 Odhadni realistickou cenu za každou službu v kontextu dané zakázky.
+Jde pouze o modelový odhad bez ověření v aktuálním ceníku. NIKDY netvrď, že cena byla ověřena, a nevymýšlej odkazy ani dodavatele jako doklad ceny.
 
 Služby k ocenění:
 ${serviceList}

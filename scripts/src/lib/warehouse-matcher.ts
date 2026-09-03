@@ -7,6 +7,8 @@
 import { query, isDbAvailable } from './db.js';
 import { parseRequirements, buildParameterWhereClause, type ParameterFilter } from './requirement-parser.js';
 import { embedQuery } from './embedding-service.js';
+import { candidateFingerprint } from './candidate-fingerprint.js';
+import { isConcreteProductUrl, PriceProvenanceSchema } from './types.js';
 
 // ============================================================
 // Typy
@@ -26,7 +28,8 @@ export interface WarehouseMatch {
   price_bez_dph: number | null;
   price_s_dph: number | null;
   price_source: string | null;
-  price_fetched_at: string | null;
+  price_source_url: string | null;
+  price_fetched_at: string | Date | null;
 
   // Matching metadata
   match_tier: 'exact' | 'text' | 'vector';
@@ -149,7 +152,8 @@ async function tier1Exact(request: MatchRequest): Promise<WarehouseMatch[]> {
             p.description, p.parameters_normalized,
             pc.slug as category_slug,
             bp.price_bez_dph, bp.price_s_dph,
-            ds.name as price_source, bp.fetched_at as price_fetched_at,
+            ds.name as price_source, bp.source_url as price_source_url,
+            bp.fetched_at as price_fetched_at,
             'exact'::text as match_tier,
             1.0::numeric as match_score
      FROM products p
@@ -220,7 +224,8 @@ async function tier2TextSearch(request: MatchRequest, limit: number): Promise<Wa
             p.description, p.parameters_normalized,
             pc.slug as category_slug,
             bp.price_bez_dph, bp.price_s_dph,
-            ds.name as price_source, bp.fetched_at as price_fetched_at,
+            ds.name as price_source, bp.source_url as price_source_url,
+            bp.fetched_at as price_fetched_at,
             'text'::text as match_tier,
             (ts_rank(p.search_vector, plainto_tsquery('simple', ${ftsParam})) +
              similarity(p.search_text, ${trgParam})${manufacturerBoost})::numeric as match_score,
@@ -264,7 +269,8 @@ async function tier3Vector(request: MatchRequest, limit: number): Promise<Wareho
             p.description, p.parameters_normalized,
             pc.slug as category_slug,
             bp.price_bez_dph, bp.price_s_dph,
-            ds.name as price_source, bp.fetched_at as price_fetched_at,
+            ds.name as price_source, bp.source_url as price_source_url,
+            bp.fetched_at as price_fetched_at,
             'vector'::text as match_tier,
             (1 - (p.embedding <=> $1::vector))::numeric as match_score,
             (1 - (p.embedding <=> $1::vector))::numeric as vector_similarity
@@ -297,9 +303,22 @@ function buildSearchText(request: MatchRequest): string {
 /**
  * Určí spolehlivost ceny na základě stáří.
  */
-export function getPriceConfidence(fetchedAt: string | null): 'vysoka' | 'stredni' | 'nizka' {
+function toIsoTimestamp(value: string | Date | null): string | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function concreteSourceUrl(value: string | null): string | null {
+  const url = value?.trim();
+  return url && isConcreteProductUrl(url) ? url : null;
+}
+
+export function getPriceConfidence(fetchedAt: string | Date | null): 'vysoka' | 'stredni' | 'nizka' {
   if (!fetchedAt) return 'nizka';
-  const ageMs = Date.now() - new Date(fetchedAt).getTime();
+  const parsed = fetchedAt instanceof Date ? fetchedAt : new Date(fetchedAt);
+  if (!Number.isFinite(parsed.getTime())) return 'nizka';
+  const ageMs = Date.now() - parsed.getTime();
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
   if (ageDays <= 7) return 'vysoka';
   if (ageDays <= 30) return 'vysoka'; // stále OK, jen doporučit ověření
@@ -314,8 +333,9 @@ export function formatPriceSource(
 ): string {
   const confidence = getPriceConfidence(match.price_fetched_at);
   const source = match.price_source || 'Cenový sklad';
-  const date = match.price_fetched_at
-    ? new Date(match.price_fetched_at).toLocaleDateString('cs-CZ')
+  const fetchedAt = toIsoTimestamp(match.price_fetched_at);
+  const date = fetchedAt
+    ? new Date(fetchedAt).toLocaleDateString('cs-CZ')
     : '';
 
   if (confidence === 'vysoka') {
@@ -330,17 +350,30 @@ export function formatPriceSource(
 /**
  * Konvertuje WarehouseMatch na ProductCandidate formát (kompatibilní s AI výstupem).
  */
-export function warehouseMatchToCandidate(match: WarehouseMatch): Record<string, unknown> {
+export function warehouseMatchToCandidate(
+  match: WarehouseMatch,
+  candidateIndex = 0,
+  generatedAt = new Date().toISOString(),
+): Record<string, unknown> {
   const confidence = getPriceConfidence(match.price_fetched_at);
+  const priceWithoutVat = match.price_bez_dph
+    ? Number(match.price_bez_dph)
+    : (match.price_s_dph ? Math.round((Number(match.price_s_dph) / 1.21) * 100) / 100 : 0);
+  const priceWithVat = match.price_s_dph
+    ? Number(match.price_s_dph)
+    : Math.round(priceWithoutVat * 1.21 * 100) / 100;
+  const sourceUrl = concreteSourceUrl(match.price_source_url);
+  const fetchedAt = toIsoTimestamp(match.price_fetched_at);
+  const documented = sourceUrl !== null && fetchedAt !== null;
 
-  return {
+  const candidate: Record<string, unknown> = {
     vyrobce: match.manufacturer,
     model: match.model,
     popis: match.description || `${match.manufacturer} ${match.model}`,
     parametry: match.parameters_normalized || {},
     shoda_s_pozadavky: [],
-    cena_bez_dph: match.price_bez_dph ? Number(match.price_bez_dph) : 0,
-    cena_s_dph: match.price_s_dph ? Number(match.price_s_dph) : (match.price_bez_dph ? Math.round(Number(match.price_bez_dph) * 1.21) : 0),
+    cena_bez_dph: priceWithoutVat,
+    cena_s_dph: priceWithVat,
     cena_spolehlivost: confidence,
     cena_komentar: `Reálná cena z cenového skladu (${match.price_source || 'neznámý zdroj'})`,
     zdroj_ceny: formatPriceSource(match),
@@ -352,4 +385,33 @@ export function warehouseMatchToCandidate(match: WarehouseMatch): Record<string,
     match_tier: match.match_tier,
     match_score: match.match_score,
   };
+
+  candidate.price_provenance = PriceProvenanceSchema.parse({
+    verze: 1,
+    typ: 'cenovy_sklad',
+    stav: documented ? 'dolozena' : 'informacni',
+    url: sourceUrl,
+    zjisteno_at: fetchedAt ?? generatedAt,
+    cena_v_okamziku: {
+      bez_dph: priceWithoutVat,
+      s_dph: priceWithVat,
+      mena: 'CZK',
+      sazba_dph: 21,
+      baleni_ks: 1,
+    },
+    zjistil: {
+      typ: 'system_import',
+      id: match.price_source?.trim() || 'cenovy-sklad',
+    },
+    ...(match.price_source?.trim() ? { dodavatel: match.price_source.trim() } : {}),
+    kandidat_fingerprint: candidateFingerprint({
+      vyrobce: match.manufacturer,
+      model: match.model,
+    }, candidateIndex),
+    ...(!documented ? {
+      poznamka: 'Skladový záznam nemá současně přímou produktovou URL a čas načtení; cena je pouze informační.',
+    } : {}),
+  });
+
+  return candidate;
 }

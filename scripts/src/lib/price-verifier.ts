@@ -16,6 +16,7 @@ import { logCost } from './cost-tracker.js';
 import { compareAiVsMarket } from './price-reality.js';
 import { candidateFingerprint } from './candidate-fingerprint.js';
 import { findCachedSources, type CachedSourceIdentity, type WebFindingRow } from './web-findings-store.js';
+import { isConcreteProductUrl, PriceProvenanceSchema, type PriceProvenance } from './types.js';
 import type {
   ProductMatch,
   ProductCandidate,
@@ -328,10 +329,9 @@ function cleanUrl(v: unknown): string | undefined {
     const host = url.hostname.toLowerCase();
     if (host === 'google.cz' || host.endsWith('.google.cz') || host === 'google.com' || host.endsWith('.google.com')) return undefined;
     if (host === 'seznam.cz' || host.endsWith('.seznam.cz')) return undefined;
-    const searchPath = /(^|\/)(search|hledat|vyhledavani|vysledky)(\/|$)/i.test(url.pathname);
-    const searchQuery = [...url.searchParams.keys()].some((key) => /^(q|query|search|keyword|text|h\[.*\])$/i.test(key));
-    if (searchPath || searchQuery) return undefined;
-    return url.toString();
+    const normalized = url.toString();
+    if (!isConcreteProductUrl(normalized)) return undefined;
+    return normalized;
   } catch {
     return undefined;
   }
@@ -415,6 +415,64 @@ function normalizeSource(raw: RawWebPriceSource, context: SourceContext): WebPri
       ...(orientational ? { orientacni: true } : {}),
     } : {}),
   };
+}
+
+/**
+ * Vytvoří jediný kanonický snapshot webově doložené ceny. Nejasná daň, balení,
+ * informační zdroj nebo vyhledávací URL nejsou dostatečný podklad pro nabídku.
+ */
+export function createVerifiedEshopProvenance(
+  source: WebPriceSource,
+  kandidatFingerprint: string,
+  verifiedAt: string,
+  modelId?: string,
+  runId?: string,
+): PriceProvenance | null {
+  if (source.orientacni === true || !isConcreteProductUrl(source.url)) return null;
+
+  const rate = typeof source.sazba_dph === 'number' && Number.isFinite(source.sazba_dph) && source.sazba_dph > 0
+    ? source.sazba_dph
+    : null;
+  const packageSize = typeof source.baleni_ks === 'number' && Number.isFinite(source.baleni_ks) && source.baleni_ks > 0
+    ? source.baleni_ks
+    : null;
+  if (rate === null || packageSize === null) return null;
+
+  let net = typeof source.cena_bez_dph === 'number' && Number.isFinite(source.cena_bez_dph) && source.cena_bez_dph > 0
+    ? source.cena_bez_dph
+    : null;
+  let grossCandidate = source.cena_baleni_s_dph ?? source.cena_s_dph;
+  let gross = typeof grossCandidate === 'number' && Number.isFinite(grossCandidate) && grossCandidate > 0
+    ? grossCandidate
+    : null;
+  if (net === null && gross !== null) net = Math.round((gross / (1 + rate / 100)) * 100) / 100;
+  if (gross === null && net !== null) gross = Math.round(net * (1 + rate / 100) * 100) / 100;
+  if (net === null || gross === null) return null;
+
+  const parsed = PriceProvenanceSchema.safeParse({
+    verze: 1,
+    typ: 'overeny_eshop',
+    stav: 'dolozena',
+    url: source.url,
+    zjisteno_at: verifiedAt,
+    cena_v_okamziku: {
+      bez_dph: net,
+      s_dph: gross,
+      mena: 'CZK',
+      sazba_dph: rate,
+      baleni_ks: packageSize,
+    },
+    zjistil: {
+      typ: 'web_agent',
+      id: 'price-verifier',
+      ...(modelId?.trim() ? { model: modelId.trim() } : {}),
+      ...(runId?.trim() ? { run_id: runId.trim() } : {}),
+    },
+    ...(source.dodavatel?.trim() ? { dodavatel: source.dodavatel.trim() } : {}),
+    kandidat_fingerprint: kandidatFingerprint,
+    ...(source.poznamka?.trim() ? { poznamka: source.poznamka.trim() } : {}),
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 /** Srovnávací cena s DPH; chybějící protějšek dopočítáme pouze pro řazení. */

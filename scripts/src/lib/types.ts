@@ -497,6 +497,254 @@ function parseAiNumber(v: unknown): unknown {
 }
 const aiNumber = () => z.preprocess(parseAiNumber, z.number());
 
+// Cenová provenance je samostatný, verzovaný snapshot. `zdroj_ceny` níže zůstává
+// jen jako deprecated text pro zobrazení historických dat a nesmí rozhodovat money-gate.
+export const PriceProvenanceTypeSchema = z.enum([
+  'overeny_eshop',
+  'cenovy_sklad',
+  'historicka_vitezna_cena',
+  'lidsky_vstup',
+  'odhad_modelu',
+]);
+
+export const PriceProvenanceStatusSchema = z.enum(['dolozena', 'informacni']);
+
+const HttpUrlSchema = z.string().trim().url().refine((value) => {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}, 'URL musí používat HTTP(S)');
+
+// Výslovný seznam tvarů vyhledávání. Záměrně nejde o heuristiku podle názvu
+// e-shopu: každý další vzor musí být přidán sem a pokryt testem.
+const SEARCH_RESULT_PATHS = [
+  '/search',
+  '/hledat',
+  '/hledani',
+  '/vyhledavani',
+] as const;
+const SEARCH_RESULT_QUERY_KEYS = [
+  'q',
+  'query',
+  'search',
+  'dotaz',
+  'keyword',
+  'h[fraze]', // Heureka: /?h[fraze]=...
+] as const;
+
+/** Vrátí false pro vyhledávání i ne-HTTP(S) adresy; dokladem je jen produktová URL. */
+export function isConcreteProductUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+  let decodedPathname: string;
+  try {
+    decodedPathname = decodeURIComponent(parsed.pathname);
+  } catch {
+    return false;
+  }
+  const pathname = decodedPathname.toLowerCase().replace(/\/+$/, '') || '/';
+  const isSearchPath = SEARCH_RESULT_PATHS.some((pattern) => (
+    pathname === pattern
+    || pathname.startsWith(`${pattern}/`)
+    || pathname.startsWith(`${pattern}.`)
+    || pathname.endsWith(pattern)
+    || pathname.includes(`${pattern}/`)
+    || pathname.includes(`${pattern}.`)
+  ));
+  if (isSearchPath) return false;
+
+  const queryKeys = new Set(Array.from(parsed.searchParams.keys(), (key) => key.toLowerCase()));
+  return !SEARCH_RESULT_QUERY_KEYS.some((key) => queryKeys.has(key));
+}
+
+const PriceAtMomentSchema = z.object({
+  bez_dph: z.number().finite().nonnegative(),
+  s_dph: z.number().finite().nonnegative(),
+  mena: z.literal('CZK'),
+  sazba_dph: z.number().finite().nonnegative(),
+  baleni_ks: z.number().int().positive(),
+}).strict().readonly();
+
+const PriceDiscovererSchema = z.object({
+  typ: z.enum(['web_agent', 'system_import', 'uzivatel', 'model']),
+  id: z.string().trim().min(1),
+  jmeno: z.string().trim().min(1).optional(),
+  model: z.string().trim().min(1).optional(),
+  run_id: z.string().trim().min(1).optional(),
+}).strict().readonly();
+
+const PriceProvenanceObjectSchema = z.object({
+  verze: z.literal(1),
+  typ: PriceProvenanceTypeSchema,
+  stav: PriceProvenanceStatusSchema,
+  url: HttpUrlSchema.nullable(),
+  doklad_ref: z.string().trim().min(1).optional(),
+  zjisteno_at: z.string().datetime({ offset: true }),
+  platnost_do: z.string().datetime({ offset: true }).optional(),
+  cena_v_okamziku: PriceAtMomentSchema,
+  zjistil: PriceDiscovererSchema,
+  dodavatel: z.string().trim().min(1).optional(),
+  kandidat_fingerprint: z.string().trim().min(1),
+  poznamka: z.string().optional(),
+}).strict();
+
+/**
+ * Přísné WRITE schéma. Každý nově vytvořený snapshot musí projít tímto
+ * schématem; `readonly()` chrání uložený snapshot před náhodnou mutací za běhu.
+ */
+export const PriceProvenanceSchema = PriceProvenanceObjectSchema.superRefine((value, context) => {
+  if (
+    (value.typ === 'historicka_vitezna_cena' || value.typ === 'odhad_modelu')
+    && value.stav !== 'informacni'
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['stav'],
+      message: `Typ ${value.typ} smí být pouze informační`,
+    });
+  }
+
+  if (value.typ === 'overeny_eshop' && value.stav === 'dolozena' && !isConcreteProductUrl(value.url)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['url'],
+      message: 'Doložená cena z e-shopu vyžaduje odkaz na konkrétní produkt, ne vyhledávání',
+    });
+  }
+
+  if (value.typ === 'cenovy_sklad' && value.stav === 'dolozena' && value.url === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['url'],
+      message: 'Doložená cena z cenového skladu vyžaduje zdrojovou URL',
+    });
+  }
+
+  if (
+    value.typ === 'lidsky_vstup'
+    && value.stav === 'dolozena'
+    && value.url === null
+    && !value.doklad_ref
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['doklad_ref'],
+      message: 'Doložený lidský vstup vyžaduje URL nebo referenci dokladu',
+    });
+  }
+}).readonly();
+
+// Tolerantní READ schéma je záměrně oddělené od WRITE schématu. Historické
+// product-match soubory provenance vůbec nemají; rozpracované starší snapshoty mohou mít
+// jen část polí. Načtení je zachová, ale money-gate je nikdy nepovažuje za doklad.
+export const PriceProvenanceReadSchema = z.object({
+  verze: z.literal(1).optional(),
+  typ: PriceProvenanceTypeSchema.optional(),
+  stav: PriceProvenanceStatusSchema.optional(),
+  url: z.string().nullable().optional(),
+  doklad_ref: z.string().optional(),
+  zjisteno_at: z.string().optional(),
+  platnost_do: z.string().optional(),
+  cena_v_okamziku: z.object({
+    bez_dph: z.number().optional(),
+    s_dph: z.number().optional(),
+    mena: z.literal('CZK').optional(),
+    sazba_dph: z.number().optional(),
+    baleni_ks: z.number().optional(),
+  }).passthrough().optional(),
+  zjistil: z.object({
+    typ: z.enum(['web_agent', 'system_import', 'uzivatel', 'model']).optional(),
+    id: z.string().optional(),
+    jmeno: z.string().optional(),
+    model: z.string().optional(),
+    run_id: z.string().optional(),
+  }).passthrough().optional(),
+  dodavatel: z.string().optional(),
+  kandidat_fingerprint: z.string().optional(),
+  poznamka: z.string().optional(),
+}).passthrough();
+
+export const ALLOWED_BID_PRICE_PROVENANCE_TYPES = [
+  'overeny_eshop',
+  'cenovy_sklad',
+  'lidsky_vstup',
+] as const;
+
+export type PriceProvenanceGateReasonCode =
+  | 'chybi_doklad'
+  | 'propadla_platnost'
+  | 'nepovoleny_typ';
+
+export interface PriceProvenanceGateReason {
+  code: PriceProvenanceGateReasonCode;
+  message: string;
+}
+
+/** Jediný sdílený výklad toho, zda je snapshot způsobilý jako základ nabídky. */
+export function getPriceProvenanceGateReasons(
+  input: unknown,
+  now: Date | string = new Date(),
+): PriceProvenanceGateReason[] {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return [{ code: 'chybi_doklad', message: 'chybí doklad o původu ceny' }];
+  }
+
+  const value = input as Record<string, unknown>;
+  const reasons: PriceProvenanceGateReason[] = [];
+  const typ = PriceProvenanceTypeSchema.safeParse(value.typ);
+  const allowedTypes: ReadonlySet<string> = new Set(ALLOWED_BID_PRICE_PROVENANCE_TYPES);
+  if (!typ.success || !allowedTypes.has(typ.data)) {
+    reasons.push({
+      code: 'nepovoleny_typ',
+      message: typ.success
+        ? `nepovolený typ ceny pro nabídku: ${typ.data}`
+        : 'nepovolený nebo chybějící typ ceny',
+    });
+  }
+
+  if (value.stav !== 'dolozena') {
+    reasons.push({ code: 'chybi_doklad', message: 'chybí doklad (cena je pouze informační)' });
+  }
+
+  const strict = PriceProvenanceSchema.safeParse(value);
+  if (!strict.success && value.stav === 'dolozena') {
+    const isSearchResult = value.typ === 'overeny_eshop'
+      && typeof value.url === 'string'
+      && !isConcreteProductUrl(value.url);
+    reasons.push({
+      code: 'chybi_doklad',
+      message: isSearchResult
+        ? 'chybí doklad (odkaz vede na vyhledávání, ne na konkrétní produkt)'
+        : 'chybí platný nebo úplný doklad o původu ceny',
+    });
+  }
+
+  if (typeof value.platnost_do === 'string') {
+    const validUntil = Date.parse(value.platnost_do);
+    const referenceTime = typeof now === 'string' ? Date.parse(now) : now.getTime();
+    if (Number.isFinite(validUntil) && Number.isFinite(referenceTime) && validUntil <= referenceTime) {
+      reasons.push({
+        code: 'propadla_platnost',
+        message: `propadlá platnost dokladu (${value.platnost_do})`,
+      });
+    }
+  }
+
+  return reasons.filter((reason, index) => (
+    reasons.findIndex((candidate) => candidate.code === reason.code && candidate.message === reason.message) === index
+  ));
+}
+
 // Product matching
 export const ProductCandidateSchema = z.object({
   vyrobce: z.string(),
@@ -519,6 +767,7 @@ export const ProductCandidateSchema = z.object({
   dodavatele: z.array(z.string()),
   dostupnost: z.string(),
   zdroj_ceny: z.string().optional(),
+  price_provenance: PriceProvenanceReadSchema.optional(),
   katalogove_cislo: z.string().optional(),
   reference_urls: z.array(z.string()).optional(),
   // AI nenašla reálný odpovídající produkt — kandidát je jen zástupný záznam s nulovou
@@ -531,7 +780,7 @@ export const ProductCandidateSchema = z.object({
   match_score: z.preprocess(parseAiNumber, z.number().optional()),
 });
 
-const PriceOverrideObjectSchema = z.object({
+const PriceOverrideShape = {
   nakupni_cena_bez_dph: z.number(),
   nakupni_cena_s_dph: z.number(),
   marze_procent: z.number().default(0),
@@ -550,6 +799,13 @@ const PriceOverrideObjectSchema = z.object({
     duvod: z.string().trim().min(10, 'Důvod výjimky musí mít alespoň 10 znaků'),
     schvalil: z.string().trim().min(1).optional(),
   }).optional(),
+};
+
+const PriceOverrideObjectSchema = z.object({
+  ...PriceOverrideShape,
+  // Snapshot se ukládá přímo k override: dokumenty nesmějí dohledávat
+  // později změněnou provenienci na původním kandidátovi.
+  price_provenance: PriceProvenanceSchema.optional(),
 });
 
 export const PriceOverrideSchema = PriceOverrideObjectSchema.superRefine((value, context) => {
@@ -560,11 +816,23 @@ export const PriceOverrideSchema = PriceOverrideObjectSchema.superRefine((value,
       path: ['potvrzeno'],
     });
   }
+  if (value.potvrzeno) {
+    for (const reason of getPriceProvenanceGateReasons(value.price_provenance)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: reason.message,
+        path: ['price_provenance'],
+      });
+    }
+  }
 });
 
 // Pouze pro čtení historických product-match souborů. Všechny zápisové endpointy
 // používají výše uvedené přísné schéma a legacy potvrzení tedy neumějí vytvořit.
-const LegacyPriceOverrideSchema = PriceOverrideObjectSchema;
+const LegacyPriceOverrideSchema = z.object({
+  ...PriceOverrideShape,
+  price_provenance: PriceProvenanceReadSchema.optional(),
+});
 
 export const PriceSanityFlagSchema = z.object({
   polozka_index: z.number(),
@@ -732,7 +1000,15 @@ export type ExtractedDocument = z.infer<typeof ExtractedDocumentSchema>;
 export type ExtractedText = z.infer<typeof ExtractedTextSchema>;
 export type TenderAnalysis = z.infer<typeof TenderAnalysisSchema>;
 export type ProductCandidate = z.infer<typeof ProductCandidateSchema>;
-export type PriceOverride = z.infer<typeof PriceOverrideSchema>;
+export type PriceProvenanceType = z.infer<typeof PriceProvenanceTypeSchema>;
+export type PriceProvenanceStatus = z.infer<typeof PriceProvenanceStatusSchema>;
+export type PriceProvenance = z.infer<typeof PriceProvenanceSchema>;
+export type PriceProvenanceRead = z.infer<typeof PriceProvenanceReadSchema>;
+// `PriceOverride` reprezentuje hodnotu načtenou z ProductMatchSchema a je tedy
+// tolerantní. Zápisové cesty stále validují přes PriceOverrideSchema a mohou si
+// pro přísný výstup vyžádat explicitní PriceOverrideWrite.
+export type PriceOverride = z.infer<typeof LegacyPriceOverrideSchema>;
+export type PriceOverrideWrite = z.infer<typeof PriceOverrideSchema>;
 export type PriceSanityFlag = z.infer<typeof PriceSanityFlagSchema>;
 export type WebPriceSource = z.infer<typeof WebPriceSourceSchema>;
 export type OvereniCeny = z.infer<typeof OvereniCenySchema>;

@@ -11,7 +11,7 @@ import { config } from 'dotenv';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { ProductMatchSchema, TenderAnalysisSchema } from './lib/types.js';
-import { clearPriceForProductChange, validateBulkPriceWrites, validatePriceWrite } from './lib/price-review.js';
+import { clearPriceForProductChange } from './lib/price-review.js';
 import {
   buildInbox, evaluateBulkCandidate, inboxBulkGovernanceKey, readInboxJson,
   type BulkSkip, type InboxSort, type InboxTenderInput,
@@ -66,7 +66,7 @@ import { refreshProductMatchPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
 import { peekZipFileCount } from './lib/input-discovery.js';
 import { isStale } from './lib/stale-check.js';
-import { findUnconfirmedPrices } from './lib/price-confirmation.js';
+import { findUnconfirmedPrices, validateServerPriceWrite } from './lib/price-confirmation.js';
 import {
   UPLOAD_FILE_SIZE_LIMIT_BYTES,
   ZIP_PEEK_SIZE_LIMIT_BYTES,
@@ -422,7 +422,8 @@ function enqueueStepJob(
 }
 
 /**
- * Zařadí celý pipeline (extract→…→validate) jako jeden řetězený parent job. Sdílené
+ * Zařadí celý pipeline (extract→analyze→match→verify-prices→generate→validate)
+ * jako jeden řetězený parent job. Sdílené
  * endpointem `run/all` i převzetím z monitoringu. Když už pro zakázku běží/čeká pipeline,
  * vrátí ho beze změny (created=false) — idempotentní, nikdy nespustí druhý souběžný řetězec.
  */
@@ -642,7 +643,8 @@ function startJob(job: Job) {
       const governanceDecision = await pipelineEnqueueBlock(nextStep);
       if (governanceDecision?.budget) throw new BudgetPausedError(governanceDecision.reason);
       if (governanceDecision) throw new Error(governanceDecision.reason);
-      // Money-gate před generate: nepotvrzené ceny řetězec NEshodí do error, ale PAUZNOU
+      // Money-gate před generate: po verifieru musí každá cena mít lidské potvrzení
+      // i doloženou provenienci. Nedoložené ceny řetězec NEshodí do error, ale PAUZNOU
       // ho do waiting_approval (ApprovalRequiredError). Lidský checkpoint, ne chyba.
       if (nextStep === 'generate') {
         const pending = await getUnconfirmedPrices(job.tenderId);
@@ -652,7 +654,7 @@ function startJob(job: Job) {
         if (pending.count > 0) {
           throw new ApprovalRequiredError(
             pending.count,
-            `Čeká na potvrzení cen (${pending.count}) v záložce Ocenění — pipeline pozastavena před generováním dokumentů.`,
+            `Čeká na doklad a potvrzení cen (${pending.count}) v záložce Ocenění — pipeline pozastavena před generováním dokumentů.`,
           );
         }
       }
@@ -2264,8 +2266,9 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
     const raw = await readFile(matchPath, 'utf-8');
     const productMatch = JSON.parse(raw);
 
-    // Validate the incoming price override
-    const parsed = validatePriceWrite(req.body, (req as any).user);
+    // Jediný serverový validátor zahodí klientskou provenienci a snapshot
+    // sestaví jen z uloženého kandidáta/ověření nebo validovaného dokladu.
+    const parsed = validateServerPriceWrite(req.body, productMatch, (req as any).user);
 
     // Merge into product-match.json
     productMatch.cenova_uprava = parsed;
@@ -2333,10 +2336,6 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Očekávám neprázdné pole `items`.' });
     }
-    // Zvaliduj každou položku (index + PriceOverrideSchema) do dočasného pole — teprve po
-    // úspěšné validaci VŠECH se zapisuje (buď projde vše, nebo nic → žádný částečný zápis).
-    const { validated, preskoceno } = validateBulkPriceWrites(items, (req as any).user);
-
     const raw = await readFile(matchPath, 'utf-8');
     const productMatch = JSON.parse(raw);
 
@@ -2345,10 +2344,29 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     }
     const len = productMatch.polozky_match.length;
 
-    for (const v of validated) {
-      if (v.idx >= len) {
-        return res.status(400).json({ error: `Neplatný index položky ${v.idx}` });
+    // Vše validujeme do dočasného pole proti dosud nezměněnému serverovému
+    // snapshotu. Teprve když projdou všechny attestované řádky, mutujeme soubor.
+    const validated: Array<{ idx: number; cenova_uprava: ReturnType<typeof validateServerPriceWrite> }> = [];
+    const preskoceno: number[] = [];
+    for (let position = 0; position < items.length; position++) {
+      const item = items[position];
+      const idx = Number(item?.itemIndex);
+      if (!Number.isInteger(idx) || idx < 0) {
+        return res.status(400).json({ error: `items[${position}].itemIndex musí být nezáporné celé číslo` });
       }
+      if (idx >= len) return res.status(400).json({ error: `Neplatný index položky ${idx}` });
+      if (item?.attestace !== true) {
+        preskoceno.push(idx);
+        continue;
+      }
+      validated.push({
+        idx,
+        cenova_uprava: validateServerPriceWrite(
+          item.cenova_uprava,
+          productMatch.polozky_match[idx],
+          (req as any).user,
+        ),
+      });
     }
     for (const v of validated) {
       productMatch.polozky_match[v.idx].cenova_uprava = v.cenova_uprava;
@@ -2380,10 +2398,7 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
     const hasWaitingJob = [...jobs.values()].some((job) =>
       job.tenderId === id && job.kind === 'pipeline' && job.status === 'waiting_approval');
     if (hasWaitingJob) {
-      const stillPending = productMatch.polozky_match.some(
-        (item: any) => !item?.cenova_uprava?.potvrzeno,
-      );
-      canResumeRunAll = !stillPending;
+      canResumeRunAll = findUnconfirmedPrices(productMatch).count === 0;
     }
 
     res.json({ success: true, updated: validated.length, preskoceno_bez_kontroly: preskoceno, warnings, can_resume_run_all: canResumeRunAll });
@@ -2409,7 +2424,11 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
       return res.status(400).json({ error: `Invalid item index ${idx}` });
     }
 
-    const parsed = validatePriceWrite(req.body, (req as any).user);
+    const parsed = validateServerPriceWrite(
+      req.body,
+      productMatch.polozky_match[idx],
+      (req as any).user,
+    );
     productMatch.polozky_match[idx].cenova_uprava = parsed;
 
     let warnings: PriceSanityFlag[] = [];
