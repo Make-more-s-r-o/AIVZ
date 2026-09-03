@@ -16,6 +16,7 @@ import {
 import {
   sanitizeAttachmentName,
   downloadNenAttachments,
+  IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX,
   incompleteDownloadWarning,
   monitoringAutoStartGovernanceDecision,
   shouldAutoStartDownloadedPipeline,
@@ -23,6 +24,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ZD_FIXTURE = readFileSync(join(__dirname, 'fixtures', 'nen-zadavaci-dokumentace.html'), 'utf-8');
+const REAL_ZD_FIXTURE_DIR = join(__dirname, '..', 'src', 'lib', 'monitoring', '__fixtures__');
+const REAL_ZD_PAGE_1 = readFileSync(join(REAL_ZD_FIXTURE_DIR, 'nen-zd-page1.html'), 'utf-8');
+const REAL_ZD_PAGE_2 = readFileSync(join(REAL_ZD_FIXTURE_DIR, 'nen-zd-page2.html'), 'utf-8');
+const REAL_ZD_PAGE_3_EMPTY = readFileSync(join(REAL_ZD_FIXTURE_DIR, 'nen-zd-page3-empty.html'), 'utf-8');
 
 // --- Parser příloh (fixture z reálné NEN podstránky /zadavaci-dokumentace) ---
 
@@ -68,6 +73,62 @@ test('fetchNenAttachments vrací [] při HTTP != 2xx', async () => {
   const notFound: typeof fetch = async () => new Response('nope', { status: 404 });
   const result = await fetchNenAttachments('https://nen.nipez.cz/x/detail-zakazky/N', { fetchFn: notFound });
   assert.deepEqual(result, []);
+});
+
+test('fetchNenAttachments poskládá všech 18 příloh ze stránkovaných NEN fixtures', async () => {
+  const detailUrl = 'https://nen.nipez.cz/verejne-zakazky/detail-zakazky/N006-26-V00027380';
+  const fetchedUrls: string[] = [];
+  const waits: number[] = [];
+  const pages = [REAL_ZD_PAGE_1, REAL_ZD_PAGE_2, REAL_ZD_PAGE_3_EMPTY];
+  const result = await fetchNenAttachments(detailUrl, {
+    fetchFn: (async (input: string | URL | Request) => {
+      fetchedUrls.push(String(input));
+      const page = fetchedUrls.length;
+      return new Response(pages[page - 1] ?? REAL_ZD_PAGE_3_EMPTY, { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { waits.push(ms); },
+  });
+
+  assert.equal(result.length, 18);
+  assert.ok(result.some(({ nazev }) => nazev === 'Příloha 3c Výkaz výměr truhlářská dílna.xlsx'));
+  assert.ok(result.some(({ nazev }) => nazev === 'Zadávací_dokumentace podpis.pdf'));
+  assert.deepEqual(fetchedUrls, [
+    `${detailUrl}/zadavaci-dokumentace`,
+    `${detailUrl}/zadavaci-dokumentace/p:pzd:page=2`,
+    `${detailUrl}/zadavaci-dokumentace/p:pzd:page=3`,
+  ]);
+  assert.deepEqual(waits, [300, 300]);
+});
+
+test('fetchNenAttachments při chybě další stránky vrátí už nasbírané přílohy', async () => {
+  let calls = 0;
+  const result = await fetchNenAttachments(
+    'https://nen.nipez.cz/verejne-zakazky/detail-zakazky/N006-26-V00027380',
+    {
+      fetchFn: (async () => {
+        calls += 1;
+        if (calls === 1) return new Response(REAL_ZD_PAGE_1, { status: 200 });
+        throw new Error('page 2 unavailable');
+      }) as typeof fetch,
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.length, 10);
+});
+
+test('fetchNenAttachments deduplikuje stejnou přílohu napříč stránkami', async () => {
+  const result = await fetchNenAttachments(
+    'https://nen.nipez.cz/verejne-zakazky/detail-zakazky/N006-26-V00027380',
+    {
+      maxPages: 2,
+      fetchFn: (async () => new Response(REAL_ZD_PAGE_1, { status: 200 })) as typeof fetch,
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(result.length, 10);
 });
 
 test('NEN URL allowlist povolí jen přesný HTTPS hostname a defaultní port', () => {
@@ -154,6 +215,70 @@ test('downloadNenAttachments stáhne povolené soubory a přeskočí nepovolené
     assert.deepEqual(files, ['kryci-list.docx', 'vyzva.pdf']);
     assert.equal(await readFile(join(dir, 'vyzva.pdf'), 'utf-8'), 'PDF-DATA');
     assert.ok(result.varovani.some((w) => w.includes('malware.exe')));
+  });
+});
+
+test('downloadNenAttachments posílá Connection: close u NEN souborů', async () => {
+  await withTmpDir(async (dir) => {
+    const connections: Array<string | null> = [];
+    const result = await downloadNenAttachments(
+      [{ nazev: 'dokument.pdf', url: 'https://nen.nipez.cz/file?id=connection-close' }],
+      dir,
+      {
+        fetchFn: (async (_input: string | URL | Request, init?: RequestInit) => {
+          connections.push(new Headers(init?.headers).get('connection'));
+          return new Response(Buffer.from('PDF-DATA'), { status: 200 });
+        }) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.pocet_stazenych, 1);
+    assert.deepEqual(connections, ['close']);
+  });
+});
+
+test('ignorovatelné certifikáty, podpisy a obrázky jsou informační a neblokují pipeline', async () => {
+  await withTmpDir(async (dir) => {
+    let fetchCalls = 0;
+    const attachments: NenAttachment[] = [
+      { nazev: 'zadávací-dokumentace.pdf', url: 'https://nen.nipez.cz/file?id=document' },
+      { nazev: 'šifrovací-certifikát.cer', url: 'https://nen.nipez.cz/file?id=certificate' },
+      { nazev: 'elektronický-podpis.p7s', url: 'https://nen.nipez.cz/file?id=signature' },
+      { nazev: 'náhled.png', url: 'https://nen.nipez.cz/file?id=image' },
+    ];
+    const result = await downloadNenAttachments(attachments, dir, {
+      fetchFn: (async () => {
+        fetchCalls += 1;
+        return new Response(Buffer.from('PDF-DATA'), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    assert.equal(fetchCalls, 1, 'nedokumentové přílohy se nemají ani stahovat');
+    assert.equal(result.pocet_stazenych, 1);
+    assert.equal(result.varovani.length, 3);
+    assert.ok(result.varovani.every((notice) => notice.startsWith(IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX)));
+    assert.equal(shouldAutoStartDownloadedPipeline(attachments.length, result.pocet_stazenych, result.varovani), true);
+  });
+});
+
+test('skutečné selhání vedle dokumentu a ignorované přílohy pipeline zablokuje', async () => {
+  await withTmpDir(async (dir) => {
+    const attachments: NenAttachment[] = [
+      { nazev: 'zadávací-dokumentace.pdf', url: 'https://nen.nipez.cz/file?id=document' },
+      { nazev: 'šifrovací-certifikát.cer', url: 'https://nen.nipez.cz/file?id=certificate' },
+      { nazev: 'chybějící-smlouva.docx', url: 'https://nen.nipez.cz/file?id=failed' },
+    ];
+    const result = await downloadNenAttachments(attachments, dir, {
+      fetchFn: fetchWithBodies({
+        'https://nen.nipez.cz/file?id=document': Buffer.from('PDF-DATA'),
+        'https://nen.nipez.cz/file?id=failed': { status: 503 },
+      }),
+    });
+
+    assert.equal(result.pocet_stazenych, 1);
+    assert.equal(result.varovani.filter((notice) => notice.startsWith(IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX)).length, 1);
+    assert.ok(result.varovani.some((warning) => warning.includes('HTTP 503')));
+    assert.equal(shouldAutoStartDownloadedPipeline(attachments.length, result.pocet_stazenych, result.varovani), false);
   });
 });
 

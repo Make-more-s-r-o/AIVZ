@@ -17,31 +17,45 @@ const TEMPLATE_PATTERNS = [
   'seznam poddodavatel',
 ];
 
-// Soupis files - contain item lists that need parsing, not template filling
-const SOUPIS_PATTERNS = [
-  'soupis vybaveni',
-  'soupis polozek',
-  'soupis dodavek',
-  'cenova nabidka',  // some tenders use "cenová nabídka" as soupis
-];
+// Soupis files - contain item lists that need parsing, not template filling.
+// Keep these phrases in one exported classifier so other filename-based consumers
+// can use exactly the same decision instead of maintaining a second regex.
+export const SOUPIS_PATTERNS = [
+  'soupis',
+  'vykaz vymer',
+  'polozkovy rozpocet',
+  'kalkulace nabidkove ceny',
+  'cenova nabidka',
+] as const;
 
 // Normalize for matching: lowercase, underscores→spaces, strip diacritics
 function normalizeForMatching(str: string): string {
   return str
     .toLowerCase()
-    .replace(/_/g, ' ')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
-function isTemplate(filename: string): boolean {
-  const normalized = normalizeForMatching(filename);
-  return TEMPLATE_PATTERNS.some((pattern) => normalized.includes(pattern));
+export interface DocumentFilenameClassification {
+  isTemplate: boolean;
+  isSoupis: boolean;
 }
 
-function isSoupis(filename: string): boolean {
+/** Classify a document from its filename. Templates always take precedence. */
+export function classifyDocumentFilename(filename: string): DocumentFilenameClassification {
   const normalized = normalizeForMatching(filename);
-  return SOUPIS_PATTERNS.some((pattern) => normalized.includes(pattern));
+  const isTemplate = TEMPLATE_PATTERNS.some((pattern) => normalized.includes(pattern));
+  return {
+    isTemplate,
+    // A cover sheet remains a template even if its filename also mentions a price list.
+    isSoupis: !isTemplate && SOUPIS_PATTERNS.some((pattern) => normalized.includes(pattern)),
+  };
+}
+
+export function isSoupisFilename(filename: string): boolean {
+  return classifyDocumentFilename(filename).isSoupis;
 }
 
 export async function parsePdf(filePath: string): Promise<string> {
@@ -185,8 +199,7 @@ export async function extractDocuments(
         filename: file,
         type: 'pdf',
         text,
-        isTemplate: isTemplate(file),
-        isSoupis: isSoupis(file),
+        ...classifyDocumentFilename(file),
       });
     } else if (ext === '.docx') {
       console.log(`  Parsing DOCX: ${file}`);
@@ -195,8 +208,7 @@ export async function extractDocuments(
         filename: file,
         type: 'docx',
         text,
-        isTemplate: isTemplate(file),
-        isSoupis: isSoupis(file),
+        ...classifyDocumentFilename(file),
       });
     } else if (ext === '.xls' || ext === '.xlsx') {
       console.log(`  Parsing Excel: ${file}`);
@@ -206,8 +218,7 @@ export async function extractDocuments(
           filename: file,
           type: ext.slice(1) as 'xls' | 'xlsx',
           text,
-          isTemplate: isTemplate(file),
-          isSoupis: isSoupis(file),
+          ...classifyDocumentFilename(file),
         });
       } catch (err) {
         console.log(`  Warning: Failed to parse Excel file ${file}: ${err}`);
@@ -232,8 +243,7 @@ export async function extractDocuments(
             filename: docxBase,
             type: 'docx',
             text,
-            isTemplate: isTemplate(docxBase),
-            isSoupis: isSoupis(docxBase),
+            ...classifyDocumentFilename(docxBase),
           });
         }
       }

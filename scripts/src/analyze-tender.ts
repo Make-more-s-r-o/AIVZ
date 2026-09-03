@@ -3,7 +3,7 @@ import { join } from 'path';
 import { config } from 'dotenv';
 import { callClaude } from './lib/ai-client.js';
 import { logCost } from './lib/cost-tracker.js';
-import { TenderAnalysisSchema, type ExtractedText, type Cast } from './lib/types.js';
+import { mergeDetectedCastiDetails, TenderAnalysisSchema, type ExtractedText, type Cast } from './lib/types.js';
 import { ANALYZE_TENDER_SYSTEM, buildAnalyzeUserMessage } from './prompts/analyze-tender.js';
 import { parseSoupis, type SoupisResult } from './parse-soupis.js';
 import { scoreGoNoGo } from './lib/go-no-go.js';
@@ -116,13 +116,14 @@ async function main() {
 
     // Build casti[] from parsed soupis files (only if multiple parts detected)
     const partsWithIds = parsedSoupis.filter(s => s.cast_id);
-    if (partsWithIds.length > 1) {
-      const casti: Cast[] = partsWithIds.map(s => ({
+    if (partsWithIds.length > 1 || analysis.casti.length > 1) {
+      const detectedCasti: Cast[] = partsWithIds.map(s => ({
         id: s.cast_id!,
         nazev: `Část ${s.cast_id}`,
         pocet_polozek: s.polozky.length,
         soupis_filename: s.filename,
       }));
+      const casti = mergeDetectedCastiDetails(analysis.casti, detectedCasti);
       analysis.casti = casti;
       console.log(`  Multi-part tender detected: ${casti.length} parts (${casti.map(c => c.id).join(', ')})`);
     }

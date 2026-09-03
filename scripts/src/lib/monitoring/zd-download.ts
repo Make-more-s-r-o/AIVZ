@@ -33,6 +33,19 @@ export const MAX_ZD_TOTAL_BYTES = 200 * 1024 * 1024; // 200 MB celkem
 /** Povolené přípony — shodné s multer fileFilter / document-parser vstupem. */
 export const ALLOWED_ZD_EXTENSIONS = new Set(['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.zip']);
 
+/**
+ * Přílohy, které nejsou vstupní zadávací dokumentací. Jejich přeskočení je očekávané:
+ * certifikáty/podpisy jen ověřují autenticitu a obrázky parser ZD nezpracovává.
+ * Výčet je záměrně explicitní — nehádej typ z části názvu souboru.
+ */
+export const IGNORABLE_ZD_EXTENSIONS = new Set([
+  '.cer', '.crt', '.der',
+  '.p7s', '.p7m', '.sig',
+  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tif', '.tiff', '.webp', '.svg',
+]);
+
+export const IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX = 'Ignorována příloha';
+
 const ZD_REQUEST_TIMEOUT_MS = 60_000;
 
 const CONTENT_TYPE_EXTENSIONS = new Map<string, string>([
@@ -42,6 +55,21 @@ const CONTENT_TYPE_EXTENSIONS = new Map<string, string>([
   ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
   ['application/vnd.ms-excel', '.xls'],
   ['application/zip', '.zip'],
+]);
+
+const IGNORABLE_CONTENT_TYPES = new Set([
+  'application/pkix-cert',
+  'application/x-x509-ca-cert',
+  'application/x-x509-user-cert',
+  'application/pkcs7-signature',
+  'application/x-pkcs7-signature',
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/bmp',
+  'image/tiff',
+  'image/webp',
+  'image/svg+xml',
 ]);
 
 export interface DownloadZdResult {
@@ -56,13 +84,22 @@ export interface DownloadZdOptions {
   maxTotalBytes?: number;
 }
 
-/** Automatika smí pokračovat jen po úplném a bezchybném stažení celé nalezené sady. */
+/**
+ * Automatika smí pokračovat po zpracování celé nalezené sady bez skutečné chyby.
+ * Explicitně označené nedokumentové přílohy se počítají jako očekávaně vyřízené,
+ * ale alespoň jeden skutečný dokument musí být stažen.
+ */
 export function shouldAutoStartDownloadedPipeline(
   found: number,
   downloaded: number,
   warnings: readonly string[],
 ): boolean {
-  return found > 0 && downloaded === found && warnings.length === 0;
+  const ignored = warnings.filter((warning) => warning.startsWith(IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX)).length;
+  const blockingWarnings = warnings.length - ignored;
+  return found > 0
+    && downloaded > 0
+    && downloaded + ignored === found
+    && blockingWarnings === 0;
 }
 
 export function incompleteDownloadWarning(downloaded: number, found: number): string {
@@ -147,6 +184,17 @@ function sanitizeAttachmentBaseName(rawName: string): string | null {
   if (!name || name === '.' || name === '..') return null;
   if (name.includes('..')) return null;
   return name;
+}
+
+function ignorableExtension(rawName: string): string | null {
+  const name = sanitizeAttachmentBaseName(rawName);
+  if (!name) return null;
+  const extension = extname(name).toLowerCase();
+  return IGNORABLE_ZD_EXTENSIONS.has(extension) ? extension : null;
+}
+
+function ignoredAttachmentNotice(displayName: string, reason: string): string {
+  return `${IGNORED_ZD_ATTACHMENT_NOTICE_PREFIX} „${displayName}“ (${reason}; nejde o zadávací dokumentaci).`;
 }
 
 export function sanitizeAttachmentName(rawName: string): string | null {
@@ -245,12 +293,14 @@ function uniqueName(name: string, used: Set<string>): string {
 interface UrlGuard {
   /** Lidsky čitelný popis zamítnutého zdroje v hlášce (např. „mimo nen.nipez.cz"). */
   odmitnutiDuvod: string;
+  requestHeaders?: Record<string, string>;
   isAllowed(url: string): boolean;
   fetchAllowed(url: string, fetchFn: typeof fetch, init: RequestInit): Promise<Response>;
 }
 
 const NEN_GUARD: UrlGuard = {
   odmitnutiDuvod: 'mimo nen.nipez.cz',
+  requestHeaders: { Connection: 'close' },
   isAllowed: isAllowedNenUrl,
   fetchAllowed: fetchAllowedNenUrl,
 };
@@ -286,12 +336,18 @@ async function downloadAttachments(
   let totalBytes = 0;
 
   for (const attachment of attachments) {
+    const displayName = attachment.nazev || 'bez názvu';
+    const ignoredFromLink = ignorableExtension(attachment.nazev);
+    if (ignoredFromLink) {
+      varovani.push(ignoredAttachmentNotice(displayName, `ignorovatelná přípona ${ignoredFromLink}`));
+      continue;
+    }
+
     if (pocet_stazenych >= maxFiles) {
       varovani.push(`Dosažen limit ${maxFiles} souborů — zbývající přílohy nebyly staženy.`);
       break;
     }
 
-    const displayName = attachment.nazev || 'bez názvu';
     if (!guard.isAllowed(attachment.url)) {
       varovani.push(`Příloha „${displayName}" přeskočena (nepovolená URL ${guard.odmitnutiDuvod}).`);
       continue;
@@ -303,7 +359,7 @@ async function downloadAttachments(
     let safeName: string | null = sanitizeAttachmentName(attachment.nazev);
     try {
       const response = await guard.fetchAllowed(attachment.url, fetchFn, {
-        headers: { 'User-Agent': 'vz-ai-tool/monitoring' },
+        headers: { 'User-Agent': 'vz-ai-tool/monitoring', ...guard.requestHeaders },
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -313,11 +369,25 @@ async function downloadAttachments(
         continue;
       }
 
-      // Odkaz s platnou příponou v názvu (fromLink) jinak projde beze čtení obsahu — ale
-      // profil (typicky TenderArena) občas na „přímý" odkaz vrátí HTML shell (bot ochrana /
-      // vyžaduje session), ne soubor. To nikdy tiše nepřijímat jako úspěch.
       const contentType = responseContentType(response);
-      if (contentType === 'text/html' || contentType === 'text/plain') {
+      const dispositionName = contentDispositionFilename(response.headers.get('content-disposition'));
+      const ignoredFromDisposition = ignorableExtension(dispositionName ?? '');
+      if (ignoredFromDisposition || (contentType && IGNORABLE_CONTENT_TYPES.has(contentType))) {
+        controller.abort();
+        await response.body?.cancel().catch(() => {});
+        const reason = ignoredFromDisposition
+          ? `ignorovatelná přípona ${ignoredFromDisposition}`
+          : `nepodporovaný typ ${contentType}`;
+        varovani.push(ignoredAttachmentNotice(displayName, reason));
+        continue;
+      }
+
+      // Profil (typicky TenderArena) občas na „přímý" odkaz vrátí HTML shell (bot
+      // ochrana / vyžaduje session), ne soubor. Explicitní bezpečný filename v
+      // Content-Disposition je ale silnější signál: textové DOC soubory bývají chybně
+      // označené jako text/plain a Response v testech jej pro string doplní automaticky.
+      const supportedDispositionName = dispositionName ? sanitizeAttachmentName(dispositionName) : null;
+      if ((contentType === 'text/html' || contentType === 'text/plain') && !supportedDispositionName) {
         controller.abort();
         await response.body?.cancel().catch(() => {});
         varovani.push(

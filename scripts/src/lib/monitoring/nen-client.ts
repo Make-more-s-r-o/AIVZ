@@ -97,6 +97,19 @@ function listingPath(query: string, page: number): string {
   return `${NEN_LIST_PATH}${querySegment}${pageSegment}`;
 }
 
+/**
+ * NEN nechá po odbavení odpovědi keep-alive socket nepoužitelný a undici ho recykluje,
+ * takže KAŽDÝ DRUHÝ sekvenční požadavek visí až do timeoutu a skončí abortem. Projevuje
+ * se to i na HTML stránkách, ne jen na `/file` (změřeno 2026-09-03: bez této hlavičky
+ * spadne stránka 2 zadávací dokumentace a stránkování tiše vrátí jen první stránku).
+ * `Connection: close` vynutí nové spojení a problém mizí.
+ */
+const NEN_HTML_HEADERS = {
+  Accept: 'text/html',
+  'User-Agent': 'vz-ai-tool/monitoring',
+  Connection: 'close',
+} as const;
+
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -116,7 +129,7 @@ export async function fetchNenTenders(query = '', options: NenFetchOptions = {})
     const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
     try {
       const response = await fetchFn(`${NEN_BASE_URL}${listingPath(trimmed, page)}`, {
-        headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
+        headers: NEN_HTML_HEADERS,
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -201,6 +214,12 @@ export function zadavaciDokumentaceUrl(detailUrl: string): string {
   return `${trimmed}/zadavaci-dokumentace`;
 }
 
+/** Sestaví ověřený stránkovací segment tabulky zadávací dokumentace. */
+function zadavaciDokumentacePageUrl(detailUrl: string, page: number): string {
+  const baseUrl = zadavaciDokumentaceUrl(detailUrl);
+  return page > 1 ? `${baseUrl}/p:pzd:page=${page}` : baseUrl;
+}
+
 /**
  * Čistý parser HTML podstránky se ZD. Oddělený od fetchování kvůli testu nad fixture.
  * Přílohy jsou kotvy `<a class="file-value__file" href="/file?id=…">Název</a>` v buňce
@@ -230,36 +249,50 @@ export function parseNenAttachments(html: string): NenAttachment[] {
 
 /**
  * Natáhne seznam příloh zadávací dokumentace pro danou zakázku z NEN. `detailUrl` je
- * odkaz na detail zakázky (z feedu `monitoring_zakazky.url`). Graceful: jakákoli chyba
- * (nedostupný zdroj, HTTP != 2xx, timeout) vrací prázdné pole — volající to bere jako
- * „přílohy nejsou k dispozici", ne jako pád. Názvy zde záměrně nefiltrujeme podle
- * přípony: skutečný název a typ může dodat až odpověď `/file` v HTTP hlavičkách.
+ * odkaz na detail zakázky (z feedu `monitoring_zakazky.url`). Stránkuje přes
+ * `p:pzd:page=N`, zastaví se na prázdné stránce nebo na maximu a deduplikuje URL.
+ * Graceful: chyba vrátí přílohy nasbírané z předchozích stránek (na první stránce `[]`).
+ * Názvy zde záměrně nefiltrujeme podle přípony: skutečný název a typ může dodat až
+ * odpověď `/file` v HTTP hlavičkách.
  */
 export async function fetchNenAttachments(
   detailUrl: string,
-  options: { fetchFn?: typeof fetch } = {},
+  options: NenFetchOptions = {},
 ): Promise<NenAttachment[]> {
   const fetchFn = options.fetchFn ?? fetch;
-  const url = zadavaciDokumentaceUrl(detailUrl);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetchAllowedNenUrl(url, fetchFn, {
-      headers: { Accept: 'text/html', 'User-Agent': 'vz-ai-tool/monitoring' },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      console.warn(`NEN ZD vrátil HTTP ${response.status} pro ${url} — přílohy přeskočeny.`);
-      return [];
+  const maxPages = options.maxPages ?? MAX_NEN_PAGES;
+  const sleep = options.sleep ?? delay;
+  const byUrl = new Map<string, NenAttachment>();
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = zadavaciDokumentacePageUrl(detailUrl, page);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetchAllowedNenUrl(url, fetchFn, {
+        headers: NEN_HTML_HEADERS,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        console.warn(`NEN ZD vrátil HTTP ${response.status} pro ${url} — použijí se dostupné přílohy.`);
+        return [...byUrl.values()];
+      }
+      const pageAttachments = parseNenAttachments(await response.text());
+      if (pageAttachments.length === 0) break;
+      for (const attachment of pageAttachments) {
+        if (!byUrl.has(attachment.url)) byUrl.set(attachment.url, attachment);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`NEN ZD není dostupná (${message}) pro ${url} — použijí se dostupné přílohy.`);
+      return [...byUrl.values()];
+    } finally {
+      clearTimeout(timeout);
     }
-    return parseNenAttachments(await response.text());
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`NEN ZD není dostupná (${message}) pro ${url} — přílohy přeskočeny.`);
-    return [];
-  } finally {
-    clearTimeout(timeout);
+    if (page < maxPages) await sleep(NEN_PAGE_DELAY_MS);
   }
+
+  return [...byUrl.values()];
 }
 
 /** Vytáhne text buňky podle `data-title` atributu (case/attr-order tolerantní). */

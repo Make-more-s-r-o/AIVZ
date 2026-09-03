@@ -19,19 +19,29 @@ export interface SoupisResult {
 
 /**
  * Extract part ID (cast_id) from a filename.
- * Detects patterns like: Část A, Část B, Cast_1, Part 1, Los 1
+ * Detects patterns like: Část A, Cast_1, Part 1, Los 1 and Příloha 3a.
  */
 export function extractCastIdFromFilename(filename: string): string | undefined {
-  const normalized = filename.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  // Czech "Část A", "Cast B", "cast_C"
-  const czMatch = normalized.match(/[Cc]ast[\s_]*([A-Za-z0-9]+)/i);
-  if (czMatch) return czMatch[1].toUpperCase();
-  // English "Part 1", "Part A"
-  const enMatch = normalized.match(/Part[\s_]*(\d+|[A-Za-z])\b/i);
-  if (enMatch) return enMatch[1].toUpperCase();
-  // "Los 1", "Los A"
-  const losMatch = normalized.match(/Los[\s_]*(\d+|[A-Za-z])\b/i);
-  if (losMatch) return losMatch[1].toUpperCase();
+  // Only inspect the leaf name: a parent directory named e.g. "Cast A" must not
+  // assign that part to every file below it.
+  const leafName = filename.split(/[\\/]/).pop() || filename;
+  const normalized = leafName.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Require a real boundary before and after the marker. In particular, an
+  // unbounded /Los.../ would read the tail of Czech "zpusobilost" as "Los T".
+  const namedPart = normalized.match(
+    /(?:^|[^A-Za-z0-9])(?:Cast|Part|Los)[\s_.:#-]+(\d+|[A-Za-z])(?=$|[^A-Za-z0-9])/i,
+  );
+  if (namedPart) return namedPart[1].toUpperCase();
+
+  // NEN packages commonly encode the lot as a letter attached to the annex
+  // number: "Příloha 3a ...", "Příloha 3b ...", ... . The letter, rather than
+  // discovery order, is the stable identifier used throughout the pipeline.
+  const annexPart = normalized.match(
+    /(?:^|[^A-Za-z0-9])Priloha[\s_.:#-]+\d+([A-Za-z])(?=$|[^A-Za-z0-9])/i,
+  );
+  if (annexPart) return annexPart[1].toUpperCase();
+
   return undefined;
 }
 
@@ -41,10 +51,10 @@ export function extractCastIdFromFilename(filename: string): string | undefined 
 // (kancelarsky-material: 132 položek → tiše 0 → 1 lumpovaná). Proto jen „Pol. č." varianty.
 const HEADER_PATTERNS = {
   cislo: /^(č[ií]slo|po[řr]\.?\s*[čc]|#|p\.č\.|pol\.?\s*[čc]|č\.)/i,
-  nazev: /^(n[áa]zev|polo[žz]ka|popis\s*polo|ozna[čc]en[ií])/i,
+  nazev: /^(n[áa]zev|polo[žz]ka|za[řr][ií]zen[ií]|popis\s*polo|ozna[čc]en[ií])/i,
   specifikace: /^(popis|specifikace|minim[áa]ln[ií]|tech.*param|pozn[áa]mka)/i,
   mnozstvi: /^(mno[žz]stv[ií]|po[čc]et|ks|mn\.|mj)/i,
-  jednotka: /^(jednotka|mj|m\.j\.|jedn)/i,
+  jednotka: /^(jednotka|m[ěe]rn[áa]\s+jednotka|mj|m\.j\.|jedn)/i,
   kategorie: /^(hashtag|kategorie|typ|druh|skupina)/i,
   umisteni: /^(um[ií]st[ěe]n[ií]|m[ií]stnost|lokace)/i,
 };
