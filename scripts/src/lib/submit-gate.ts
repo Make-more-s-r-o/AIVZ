@@ -13,6 +13,7 @@ import { readFile, readdir, stat } from 'fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'path';
 import type { ProductMatch, PolozkaMatch } from './types.js';
+import { findUnconfirmedPrices } from './price-confirmation.js';
 import { checkPriceSanity } from './price-sanity.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
 import { splitFillProblems, type FillReport } from './fill-report.js';
@@ -219,18 +220,15 @@ export async function computeSubmitGate(
       else warnings.push(detail);
     }
 
-    // Potvrzení člověkem je samostatná tvrdá podmínka NAD sanity kontrolami: sanity
-    // pracuje i s cenou kandidáta (fallback), ale podat lze jen položky s cenou,
-    // kterou operátor explicitně potvrdil. Kryje i scénář „přepnutí kandidáta smazalo
-    // potvrzenou cenu, dokumenty zůstaly stale" — dřívější kontrola (cenova_uprava > 0)
-    // tohle chytala a nesmí se ztratit.
-    const unconfirmed = items.filter((i) => !i.cenova_uprava?.potvrzeno);
-    if (unconfirmed.length > 0) {
-      const preview = unconfirmed.slice(0, 5).map((i) => i.polozka_nazev).join(', ');
-      problems.push(
-        `${unconfirmed.length} z ${items.length} položek nemá potvrzenou cenu` +
-        `${unconfirmed.length > 5 ? ` (mj. ${preview}, …)` : ` (${preview})`}.`,
-      );
+    // Stejný money-gate jako přímé generate: každou vadnou položku vypíše
+    // samostatně včetně konkrétního důvodu (potvrzení, doklad, typ, platnost).
+    const priceGate = findUnconfirmedPrices(
+      { ...pm, polozky_match: items },
+      null,
+      options.now ?? new Date(),
+    );
+    for (const issue of priceGate.issues) {
+      problems.push(`Položka „${issue.name}“: ${issue.reasons.join('; ')}.`);
     }
     const confirmed = items.filter((i) => i.cenova_uprava?.potvrzeno);
     const legacyConfirmed = confirmed.filter((i) => !i.cenova_uprava?.zkontrolovano_at || !i.cenova_uprava?.zkontrolovano_kym);
@@ -244,9 +242,12 @@ export async function computeSubmitGate(
       }
     }
     if (!pm.polozky_match) {
-      if (!pm.cenova_uprava?.potvrzeno) {
-        problems.push('Položka nemá potvrzenou cenu.');
-      } else if (!pm.cenova_uprava.zkontrolovano_at || !pm.cenova_uprava.zkontrolovano_kym) {
+      const singlePriceGate = findUnconfirmedPrices(pm, null, options.now ?? new Date());
+      for (const issue of singlePriceGate.issues) {
+        problems.push(`Položka „${issue.name}“: ${issue.reasons.join('; ')}.`);
+      }
+      if (pm.cenova_uprava?.potvrzeno
+        && (!pm.cenova_uprava.zkontrolovano_at || !pm.cenova_uprava.zkontrolovano_kym)) {
         warnings.push('Legacy potvrzení: položka nemá novou auditní stopu lidské kontroly.');
       }
     }

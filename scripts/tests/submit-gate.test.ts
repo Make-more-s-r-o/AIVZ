@@ -86,6 +86,26 @@ function partItem(polozka_index: number, cast_id: string, potvrzeno: boolean) {
   return { ...item(polozka_index, null, 1000, potvrzeno), cast_id };
 }
 
+function documentedPriceProvenance(polozkaIndex: number, amount: number) {
+  return {
+    verze: 1,
+    typ: 'lidsky_vstup',
+    stav: 'dolozena',
+    url: null,
+    doklad_ref: `test-doklad-${polozkaIndex}`,
+    zjisteno_at: '2026-07-11T10:00:00.000Z',
+    cena_v_okamziku: {
+      bez_dph: amount / 1.21,
+      s_dph: amount,
+      mena: 'CZK',
+      sazba_dph: 21,
+      baleni_ks: 1,
+    },
+    zjistil: { typ: 'uzivatel', id: 'submit-gate-test' },
+    kandidat_fingerprint: `fixture|${polozkaIndex}|0`,
+  };
+}
+
 // Tvar položky odpovídá reálnému PolozkaMatch (viz types.ts): pole, která gate
 // čte, jsou polozka_index, cena_max_s_dph a cenova_uprava (cena + potvrzeno).
 function item(
@@ -98,7 +118,11 @@ function item(
     polozka_nazev: `Položka ${polozka_index + 1}`,
     polozka_index,
     cena_max_s_dph,
-    cenova_uprava: { nabidkova_cena_s_dph, potvrzeno },
+    cenova_uprava: {
+      nabidkova_cena_s_dph,
+      potvrzeno,
+      price_provenance: documentedPriceProvenance(polozka_index, nabidkova_cena_s_dph),
+    },
   };
 }
 
@@ -139,6 +163,7 @@ async function run(): Promise<void> {
         nabidkova_cena_bez_dph: 100,
         nabidkova_cena_s_dph: 121,
         potvrzeno: true,
+        price_provenance: documentedPriceProvenance(0, 121),
       },
       overeni_ceny: {
         stav: 'nalezeno',
@@ -321,6 +346,20 @@ async function run(): Promise<void> {
     const res = await computeSubmitGate(dir);
     assert.equal(res.ready, true);
     assert.ok(res.warnings.some((warning) => warning.includes('Legacy potvrzení')));
+  });
+
+  await test('historické potvrzení bez provenience se načte, ale chybějící doklad blokuje položku', async () => {
+    const legacy = item(0, null, 1000);
+    delete (legacy.cenova_uprava as { price_provenance?: unknown }).price_provenance;
+    const dir = await makeCase({
+      productMatch: { polozky_match: [legacy] },
+      fieldValidation: PASS_TWICE,
+    });
+    const res = await computeSubmitGate(dir);
+    assert.equal(res.ready, false);
+    assert.ok(res.problems.some((problem) => (
+      problem.includes('Položka 1') && problem.includes('chybí doklad')
+    )), res.problems.join(' | '));
   });
 
   await test('smíšené nové a legacy potvrzení bez stopy blokuje', async () => {

@@ -4,6 +4,7 @@ import { candidateFingerprint } from './candidate-fingerprint.js';
 import { calculateItemPrice, roundCurrency } from './price-calculator.js';
 import { selectCheapestRealPriceSource } from './price-reality.js';
 import { refreshProductMatchPriceSanity } from './price-sanity.js';
+import { createVerifiedEshopProvenance } from './price-verifier.js';
 import { PriceOverrideSchema, type PolozkaMatch, type ProductMatch } from './types.js';
 
 export const ApplyMarketPricesBodySchema = z.object({
@@ -104,6 +105,18 @@ export function applyMarketPrices(
       continue;
     }
 
+    const priceProvenance = createVerifiedEshopProvenance(
+      cheapest.source,
+      currentFingerprint,
+      verification.overeno_at,
+      undefined,
+      productMatch.tenderId,
+    );
+    if (!priceProvenance) {
+      skipped.push({ polozka_index: item.polozka_index, duvod: 'bez_zdroje' });
+      continue;
+    }
+
     const purchaseWithoutVat = roundCurrency(cheapest.unitPriceWithoutVat);
     const margin = item.cenova_uprava?.marze_procent ?? defaultMarginPercent;
     const calculated = calculateItemPrice(purchaseWithoutVat, margin);
@@ -117,6 +130,7 @@ export function applyMarketPrices(
         url: cheapest.source.url,
         dodavatel: cheapest.source.dodavatel,
       },
+      price_provenance: priceProvenance,
       poznamka: appendVerifiedSourceNote(item.cenova_uprava?.poznamka, cheapest.source.dodavatel),
     });
     updated += 1;

@@ -13,6 +13,23 @@ import { DEFAULT_GOVERNANCE, governanceSwitchBlock } from '../src/lib/governance
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const documentedPriceProvenance = {
+  verze: 1,
+  typ: 'lidsky_vstup',
+  stav: 'dolozena',
+  url: 'https://supplier.example.cz/produkt/vrtacka-1',
+  zjisteno_at: '2026-07-11T10:00:00.000Z',
+  cena_v_okamziku: {
+    bez_dph: 1_000,
+    s_dph: 1_210,
+    mena: 'CZK',
+    sazba_dph: 21,
+    baleni_ks: 1,
+  },
+  zjistil: { typ: 'uzivatel', id: 'operator-1' },
+  kandidat_fingerprint: 'vrtacka|1',
+};
+
 // Pomocník: položka product-match s volitelnými poli.
 function item(overrides: Record<string, any> = {}) {
   return {
@@ -21,7 +38,11 @@ function item(overrides: Record<string, any> = {}) {
     mnozstvi: 1,
     kandidati: [{ cena_s_dph: 1000 }],
     vybrany_index: 0,
-    cenova_uprava: { nabidkova_cena_s_dph: 1210, potvrzeno: true },
+    cenova_uprava: {
+      nabidkova_cena_s_dph: 1210,
+      potvrzeno: true,
+      price_provenance: documentedPriceProvenance,
+    },
     sanity_flags: [],
     ...overrides,
   };
@@ -317,7 +338,11 @@ test('bulk generate gate: nepotvrzená položka se vyřadí se strojovým důvod
 
 test('bulk generate gate: HARD flag zakázku vyřadí', () => {
   const gate = evaluateBulkCandidate({
-    polozky_match: [item({ cenova_uprava: { nabidkova_cena_s_dph: 0, potvrzeno: true } })],
+    polozky_match: [item({ cenova_uprava: {
+      nabidkova_cena_s_dph: 0,
+      potvrzeno: true,
+      price_provenance: documentedPriceProvenance,
+    } })],
   } as any);
   assert.equal(gate.allowed, false);
   assert.equal(gate.reason, 'hard_flag');
@@ -333,6 +358,7 @@ test('bulk generate gate: potvrzený legacy single-product pod nákupem vyřadí
       nabidkova_cena_s_dph: 1_089,
       nakupni_cena_bez_dph: 1_000,
       potvrzeno: true,
+      price_provenance: documentedPriceProvenance,
     },
   } as any);
   assert.equal(gate.allowed, false);
@@ -343,7 +369,13 @@ test('bulk generate gate: potvrzený legacy single-product pod nákupem vyřadí
 test('regrese PR #53: bulk gate pouze čte a nikdy nezmění potvrzení položek', () => {
   const productMatch = {
     polozky_match: [
-      item({ cenova_uprava: { nabidkova_cena_s_dph: 1210, potvrzeno: true, zkontrolovano_at: '2026-07-11T10:00:00Z', zkontrolovano_kym: 'operator-1' } }),
+      item({ cenova_uprava: {
+        nabidkova_cena_s_dph: 1210,
+        potvrzeno: true,
+        zkontrolovano_at: '2026-07-11T10:00:00Z',
+        zkontrolovano_kym: 'operator-1',
+        price_provenance: documentedPriceProvenance,
+      } }),
       item({ polozka_index: 1, cenova_uprava: { nabidkova_cena_s_dph: 1000, potvrzeno: false } }),
     ],
   };

@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   authoritativeSpecificationForItem,
   candidateFingerprint,
+  createVerifiedEshopProvenance,
   mergePriceVerifications,
   parseWebPriceResponse,
   verifyAllPrices,
@@ -663,6 +664,35 @@ test('H5: parser odmítne HTTP, vyhledávací URL a cizí měnu', () => {
     const parsed = parseWebPriceResponse(JSON.stringify({ nalezeno: true, ...payload }), { specifikace: 'Dostatečně dlouhá závazná specifikace' });
     assert.equal(parsed.stav, 'nenalezeno');
   }
+});
+
+test('kanonický e-shop snapshot vyžaduje produktovou URL a zachová cenu i čas ověření', () => {
+  const source = {
+    url: 'https://shop.cz/produkt/model-x', dodavatel: 'Shop',
+    cena_bez_dph: 100, cena_s_dph: 121, cena_baleni_s_dph: 121, baleni_ks: 1,
+    mena: 'CZK' as const, sazba_dph: 21, dostupnost: 'skladem' as const, poznamka: null,
+  };
+  const provenance = createVerifiedEshopProvenance(
+    source,
+    'Acme|Model X|0',
+    '2026-07-11T10:00:00.000Z',
+    'claude-sonnet-4-6',
+    'T-provenance',
+  );
+
+  assert.ok(provenance);
+  assert.equal(provenance.typ, 'overeny_eshop');
+  assert.equal(provenance.stav, 'dolozena');
+  assert.equal(provenance.url, source.url);
+  assert.equal(provenance.zjisteno_at, '2026-07-11T10:00:00.000Z');
+  assert.deepEqual(provenance.zjistil, {
+    typ: 'web_agent', id: 'price-verifier', model: 'claude-sonnet-4-6', run_id: 'T-provenance',
+  });
+  assert.equal(createVerifiedEshopProvenance(
+    { ...source, url: 'https://shop.cz/hledani?dotaz=model-x' },
+    'Acme|Model X|0',
+    '2026-07-11T10:00:00.000Z',
+  ), null);
 });
 
 test('nedoložený ekvivalent s platnou CZK cenou zůstane jako orientační zdroj', () => {
