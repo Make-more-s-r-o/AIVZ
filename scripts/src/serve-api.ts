@@ -118,7 +118,7 @@ import {
 } from './lib/monitoring/zd-download.js';
 import { fetchNewTenders, fetchHlidacTenderDocuments } from './lib/monitoring/hlidac-client.js';
 import {
-  upsertFeed, listFeed, getFeedItem, setFeedStav,
+  upsertFeed, listFeed, countFeed, getFeedItem, setFeedStav, summarizeFeedCut,
   type MonitoringStav,
 } from './lib/monitoring/monitoring-store.js';
 import { isFeedItemExcluded, scoreFeedItem, serializeFeedItemFeatureVector, slugifyTender } from './lib/monitoring/monitoring-score.js';
@@ -1129,6 +1129,10 @@ app.post('/api/monitoring/sync', requireJwt, async (req, res) => {
       nalezeno: sync.inputs.length,
       novych: inserted,
       zdroje_pouzite: sync.zdroje_pouzite,
+      health: sync.health,
+      requests: sync.requests,
+      queries: sync.queries,
+      limits: sync.limits,
       synchronizovano_at: new Date().toISOString(),
       ...(sync.varovani ? { varovani: sync.varovani } : {}),
     });
@@ -1148,6 +1152,20 @@ function feedCreatedAtMs(item: { created_at?: unknown }): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
+const MONITORING_DATABASE_LIMIT = 1000;
+const MONITORING_RESPONSE_LIMIT = 200;
+const MONITORING_FEED_META_HEADERS = [
+  'X-Monitoring-Database-Total',
+  'X-Monitoring-Database-Returned',
+  'X-Monitoring-Database-Discarded',
+  'X-Monitoring-Database-Truncated',
+  'X-Monitoring-Response-Total',
+  'X-Monitoring-Response-Returned',
+  'X-Monitoring-Response-Discarded',
+  'X-Monitoring-Response-Truncated',
+  'X-Monitoring-Excluded',
+];
+
 // GET /api/monitoring/feed?stav=nova - feed s dopočítaným quick go/no-go skóre.
 app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
   try {
@@ -1165,25 +1183,52 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
     }
     // Stav i kategorie se filtrují v SQL před interním limitem. Vyloučená slova a
     // skóre potřebují širší množinu kandidátů; veřejná odpověď zůstává max. 200 řádků.
-    const items = await listFeed(stav, 1000, {
+    const feedOptions = {
       includeExpired: includeAll,
       category: categoryParam ? categoryParam as (typeof KOMODITA_KATEGORIE_VALUES)[number] : undefined,
-    });
+    };
+    const [items, databaseTotal] = await Promise.all([
+      listFeed(stav, MONITORING_DATABASE_LIMIT, feedOptions),
+      countFeed(stav, feedOptions),
+    ]);
     // Firemní profil pro sektor/rozpočet faktor (bez něj skóre jen vynechá sektor).
     const company = await getCompany('default');
     const monitoringConfig = await getMonitoringConfig();
     const now = new Date();
-    const withScore = items
-      .filter((item) => !isFeedItemExcluded(item, monitoringConfig))
+    const eligibleItems = items.filter((item) => !isFeedItemExcluded(item, monitoringConfig));
+    const rankedItems = eligibleItems
       .map((item) => ({
         ...item,
         go_no_go: scoreFeedItem(item, company ?? undefined, now, monitoringConfig),
       }))
       // Sekundární řazení dle stáří: node-pg vrací timestamptz jako Date (ne string),
       // proto porovnáváme přes čas, ne localeCompare (jinak TypeError → 500 na feedu).
-      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || feedCreatedAtMs(b) - feedCreatedAtMs(a))
-      .slice(0, 200);
-    res.json(withScore);
+      .sort((a, b) => b.go_no_go.score - a.go_no_go.score || feedCreatedAtMs(b) - feedCreatedAtMs(a));
+    const responseItems = rankedItems.slice(0, MONITORING_RESPONSE_LIMIT);
+    const cuts = {
+      database: summarizeFeedCut(databaseTotal, items.length, MONITORING_DATABASE_LIMIT),
+      response: summarizeFeedCut(rankedItems.length, responseItems.length, MONITORING_RESPONSE_LIMIT),
+    };
+    const excluded = items.length - eligibleItems.length;
+
+    // Výchozí tělo zůstává kvůli existujícímu webu pole. Oba dříve tiché řezy jsou
+    // vždy v hlavičkách; ?meta=1 nabídne strojově čitelné aditivní tělo bez změny UI.
+    res.set({
+      'X-Monitoring-Database-Total': String(cuts.database.total),
+      'X-Monitoring-Database-Returned': String(cuts.database.returned),
+      'X-Monitoring-Database-Discarded': String(cuts.database.discarded),
+      'X-Monitoring-Database-Truncated': String(cuts.database.truncated),
+      'X-Monitoring-Response-Total': String(cuts.response.total),
+      'X-Monitoring-Response-Returned': String(cuts.response.returned),
+      'X-Monitoring-Response-Discarded': String(cuts.response.discarded),
+      'X-Monitoring-Response-Truncated': String(cuts.response.truncated),
+      'X-Monitoring-Excluded': String(excluded),
+      'Access-Control-Expose-Headers': MONITORING_FEED_META_HEADERS.join(', '),
+    });
+    if (req.query.meta === '1') {
+      return res.json({ items: responseItems, cuts, excluded });
+    }
+    res.json(responseItems);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -4961,7 +5006,11 @@ startup().then(() => {
         fetchNen: fetchNenTenders, fetchHlidac: fetchNewTenders,
       });
       const inserted = await upsertFeed(sync.inputs);
-      console.log(`[monitoring] auto-sync: nalezeno ${sync.inputs.length}, novych ${inserted}, zdroje ${sync.zdroje_pouzite.join('+')}`);
+      console.log(
+        `[monitoring] auto-sync: nalezeno ${sync.inputs.length}, novych ${inserted}, `
+        + `zdroje ${sync.zdroje_pouzite.join('+')}, requestu ${sync.requests.total}, `
+        + `health ${JSON.stringify(sync.health)}`,
+      );
     } catch (error) {
       console.warn('[monitoring] auto-sync selhal:', error);
     }

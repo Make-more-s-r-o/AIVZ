@@ -81,7 +81,16 @@ export interface NenTenderCandidate {
 
 export interface NenFetchResult {
   items: NenTenderCandidate[];
+  /** Zachovaný compatibility příznak transportu; `health` navíc odliší partial. */
   ok: boolean;
+  health: 'ok' | 'partial' | 'error';
+  /** Počet skutečně zahájených HTTP požadavků. */
+  requests: number;
+  /** Počet úspěšně načtených stran, včetně koncové prázdné strany. */
+  pages: number;
+  /** Další výsledky mohou existovat, ale limit nebo chyba průchod ukončily. */
+  truncated: boolean;
+  warning?: string;
 }
 
 export interface NenFetchOptions {
@@ -123,21 +132,32 @@ export async function fetchNenTenders(query = '', options: NenFetchOptions = {})
   const maxPages = options.maxPages ?? MAX_NEN_PAGES;
   const sleep = options.sleep ?? delay;
   const byId = new Map<string, NenTenderCandidate>();
+  let requests = 0;
+  let pages = 0;
 
   for (let page = 1; page <= maxPages; page += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), NEN_REQUEST_TIMEOUT_MS);
+    requests += 1;
     try {
       const response = await fetchFn(`${NEN_BASE_URL}${listingPath(trimmed, page)}`, {
         headers: NEN_HTML_HEADERS,
         signal: controller.signal,
       });
       if (!response.ok) {
-        console.warn(`NEN vrátil HTTP ${response.status} — monitoring použije dostupná data.`);
-        return { items: [...byId.values()], ok: false };
+        const warning = `NEN vrátil HTTP ${response.status} — monitoring použije dostupná data.`;
+        console.warn(warning);
+        return {
+          items: [...byId.values()], ok: false,
+          health: pages > 0 ? 'partial' : 'error', requests, pages,
+          truncated: pages > 0, warning,
+        };
       }
       const rows = parseNenListing(await response.text());
-      if (rows.length === 0) break;
+      pages += 1;
+      if (rows.length === 0) {
+        return { items: [...byId.values()], ok: true, health: 'ok', requests, pages, truncated: false };
+      }
       for (const candidate of rows) {
         if (candidate.stav === OPEN_STATE && !byId.has(candidate.zdroj_id)) {
           byId.set(candidate.zdroj_id, candidate);
@@ -145,15 +165,25 @@ export async function fetchNenTenders(query = '', options: NenFetchOptions = {})
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`NEN není dostupný (${message}) — monitoring použije dostupná data.`);
-      return { items: [...byId.values()], ok: false };
+      const warning = `NEN není dostupný (${message}) — monitoring použije dostupná data.`;
+      console.warn(warning);
+      return {
+        items: [...byId.values()], ok: false,
+        health: pages > 0 ? 'partial' : 'error', requests, pages,
+        truncated: pages > 0, warning,
+      };
     } finally {
       clearTimeout(timeout);
     }
     if (page < maxPages) await sleep(NEN_PAGE_DELAY_MS);
   }
 
-  return { items: [...byId.values()], ok: true };
+  const warning = `NEN dosáhl limitu ${maxPages} stran; výsledky mohou být neúplné.`;
+  console.warn(warning);
+  return {
+    items: [...byId.values()], ok: true, health: 'partial', requests, pages,
+    truncated: true, warning,
+  };
 }
 
 /**

@@ -16,6 +16,13 @@ import { computeBidEconomics, scoreBid, serializeBidFeatureVector } from './lib/
 import { priceBandForSubject, type PriceBand } from './lib/winprice-query.js';
 import { closePool } from './lib/db.js';
 import { persistScoreSnapshotBestEffort } from './lib/score-snapshot-store.js';
+import {
+  buildDomainClassificationPrompt,
+  categorizeTender,
+  domainMatches,
+  normalizeDomainCategories,
+  resolveDomainCategory,
+} from './lib/monitoring/domain-registry.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -158,19 +165,13 @@ function categorizeItem(item: { nazev: string; specifikace: string }): ItemCateg
 
 // ---- Haiku sector pre-classification ----
 
-const HAIKU_SECTOR_SYSTEM = `Klasifikuj každou IT/AV položku do sektoru. Odpověz POUZE JSON polem.
-Sektory: IT, AV, kancelarsky, nabytek, ostatni
-- IT: počítače, servery, monitory, tiskárny, síťové prvky, tablety, software, UPS, kamery IP, 3D tiskárny
-- AV: projektory, plátna, interaktivní tabule, audio systémy, videokonference
-- kancelarsky: papír, tonery, cartridge, kancelářské potřeby
-- nabytek: stoly, židle, skříně, regály, recepce
-- ostatni: vše ostatní`;
+const HAIKU_SECTOR_SYSTEM = buildDomainClassificationPrompt();
 
 async function haikuClassifyItems(
   items: Array<{ nazev: string; index: number }>,
   tenderId: string,
 ): Promise<Map<number, string>> {
-  const prompt = `Klasifikuj tyto položky:\n${items.map(i => `${i.index}. ${i.nazev}`).join('\n')}\n\nOdpověz JSON: [{"index": 0, "sektor": "IT"}, ...]`;
+  const prompt = `Klasifikuj tyto položky:\n${items.map(i => `${i.index}. ${i.nazev}`).join('\n')}\n\nOdpověz JSON: [{"index": 0, "sektor": "it_av"}, ...]`;
 
   // ~10 tokens per item in response: {"index": N, "sektor": "xxx"},
   const haikuMaxTokens = Math.min(Math.max(items.length * 12, 1024), 8192);
@@ -185,7 +186,9 @@ async function haikuClassifyItems(
   const sectorMap = new Map<number, string>();
   try {
     const parsed: Array<{ index: number; sektor: string }> = JSON.parse(extractJsonBlock(result.content));
-    for (const entry of parsed) sectorMap.set(entry.index, entry.sektor);
+    for (const entry of parsed) {
+      sectorMap.set(entry.index, resolveDomainCategory(entry.sektor) ?? 'ostatni');
+    }
   } catch (err) {
     console.log(`  Haiku classification parse failed: ${err} — using all items`);
   }
@@ -322,7 +325,6 @@ async function main() {
     ?? await getCompany('default')
     ?? JSON.parse(await readFile(join(ROOT, 'config', 'company.json'), 'utf-8'));
   const companyObory: string[] = company.obory || [];
-  const companyKeywordFilters: Record<string, string[]> = company.keyword_filters || {};
 
   const requirements = analysis.technicke_pozadavky;
 
@@ -395,13 +397,13 @@ async function main() {
     const sectorMap = await haikuClassifyItems(toClassify, tenderId);
 
     if (sectorMap.size > 0) {
-      // Build accepted sector set from company obory (case-insensitive)
-      const acceptedSectors = new Set(companyObory.map(s => s.toLowerCase()));
+      // Legacy názvy (IT, AV, kancelarsky) kanonizuje společný registr.
+      const acceptedSectors = normalizeDomainCategories(companyObory);
 
       const skipped: string[] = [];
       const kept = matchableItems.filter((item, idx) => {
-        const sector = (sectorMap.get(idx) || 'ostatni').toLowerCase();
-        const accepted = acceptedSectors.has(sector) || sector === 'it'; // always accept IT
+        const sector = resolveDomainCategory(sectorMap.get(idx)) ?? 'ostatni';
+        const accepted = domainMatches(sector, acceptedSectors) || sector === 'it_av'; // zachovaná preference IT
         if (!accepted) skipped.push(`${item.nazev} [${sector}]`);
         return accepted;
       });
@@ -421,13 +423,13 @@ async function main() {
       }
     }
   } else if (matchableItems.length > 0 && companyObory.length > 0) {
-    // For smaller tenders, do local keyword-based filtering (no AI cost)
-    const acceptedKeywords = companyObory.flatMap(obor => companyKeywordFilters[obor] || []);
-    if (acceptedKeywords.length > 0) {
+    // Menší zakázky klasifikuje stejný registr lokálně, bez dalšího seznamu keyword_filters.
+    const acceptedSectors = normalizeDomainCategories(companyObory);
+    if (acceptedSectors.length > 0) {
       const skipped: string[] = [];
       const filtered = matchableItems.filter(item => {
-        const name = item.nazev.toLowerCase();
-        const isMatch = acceptedKeywords.some(kw => name.includes(kw.toLowerCase()));
+        const itemSector = categorizeTender(`${item.nazev} ${item.specifikace}`);
+        const isMatch = domainMatches(itemSector, acceptedSectors);
         if (!isMatch) skipped.push(item.nazev);
         return isMatch;
       });

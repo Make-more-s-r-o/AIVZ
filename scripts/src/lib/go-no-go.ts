@@ -9,6 +9,11 @@ import {
   type GoNoGoWeightName,
   type GoNoGoWeights,
 } from './go-no-go-config.js';
+import {
+  categorizeTender,
+  domainMatches,
+  normalizeDomainCategories,
+} from './monitoring/domain-registry.js';
 
 export const GO_SCORE_THRESHOLD = 75;
 export const CONSIDER_SCORE_THRESHOLD = 45;
@@ -36,7 +41,9 @@ export const MISSING_BUDGET_REASON = 'Zadavatel neuvedl předpokládanou hodnotu
 
 type AnalysisWithScoringContext = TenderAnalysis
   & Partial<Pick<ExtractedText, 'extractedAt'>>
-  & Partial<Pick<CompanyData, 'obory' | 'keyword_filters'>>;
+  // keyword_filters zůstává jen ve vstupním compatibility tvaru; skóre jej už nečte.
+  & Partial<Pick<CompanyData, 'obory' | 'keyword_filters'>>
+  & { cpv?: readonly string[] };
 
 export interface GoNoGoResult {
   score: number;
@@ -80,8 +87,8 @@ interface FactorObservation {
 
 /**
  * Čisté informativní skóre: pracuje jen s předanými daty a nemění ceny ani stav pipeline.
- * Volitelný kontext `extractedAt`, `obory` a `keyword_filters` používá reálná pole z extrakce
- * a firemního profilu; volající je může připojit k analýze bez jejich ukládání do analysis.json.
+ * Volitelný kontext `extractedAt` a `obory` používá reálná pole z extrakce
+ * a firemního profilu; obory se vyhodnocují přes společný verzovaný registr.
  */
 export function scoreGoNoGo(
   analysis: AnalysisWithScoringContext,
@@ -161,7 +168,11 @@ function collectGoNoGoFactors(
   return [
     {
       name: GO_NO_GO_FACTOR_NAMES[0],
-      raw: { obory: analysis.obory ?? null, keyword_filters: analysis.keyword_filters ?? null, predmet: analysis.zakazka.predmet },
+      raw: {
+        obory: analysis.obory ?? null,
+        predmet: analysis.zakazka.predmet,
+        cpv: analysis.cpv ?? null,
+      },
       factor: scoreSectorMatch(analysis),
     },
     {
@@ -219,23 +230,20 @@ function factorWeight(name: string, goNoGoWeights: GoNoGoWeights): number {
 }
 
 function scoreSectorMatch(analysis: AnalysisWithScoringContext): Factor | null {
-  const companySectors = analysis.obory?.map(normalize).filter(Boolean) ?? [];
-  const filters = analysis.keyword_filters;
-  if (companySectors.length === 0 || !filters || Object.keys(filters).length === 0) return null;
+  const companySectors = normalizeDomainCategories(analysis.obory);
+  if (companySectors.length === 0) return null;
 
-  const tenderText = normalize([
+  const tenderText = [
     analysis.zakazka.predmet,
     analysis.zakazka.typ_zakazky,
     ...analysis.polozky.map((item) => `${item.nazev} ${item.specifikace}`),
-  ].join(' '));
-  const matchingSectors = Object.entries(filters)
-    .filter(([, keywords]) => keywords.some((keyword) => tenderText.includes(normalize(keyword))))
-    .map(([sector]) => normalize(sector));
+  ].join(' ');
+  const tenderSector = categorizeTender(tenderText, analysis.cpv);
 
-  if (matchingSectors.some((sector) => companySectors.includes(sector))) {
+  if (domainMatches(tenderSector, companySectors)) {
     return { value: 1, weight: SECTOR_WEIGHT, reason: 'Předmět zakázky odpovídá oborům firmy.' };
   }
-  if (matchingSectors.length > 0) {
+  if (tenderSector !== 'ostatni') {
     return { value: 0, weight: SECTOR_WEIGHT, reason: 'Předmět zakázky je mimo uvedené obory firmy.' };
   }
   return { value: 0.5, weight: SECTOR_WEIGHT, reason: 'Sektor zakázky nelze z dostupných údajů určit jednoznačně.' };
@@ -690,10 +698,6 @@ function scoreBidWinPrice(ourTotal: number, winBand?: PriceBand): Factor | null 
 
 function formatCzk(value: number): string {
   return `${Math.round(value).toLocaleString('cs-CZ')} Kč`;
-}
-
-function normalize(value: string): string {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
 }
 
 function clamp(value: number, min: number, max: number): number {

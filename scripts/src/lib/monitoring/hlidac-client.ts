@@ -1,5 +1,24 @@
 const HLIDAC_SEARCH_URL = 'https://api.hlidacstatu.cz/api/v2/verejnezakazky/hledat';
 const HLIDAC_REQUEST_TIMEOUT_MS = 15_000;
+export const DEFAULT_MAX_HLIDAC_PAGES = 5;
+export const DEFAULT_HLIDAC_PAGE_DELAY_MS = 300;
+
+function positiveInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/** Maximální počet stran jednoho přímého hledání; sync může předat nižší limit. */
+export const MAX_HLIDAC_PAGES = positiveInteger(process.env.HLIDAC_MAX_PAGES, DEFAULT_MAX_HLIDAC_PAGES);
+export const HLIDAC_PAGE_DELAY_MS = nonNegativeInteger(
+  process.env.HLIDAC_PAGE_DELAY_MS,
+  DEFAULT_HLIDAC_PAGE_DELAY_MS,
+);
 
 export interface HlidacTenderDocument {
   nazev: string;
@@ -18,45 +37,209 @@ export interface HlidacTenderCandidate {
   cpv: unknown[];
 }
 
-/** Načte kandidáty z Hlídače státu; při chybě vždy bezpečně degraduje na prázdné pole. */
-export async function fetchNewTenders(query: string): Promise<HlidacTenderCandidate[]> {
-  const token = process.env.HLIDAC_TOKEN;
+/** Stav zdroje musí odlišit skutečnou nulu od výpadku nebo chybějící autentizace. */
+export type SourceHealth = 'ok' | 'partial' | 'error' | 'missing_token';
+
+export interface HlidacFetchResult {
+  items: HlidacTenderCandidate[];
+  health: SourceHealth;
+  /** Počet skutečně zahájených HTTP požadavků. */
+  requests: number;
+  /** Počet úspěšně načtených a strukturálně platných stran. */
+  pages: number;
+  /** Celkový počet výsledků oznámený zdrojem, pokud jej odpověď obsahovala. */
+  total: number | null;
+  /** true = další výsledky mohou existovat, ale limit nebo chyba průchod ukončily. */
+  truncated: boolean;
+  warning?: string;
+}
+
+export interface HlidacFetchOptions {
+  fetchFn?: typeof fetch;
+  maxPages?: number;
+  sleep?: (ms: number) => Promise<void>;
+  pageDelayMs?: number;
+  /** `null` v testu výslovně simuluje chybějící token; `undefined` čte prostředí. */
+  token?: string | null;
+}
+
+interface HlidacSearchPage {
+  results: unknown[];
+  total: number | null;
+  pageSize: number | null;
+  hasMore: boolean | null;
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Načte kandidáty z Hlídače státu po stránkách. Výsledek je vždy strukturovaný:
+ * legitimní prázdná stránka je `ok`, chyba první strany `error`, chyba po dřívějším
+ * úspěchu a dosažený limit bez důkazu o konci jsou `partial`.
+ */
+export async function fetchNewTenders(
+  query: string,
+  options: HlidacFetchOptions = {},
+): Promise<HlidacFetchResult> {
+  const token = options.token === undefined ? process.env.HLIDAC_TOKEN : options.token;
   if (!token) {
-    console.warn('HLIDAC_TOKEN není nastaven — monitoring vrací prázdný seznam.');
-    return [];
+    const warning = 'HLIDAC_TOKEN není nastaven.';
+    console.warn(warning);
+    return {
+      items: [], health: 'missing_token', requests: 0, pages: 0,
+      total: null, truncated: false, warning,
+    };
   }
 
-  const url = new URL(HLIDAC_SEARCH_URL);
-  url.searchParams.set('dotaz', query.trim());
-  url.searchParams.set('strana', '1');
-  url.searchParams.set('razeni', '1');
+  const fetchFn = options.fetchFn ?? fetch;
+  const maxPages = positiveInteger(options.maxPages, MAX_HLIDAC_PAGES);
+  const sleep = options.sleep ?? delay;
+  const pageDelayMs = nonNegativeInteger(options.pageDelayMs, HLIDAC_PAGE_DELAY_MS);
+  const byId = new Map<string, HlidacTenderCandidate>();
+  let requests = 0;
+  let pages = 0;
+  let total: number | null = null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), HLIDAC_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Token ${token}` },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      console.warn(`Hlídač státu vrátil HTTP ${response.status} — monitoring vrací prázdný seznam.`);
-      return [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = new URL(HLIDAC_SEARCH_URL);
+    url.searchParams.set('dotaz', query.trim());
+    url.searchParams.set('strana', String(page));
+    url.searchParams.set('razeni', '1');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HLIDAC_REQUEST_TIMEOUT_MS);
+    requests += 1;
+    try {
+      const response = await fetchFn(url, {
+        headers: { Authorization: `Token ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        return failedSearchResult(
+          byId, requests, pages, total,
+          `Hlídač státu vrátil HTTP ${response.status}.`,
+        );
+      }
+
+      const parsed = parseSearchPage(await response.json());
+      if (!parsed) {
+        return failedSearchResult(
+          byId, requests, pages, total,
+          'Hlídač státu vrátil odpověď bez pole Results.',
+        );
+      }
+      pages += 1;
+      if (parsed.total !== null) total = parsed.total;
+      for (const rawCandidate of parsed.results) {
+        const candidate = toCandidate(rawCandidate);
+        if (candidate && !byId.has(candidate.id)) byId.set(candidate.id, candidate);
+      }
+
+      // Explicitní prázdná stránka je platný konec, včetně nuly na první straně.
+      if (parsed.results.length === 0
+        || parsed.hasMore === false
+        || (total !== null && byId.size >= total)
+        || (parsed.pageSize !== null && parsed.results.length < parsed.pageSize)) {
+        return successfulSearchResult(byId, requests, pages, total);
+      }
+
+      if (page === maxPages) {
+        const warning = `Hlídač státu dosáhl limitu ${maxPages} stran; výsledky mohou být neúplné.`;
+        console.warn(warning);
+        return {
+          items: [...byId.values()], health: 'partial', requests, pages,
+          total, truncated: true, warning,
+        };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return failedSearchResult(
+        byId, requests, pages, total,
+        `Hlídač státu není dostupný (${message}).`,
+      );
+    } finally {
+      clearTimeout(timeout);
     }
 
-    const body = await response.json() as Record<string, unknown>;
-    const rawResults = Array.isArray(body.Results)
-      ? body.Results
-      : Array.isArray(body.results)
-        ? body.results
-        : [];
-    return rawResults.map(toCandidate).filter((candidate): candidate is HlidacTenderCandidate => candidate !== null);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`Hlídač státu není dostupný (${message}) — monitoring vrací prázdný seznam.`);
-    return [];
-  } finally {
-    clearTimeout(timeout);
+    await sleep(pageDelayMs);
   }
+
+  // Smyčka vždy skončí návratem na poslední povolené straně.
+  return successfulSearchResult(byId, requests, pages, total);
+}
+
+function successfulSearchResult(
+  byId: Map<string, HlidacTenderCandidate>,
+  requests: number,
+  pages: number,
+  total: number | null,
+): HlidacFetchResult {
+  return { items: [...byId.values()], health: 'ok', requests, pages, total, truncated: false };
+}
+
+function failedSearchResult(
+  byId: Map<string, HlidacTenderCandidate>,
+  requests: number,
+  pages: number,
+  total: number | null,
+  warning: string,
+): HlidacFetchResult {
+  console.warn(warning);
+  return {
+    items: [...byId.values()],
+    health: pages > 0 ? 'partial' : 'error',
+    requests,
+    pages,
+    total,
+    truncated: pages > 0,
+    warning,
+  };
+}
+
+function parseSearchPage(value: unknown): HlidacSearchPage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const results = Array.isArray(body.Results)
+    ? body.Results
+    : Array.isArray(body.results)
+      ? body.results
+      : null;
+  if (!results) return null;
+  return {
+    results,
+    total: firstNonNegativeInteger(body, [
+      'Total', 'total', 'TotalCount', 'totalCount', 'Celkem', 'celkem', 'TotalResults', 'totalResults',
+    ]),
+    pageSize: firstPositiveInteger(body, ['PageSize', 'pageSize', 'PerPage', 'perPage', 'VelikostStranky']),
+    hasMore: firstBoolean(body, ['HasMore', 'hasMore', 'MaDalsi', 'maDalsi']),
+  };
+}
+
+function firstNonNegativeInteger(body: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const raw = body[key];
+    if (typeof raw !== 'number' && (typeof raw !== 'string' || raw.trim() === '')) continue;
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+function firstPositiveInteger(body: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const raw = body[key];
+    if (typeof raw !== 'number' && (typeof raw !== 'string' || raw.trim() === '')) continue;
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function firstBoolean(body: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    if (typeof body[key] === 'boolean') return body[key];
+  }
+  return null;
 }
 
 function toCandidate(value: unknown): HlidacTenderCandidate | null {
