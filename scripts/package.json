@@ -13,6 +13,7 @@
     "full-flow": "tsx src/full-flow.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
+    "mereni-provenience": "node --import tsx src/tools/mereni-provenience.ts",
     "eval": "node --import tsx src/eval-match.ts",
     "build-golden-set": "node --import tsx src/build-golden-set.ts",
     "watch-outcomes": "node --import tsx src/watch-outcomes.ts"
