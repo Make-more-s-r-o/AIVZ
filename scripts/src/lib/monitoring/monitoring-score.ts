@@ -15,12 +15,13 @@ import {
   type ScoreFeatureVector,
 } from '../go-no-go.js';
 import type { TenderAnalysis } from '../types.js';
-import { categorizeCommodity, type KomoditaKategorie } from '../winprice-store.js';
+import { categorizeTender, type DomainCategory } from './domain-registry.js';
 import type { MonitoringConfig } from './monitoring-config.js';
 
 export interface FeedScoreInput {
   nazev: string;
-  kategorie?: KomoditaKategorie;
+  kategorie?: DomainCategory;
+  cpv?: readonly string[];
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null; // 'YYYY-MM-DD' | null
@@ -55,7 +56,7 @@ export function scoreFeedItem(
   let score = base.score;
   const duvody = [...base.duvody];
   if (monitoring.kategorie_zajmu.length > 0) {
-    const category = item.kategorie ?? categorizeCommodity(item.nazev);
+    const category = resolveFeedCategory(item);
     const matches = monitoring.kategorie_zajmu.includes(category);
     // Kategorie je pro vstupní relevanci rozhodující: shoda tvoří 60 % výsledku.
     score = Math.round(base.score * 0.4 + (matches ? 60 : 0));
@@ -109,6 +110,8 @@ function buildFeedAnalysis(item: FeedScoreInput, company: CompanyScoringProfile 
     extractedAt: now.toISOString(),
     obory: company?.obory,
     keyword_filters: company?.keyword_filters,
+    // Go/no-go sektor tak používá stejný CPV-first signál i bez filtru kategorie_zajmu.
+    cpv: item.cpv,
   };
 }
 
@@ -123,7 +126,7 @@ export function serializeFeedItemFeatureVector(
   const vector = serializeGoNoGoFeatureVector(analysis);
   const result = scoreFeedItem(item, company, now, monitoring);
   if (monitoring) {
-    const category = item.kategorie ?? categorizeCommodity(item.nazev);
+    const category = resolveFeedCategory(item);
     const categoryActive = monitoring.kategorie_zajmu.length > 0;
     const categoryMatches = categoryActive && monitoring.kategorie_zajmu.includes(category);
     const belowMinimum = item.predpokladana_hodnota != null && monitoring.min_hodnota != null
@@ -133,7 +136,11 @@ export function serializeFeedItemFeatureVector(
     vector.faktory.push(
       {
         nazev: 'monitoring_category',
-        surova_hodnota: { kategorie: category, kategorie_zajmu: monitoring.kategorie_zajmu },
+        surova_hodnota: {
+          kategorie: category,
+          cpv: item.cpv ?? [],
+          kategorie_zajmu: monitoring.kategorie_zajmu,
+        },
         normalizovana_hodnota: categoryActive ? (categoryMatches ? 1 : 0) : null,
         vaha: categoryActive ? 60 : 0, prispevek: 0,
         duvod: categoryActive ? 'Kategorie upravuje monitoringové skóre.' : null,
@@ -157,6 +164,12 @@ export function serializeFeedItemFeatureVector(
   vector.skore = result.score;
   vector.doporuceni = result.doporuceni;
   return vector;
+}
+
+/** CPV je silnější signál než případná starší kategorie uložená pouze podle názvu. */
+function resolveFeedCategory(item: FeedScoreInput): DomainCategory {
+  if (item.cpv && item.cpv.length > 0) return categorizeTender(item.nazev, item.cpv);
+  return item.kategorie ?? categorizeTender(item.nazev);
 }
 
 /** Tvrdý filtr názvu; bez diakritiky a bez ohledu na velikost písmen. */

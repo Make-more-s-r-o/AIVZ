@@ -1,6 +1,7 @@
 /**
  * Monitoring store — feed nových veřejných zakázek ze zdroje (NEN / Hlídač státu)
- * v tabulce monitoring_zakazky (migrace 014). Modelováno dle crm-store.ts nad db.ts.
+ * v tabulce monitoring_zakazky (migrace 014, kategorie 017, CPV 024).
+ * Modelováno dle crm-store.ts nad db.ts.
  *
  * Graceful degradace: bez DB (getPool() === null) čtení vrací prázdno,
  * zápisy vyhazují 'db_unavailable' (endpoint to přeloží na 503).
@@ -10,8 +11,8 @@
  */
 import { query, queryOne, getPool } from '../db.js';
 import {
-  categorizeCommodity, KOMODITA_KATEGORIE_VALUES, type KomoditaKategorie,
-} from '../winprice-store.js';
+  categorizeTender, DOMAIN_CATEGORY_VALUES, normalizeCpvCodes, type DomainCategory,
+} from './domain-registry.js';
 import type { NenTenderCandidate } from './nen-client.js';
 import type { HlidacTenderCandidate } from './hlidac-client.js';
 
@@ -22,7 +23,8 @@ export interface FeedUpsertInput {
   zdroj: string;
   zdroj_id: string;
   nazev: string;
-  kategorie: KomoditaKategorie;
+  kategorie: DomainCategory;
+  cpv: string[];
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null; // 'YYYY-MM-DD' | null
@@ -35,7 +37,8 @@ export interface FeedItem {
   zdroj: string;
   zdroj_id: string;
   nazev: string;
-  kategorie: KomoditaKategorie;
+  kategorie: DomainCategory;
+  cpv: string[];
   zadavatel: string | null;
   predpokladana_hodnota: number | null;
   lhuta_nabidek: string | null; // 'YYYY-MM-DD' | null
@@ -53,44 +56,50 @@ function dbReady(): boolean {
 // lhuta_nabidek přes to_char, jinak node-pg parsuje DATE na JS Date v lokální půlnoci
 // a JSON.stringify ji posune o TZ offset → off-by-one (viz TASK_COLS v crm-store).
 const FEED_COLS = `id::text, zdroj, zdroj_id, nazev, zadavatel,
-  kategorie,
+  kategorie, cpv,
   predpokladana_hodnota::float8 AS predpokladana_hodnota,
   to_char(lhuta_nabidek, 'YYYY-MM-DD') AS lhuta_nabidek,
   url, raw, stav, tender_id, created_at`;
 
-type FeedDbRow = Omit<FeedItem, 'predpokladana_hodnota' | 'kategorie'> & {
+type FeedDbRow = Omit<FeedItem, 'predpokladana_hodnota' | 'kategorie' | 'cpv'> & {
   predpokladana_hodnota: number | string | null;
   kategorie?: string | null;
+  cpv?: unknown;
 };
 
 /**
  * Dodatečná ochrana pro mocky/starší ovladače, které NUMERIC vracejí jako string.
- * Starému řádku bez kategorie ji dopočítá v paměti; čtecí funkce ji následně líně uloží.
+ * Starému řádku kategorii dopočítá v paměti; CPV přitom opraví i dřívější titulkový odhad.
  */
 export function normalizeFeedRow(row: FeedDbRow): FeedItem {
   const value = row.predpokladana_hodnota;
   const numeric = value == null ? null : Number(value);
+  const cpv = normalizeCpvCodes(Array.isArray(row.cpv) ? row.cpv : []);
   return {
     ...row,
-    kategorie: isCommodityCategory(row.kategorie)
-      ? row.kategorie
-      : categorizeCommodity(row.nazev),
+    kategorie: cpv.length > 0
+      ? categorizeTender(row.nazev, cpv)
+      : isDomainCategory(row.kategorie)
+        ? row.kategorie
+        : categorizeTender(row.nazev),
+    cpv,
     predpokladana_hodnota: numeric == null || Number.isFinite(numeric) ? numeric : null,
   };
 }
 
-function isCommodityCategory(value: unknown): value is KomoditaKategorie {
+function isDomainCategory(value: unknown): value is DomainCategory {
   return typeof value === 'string'
-    && KOMODITA_KATEGORIE_VALUES.includes(value as KomoditaKategorie);
+    && DOMAIN_CATEGORY_VALUES.includes(value as DomainCategory);
 }
 
-/** Líně doplní kategorii starších řádků; chyba backfillu nesmí znepřístupnit feed. */
-async function backfillMissingCategories(rows: FeedDbRow[], items: FeedItem[]): Promise<void> {
+/** Líně doplní nebo CPV-first opraví kategorii; chyba backfillu nesmí znepřístupnit feed. */
+async function backfillCategories(rows: FeedDbRow[], items: FeedItem[]): Promise<void> {
   await Promise.all(rows.map(async (row, index) => {
-    if (isCommodityCategory(row.kategorie)) return;
+    if (row.kategorie === items[index].kategorie) return;
     try {
       await query(
-        `UPDATE monitoring_zakazky SET kategorie = $2 WHERE id = $1::bigint AND kategorie IS NULL`,
+        `UPDATE monitoring_zakazky SET kategorie = $2
+         WHERE id = $1::bigint AND kategorie IS DISTINCT FROM $2`,
         [row.id, items[index].kategorie],
       );
     } catch {
@@ -113,11 +122,12 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
   for (const item of items) {
     const row = await queryOne<{ inserted: boolean }>(
       `INSERT INTO monitoring_zakazky
-         (zdroj, zdroj_id, nazev, kategorie, zadavatel, predpokladana_hodnota, lhuta_nabidek, url, raw)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (zdroj, zdroj_id, nazev, kategorie, cpv, zadavatel, predpokladana_hodnota, lhuta_nabidek, url, raw)
+       VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10)
        ON CONFLICT (zdroj, zdroj_id) DO UPDATE SET
          nazev = EXCLUDED.nazev,
          kategorie = EXCLUDED.kategorie,
+         cpv = EXCLUDED.cpv,
          zadavatel = EXCLUDED.zadavatel,
          predpokladana_hodnota = EXCLUDED.predpokladana_hodnota,
          lhuta_nabidek = EXCLUDED.lhuta_nabidek,
@@ -129,6 +139,7 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
         item.zdroj_id,
         item.nazev,
         item.kategorie,
+        item.cpv,
         item.zadavatel,
         item.predpokladana_hodnota,
         item.lhuta_nabidek,
@@ -149,14 +160,14 @@ export async function upsertFeed(items: FeedUpsertInput[]): Promise<number> {
 export async function listFeed(
   stav?: MonitoringStav,
   limit = 200,
-  options: { includeExpired?: boolean; category?: KomoditaKategorie } = {},
+  options: FeedListOptions = {},
 ): Promise<FeedItem[]> {
   if (!dbReady()) return [];
   try {
     const built = buildListFeedQuery(stav, limit, options);
     const r = await query<FeedDbRow>(built.sql, built.params);
     const items = r.rows.map(normalizeFeedRow);
-    await backfillMissingCategories(r.rows, items);
+    await backfillCategories(r.rows, items);
     return items;
   } catch {
     return [];
@@ -167,22 +178,9 @@ export async function listFeed(
 export function buildListFeedQuery(
   stav?: MonitoringStav,
   limit = 200,
-  options: { includeExpired?: boolean; category?: KomoditaKategorie } = {},
+  options: FeedListOptions = {},
 ): { sql: string; params: unknown[] } {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    if (stav) {
-      params.push(stav);
-      conditions.push(`stav = $${params.length}`);
-    }
-    if (options.category) {
-      params.push(options.category);
-      conditions.push(`kategorie = $${params.length}`);
-    }
-    if (!options.includeExpired) {
-      conditions.push('(lhuta_nabidek IS NULL OR lhuta_nabidek >= CURRENT_DATE)');
-    }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { where, params } = buildFeedFilter(stav, options);
     params.push(limit);
     return {
       sql: `SELECT ${FEED_COLS} FROM monitoring_zakazky ${where}
@@ -190,6 +188,85 @@ export function buildListFeedQuery(
        LIMIT $${params.length}`,
       params,
     };
+}
+
+export interface FeedListOptions {
+  includeExpired?: boolean;
+  category?: DomainCategory;
+}
+
+function buildFeedFilter(
+  stav: MonitoringStav | undefined,
+  options: FeedListOptions,
+): { where: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (stav) {
+    params.push(stav);
+    conditions.push(`stav = $${params.length}`);
+  }
+  if (options.category) {
+    params.push(options.category);
+    conditions.push(`kategorie = $${params.length}`);
+  }
+  if (!options.includeExpired) {
+    conditions.push('(lhuta_nabidek IS NULL OR lhuta_nabidek >= CURRENT_DATE)');
+  }
+  return {
+    where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+    params,
+  };
+}
+
+/** Přesný počet řádků před interním limitem feedu, se stejnými SQL filtry jako listFeed. */
+export async function countFeed(
+  stav?: MonitoringStav,
+  options: FeedListOptions = {},
+): Promise<number> {
+  if (!dbReady()) return 0;
+  try {
+    const built = buildCountFeedQuery(stav, options);
+    const row = await queryOne<{ total: number | string }>(built.sql, built.params);
+    const total = Number(row?.total ?? 0);
+    return Number.isFinite(total) && total >= 0 ? Math.trunc(total) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Sestavení COUNT dotazu sdílí přesně stejné podmínky jako omezený seznam. */
+export function buildCountFeedQuery(
+  stav?: MonitoringStav,
+  options: FeedListOptions = {},
+): { sql: string; params: unknown[] } {
+  const { where, params } = buildFeedFilter(stav, options);
+  return {
+    sql: `SELECT COUNT(*)::int AS total FROM monitoring_zakazky ${where}`,
+    params,
+  };
+}
+
+export interface FeedCutSummary {
+  limit: number;
+  total: number;
+  returned: number;
+  discarded: number;
+  truncated: boolean;
+}
+
+/** Jednotná, snadno testovatelná metrika jednoho limitního řezu. */
+export function summarizeFeedCut(total: number, returned: number, limit: number): FeedCutSummary {
+  const normalizedReturned = Math.max(0, Math.trunc(returned));
+  const normalizedTotal = Math.max(normalizedReturned, Math.max(0, Math.trunc(total)));
+  const normalizedLimit = Math.max(0, Math.trunc(limit));
+  const discarded = normalizedTotal - normalizedReturned;
+  return {
+    limit: normalizedLimit,
+    total: normalizedTotal,
+    returned: normalizedReturned,
+    discarded,
+    truncated: discarded > 0,
+  };
 }
 
 export async function getFeedItem(id: string): Promise<FeedItem | null> {
@@ -201,7 +278,7 @@ export async function getFeedItem(id: string): Promise<FeedItem | null> {
     );
     if (!row) return null;
     const item = normalizeFeedRow(row);
-    await backfillMissingCategories([row], [item]);
+    await backfillCategories([row], [item]);
     return item;
   } catch {
     return null;
@@ -229,11 +306,13 @@ export async function setFeedStav(
 
 /** Normalizuje kandidáta z NEN na jednotný upsert vstup. */
 export function toNenFeedInput(candidate: NenTenderCandidate): FeedUpsertInput {
+  const cpv: string[] = [];
   return {
     zdroj: 'nen',
     zdroj_id: candidate.zdroj_id,
     nazev: candidate.nazev,
-    kategorie: categorizeCommodity(candidate.nazev),
+    kategorie: categorizeTender(candidate.nazev, cpv),
+    cpv,
     zadavatel: candidate.zadavatel,
     predpokladana_hodnota: null, // v seznamu NEN není, doplní se až z detailu při zpracování
     lhuta_nabidek: candidate.lhuta_nabidek,
@@ -244,11 +323,13 @@ export function toNenFeedInput(candidate: NenTenderCandidate): FeedUpsertInput {
 
 /** Normalizuje kandidáta z Hlídače státu na jednotný upsert vstup. */
 export function toHlidacFeedInput(candidate: HlidacTenderCandidate): FeedUpsertInput {
+  const cpv = normalizeCpvCodes(candidate.cpv);
   return {
     zdroj: 'hlidac',
     zdroj_id: candidate.id,
     nazev: candidate.nazev,
-    kategorie: categorizeCommodity(candidate.nazev),
+    kategorie: categorizeTender(candidate.nazev, cpv),
+    cpv,
     zadavatel: candidate.zadavatel || null,
     predpokladana_hodnota: candidate.budget,
     lhuta_nabidek: toIsoDate(candidate.lhuta),

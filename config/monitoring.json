@@ -1,6 +1,21 @@
 {
   "kategorie_zajmu": [],
-  "klicova_slova": [],
+  "klicova_slova": [
+    "výpočetní technika",
+    "počítač",
+    "notebook",
+    "server",
+    "monitor",
+    "tiskárna",
+    "síťové prvky",
+    "software",
+    "dílenské vybavení",
+    "nářadí",
+    "obráběcí stroje",
+    "svářečka",
+    "3D tiskárna",
+    "nábytek"
+  ],
   "vyloucena_slova": [],
   "min_hodnota": null,
   "max_hodnota": null,

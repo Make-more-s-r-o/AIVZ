@@ -11,10 +11,13 @@ const ROOT = new URL('../../../../', import.meta.url).pathname;
 export const MONITORING_CONFIG_PATH = join(ROOT, 'config', 'monitoring.json');
 
 const categorySchema = z.enum(KOMODITA_KATEGORIE_VALUES as [string, ...string[]]);
+const SAFE_FALLBACK_KEYWORDS = ['výpočetní technika'] as const;
 
 export const MonitoringConfigSchema = z.object({
   kategorie_zajmu: z.array(categorySchema).default([]),
-  klicova_slova: z.array(z.string().trim().min(1)).default([]),
+  klicova_slova: z.array(z.string().trim().min(1))
+    .min(1, 'Monitoring musí obsahovat alespoň jedno klíčové slovo.')
+    .default([...SAFE_FALLBACK_KEYWORDS]),
   vyloucena_slova: z.array(z.string().trim().min(1)).default([]),
   min_hodnota: z.number().finite().nonnegative().nullable().default(null),
   max_hodnota: z.number().finite().nonnegative().nullable().default(null),
@@ -33,7 +36,7 @@ export type MonitoringConfig = z.infer<typeof MonitoringConfigSchema>;
 
 export const DEFAULT_MONITORING_CONFIG: MonitoringConfig = Object.freeze({
   kategorie_zajmu: [],
-  klicova_slova: [],
+  klicova_slova: [...SAFE_FALLBACK_KEYWORDS],
   vyloucena_slova: [],
   min_hodnota: null,
   max_hodnota: null,
@@ -58,7 +61,7 @@ export async function getMonitoringConfig(path = MONITORING_CONFIG_PATH): Promis
       return {
         ...DEFAULT_MONITORING_CONFIG,
         kategorie_zajmu: [],
-        klicova_slova: [],
+        klicova_slova: [...SAFE_FALLBACK_KEYWORDS],
         vyloucena_slova: [],
       };
     }

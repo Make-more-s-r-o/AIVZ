@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { parseNenListing, parseCzechDate, fetchNenTenders, type NenTenderCandidate } from '../src/lib/monitoring/nen-client.js';
 import {
   toNenFeedInput, toHlidacFeedInput, toIsoDate,
-  listFeed, getFeedItem, upsertFeed, setFeedStav, normalizeFeedRow, buildListFeedQuery,
+  listFeed, countFeed, getFeedItem, upsertFeed, setFeedStav, normalizeFeedRow,
+  buildListFeedQuery, buildCountFeedQuery, summarizeFeedCut,
 } from '../src/lib/monitoring/monitoring-store.js';
 import { collectMonitoringInputs } from '../src/lib/monitoring/monitoring-sync.js';
 import { closePool } from '../src/lib/db.js';
@@ -17,6 +18,13 @@ import type { MonitoringConfig } from '../src/lib/monitoring/monitoring-config.j
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = readFileSync(join(__dirname, 'fixtures', 'nen-listing.html'), 'utf-8');
+const CPV_MIGRATION = readFileSync(join(__dirname, '..', 'migrations', '024_monitoring_cpv.sql'), 'utf-8');
+const SERVE_API_SOURCE = readFileSync(join(__dirname, '..', 'src', 'serve-api.ts'), 'utf-8');
+
+test('migrace 024 přidává prvotřídní CPV pole a GIN index', () => {
+  assert.match(CPV_MIGRATION, /ADD COLUMN IF NOT EXISTS cpv TEXT\[\] NOT NULL DEFAULT '\{\}'::TEXT\[\]/i);
+  assert.match(CPV_MIGRATION, /USING GIN \(cpv\)/i);
+});
 
 // --- NEN parser (fixture z reálné odpovědi) ---
 
@@ -59,14 +67,20 @@ test('fetchNenTenders při selhání fetch vrací ok=false (žádný pád)', asy
   const result = await fetchNenTenders('cokoliv', {
     fetchFn: (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch,
   });
-  assert.deepEqual(result, { items: [], ok: false });
+  assert.deepEqual(result, {
+    items: [], ok: false, health: 'error', requests: 1, pages: 0, truncated: false,
+    warning: 'NEN není dostupný (ECONNREFUSED) — monitoring použije dostupná data.',
+  });
 });
 
 test('fetchNenTenders při HTTP chybě zdroje vrací ok=false', async () => {
   const result = await fetchNenTenders('', {
     fetchFn: (async () => new Response('nope', { status: 503 })) as typeof fetch,
   });
-  assert.deepEqual(result, { items: [], ok: false });
+  assert.deepEqual(result, {
+    items: [], ok: false, health: 'error', requests: 1, pages: 0, truncated: false,
+    warning: 'NEN vrátil HTTP 503 — monitoring použije dostupná data.',
+  });
 });
 
 test('fetchNenTenders stránkuje přes ověřené p:vz:page=N, deduplikuje a skončí na maximu', async () => {
@@ -81,6 +95,10 @@ test('fetchNenTenders stránkuje přes ověřené p:vz:page=N, deduplikuje a sko
     sleep: async (ms) => { waits.push(ms); },
   });
   assert.equal(result.ok, true);
+  assert.equal(result.health, 'partial');
+  assert.equal(result.requests, 2);
+  assert.equal(result.pages, 2);
+  assert.equal(result.truncated, true);
   assert.equal(result.items.length, 1, 'stejné zdroj_id z druhé stránky se neduplikuje');
   assert.equal(urls.length, 2);
   assert.ok(urls[1].endsWith('/verejne-zakazky/p:vz:page=2'));
@@ -98,7 +116,9 @@ test('fetchNenTenders skončí bez další pauzy, když stránka nevrátí řád
     }) as typeof fetch,
     sleep: async () => { sleeps += 1; },
   });
-  assert.deepEqual(result, { items: [], ok: true });
+  assert.deepEqual(result, {
+    items: [], ok: true, health: 'ok', requests: 1, pages: 1, truncated: false,
+  });
   assert.equal(calls, 1);
   assert.equal(sleeps, 0);
 });
@@ -119,6 +139,8 @@ test('toNenFeedInput normalizuje NEN kandidáta', () => {
   assert.equal(input.zdroj_id, 'N006/26/V00018492');
   assert.equal(input.nazev, 'Dodávka notebooků');
   assert.equal(input.zadavatel, 'Krajská nemocnice');
+  assert.deepEqual(input.cpv, []);
+  assert.equal(input.kategorie, 'it_av', 'zakázka bez CPV se dál kategorizuje podle názvu');
   assert.equal(input.predpokladana_hodnota, null); // v seznamu NEN není
   assert.equal(input.lhuta_nabidek, '2026-07-21');
   assert.deepEqual(input.raw, candidate);
@@ -141,6 +163,26 @@ test('toHlidacFeedInput normalizuje Hlídač kandidáta a převede lhůtu na ISO
   assert.equal(input.zdroj_id, 'abc-123');
   assert.equal(input.predpokladana_hodnota, 4_500_000);
   assert.equal(input.lhuta_nabidek, '2026-08-15');
+  assert.deepEqual(input.cpv, []);
+});
+
+test('toHlidacFeedInput zachová a normalizuje CPV a použije ho před obecným názvem', () => {
+  const input = toHlidacFeedInput({
+    id: 'cpv-4451', nazev: 'Rámcová dohoda na dodávky', zadavatel: 'Město', budget: null,
+    lhuta: null, stavVZ: 'zadavani', url: 'https://h/cpv-4451', dokumenty: [],
+    cpv: [{ Kod: '44510000-8' }, '44510000'],
+  });
+  assert.deepEqual(input.cpv, ['44510000']);
+  assert.equal(input.kategorie, 'naradi_dilna');
+});
+
+test('toHlidacFeedInput bez CPV zachová kategorizaci podle názvu jako fallback', () => {
+  const input = toHlidacFeedInput({
+    id: 'title-fallback', nazev: 'Dodávka dílenského nářadí', zadavatel: null, budget: null,
+    lhuta: null, stavVZ: null, url: 'https://h/title-fallback', dokumenty: [], cpv: [],
+  });
+  assert.deepEqual(input.cpv, []);
+  assert.equal(input.kategorie, 'naradi_dilna');
 });
 
 test('toHlidacFeedInput s prázdným zadavatelem/lhůtou nepadá', () => {
@@ -166,10 +208,13 @@ test('collectMonitoringInputs: selhání NEN s tokenem zavolá Hlídač jako fal
     fetchNen: async () => ({ items: [], ok: false }),
     fetchHlidac: async () => {
       hlidacCalls += 1;
-      return [{
-        id: 'fallback-1', nazev: 'Dodávka serverů', zadavatel: 'Město', budget: 1000,
-        lhuta: null, stavVZ: 'zadavani', url: 'https://h/fallback-1', dokumenty: [], cpv: [],
-      }];
+      return {
+        items: [{
+          id: 'fallback-1', nazev: 'Dodávka serverů', zadavatel: 'Město', budget: 1000,
+          lhuta: null, stavVZ: 'zadavani', url: 'https://h/fallback-1', dokumenty: [], cpv: [],
+        }],
+        health: 'ok', requests: 1, pages: 1, total: 1, truncated: false,
+      };
     },
   });
   assert.equal(hlidacCalls, 1);
@@ -194,7 +239,9 @@ test('collectMonitoringInputs deduplikuje zdroj_id napříč více fulltextovým
           : [candidate('N-SHARED', 'IT technika'), candidate('N2', 'Servery')],
       };
     },
-    fetchHlidac: async () => [],
+    fetchHlidac: async () => ({
+      items: [], health: 'ok', requests: 1, pages: 1, total: 0, truncated: false,
+    }),
   });
   assert.deepEqual(calls, ['notebooky', 'servery']);
   assert.deepEqual(result.inputs.map((item) => item.zdroj_id), ['N1', 'N-SHARED', 'N2']);
@@ -209,6 +256,7 @@ test('normalizeFeedRow převádí NUMERIC string na number', () => {
   assert.equal(row.predpokladana_hodnota, 12345.67);
   assert.equal(typeof row.predpokladana_hodnota, 'number');
   assert.equal(row.kategorie, 'ostatni');
+  assert.deepEqual(row.cpv, []);
 });
 
 test('normalizeFeedRow líně dopočítá chybějící kategorii ze starého řádku', () => {
@@ -220,12 +268,54 @@ test('normalizeFeedRow líně dopočítá chybějící kategorii ze starého ř�
   assert.equal(row.kategorie, 'it_av');
 });
 
+test('normalizeFeedRow nechá CPV přebít i starší platnou kategorii odvozenou z názvu', () => {
+  const row = normalizeFeedRow({
+    id: '3', zdroj: 'hlidac', zdroj_id: 'H3', nazev: 'Obecná dodávka', zadavatel: null,
+    predpokladana_hodnota: null, lhuta_nabidek: null, url: null, raw: null,
+    stav: 'nova', tender_id: null, created_at: '2026-07-11T00:00:00Z',
+    kategorie: 'ostatni', cpv: ['44510000-8'],
+  });
+  assert.deepEqual(row.cpv, ['44510000']);
+  assert.equal(row.kategorie, 'naradi_dilna');
+});
+
 test('feed SQL aplikuje stav a kategorii před interním LIMIT 1000', () => {
   const built = buildListFeedQuery('nova', 1000, { category: 'it_av' });
   assert.deepEqual(built.params, ['nova', 'it_av', 1000]);
   assert.match(built.sql, /WHERE stav = \$1 AND kategorie = \$2 AND/);
   assert.match(built.sql, /LIMIT \$3/);
   assert.ok(built.sql.indexOf('kategorie = $2') < built.sql.indexOf('LIMIT $3'));
+  assert.match(built.sql, /kategorie, cpv,/);
+});
+
+test('feed COUNT používá stejné filtry jako omezený seznam a nemá LIMIT', () => {
+  const built = buildCountFeedQuery('nova', { category: 'it_av' });
+  assert.deepEqual(built.params, ['nova', 'it_av']);
+  assert.match(built.sql, /WHERE stav = \$1 AND kategorie = \$2 AND/);
+  assert.doesNotMatch(built.sql, /LIMIT/i);
+});
+
+test('metadata obou řezů uvádějí total, returned, discarded a truncated', () => {
+  assert.deepEqual(summarizeFeedCut(1_275, 1_000, 1_000), {
+    limit: 1_000, total: 1_275, returned: 1_000, discarded: 275, truncated: true,
+  });
+  assert.deepEqual(summarizeFeedCut(743, 200, 200), {
+    limit: 200, total: 743, returned: 200, discarded: 543, truncated: true,
+  });
+  assert.deepEqual(summarizeFeedCut(37, 37, 200), {
+    limit: 200, total: 37, returned: 37, discarded: 0, truncated: false,
+  });
+});
+
+test('monitoring feed publikuje metadata obou řezů a zachová kompatibilní výchozí pole', () => {
+  for (const cut of ['Database', 'Response']) {
+    for (const metric of ['Total', 'Returned', 'Discarded', 'Truncated']) {
+      assert.ok(SERVE_API_SOURCE.includes(`X-Monitoring-${cut}-${metric}`));
+    }
+  }
+  assert.match(SERVE_API_SOURCE, /Access-Control-Expose-Headers/);
+  assert.match(SERVE_API_SOURCE, /req\.query\.meta === '1'/);
+  assert.match(SERVE_API_SOURCE, /res\.json\(responseItems\)/);
 });
 
 // --- Quick go/no-go skóre feed položky ---
@@ -278,6 +368,33 @@ test('scoreFeedItem výrazně zvýhodní kategorii zájmu a srazí kategorii mim
   assert.equal(outside.doporuceni, 'NOGO');
 });
 
+test('scoreFeedItem zohlední CPV i proti starší kategorii odvozené jen z názvu', () => {
+  const config: MonitoringConfig = { ...MONITORING_CONFIG, kategorie_zajmu: ['naradi_dilna'] };
+  const base = {
+    nazev: 'Rámcová dohoda na dodávky', kategorie: 'ostatni' as const, zadavatel: null,
+    predpokladana_hodnota: null, lhuta_nabidek: null,
+  };
+  const accordingToCpv = scoreFeedItem({ ...base, cpv: ['44510000-8'] }, undefined, NOW, config);
+  const withoutCpv = scoreFeedItem(base, undefined, NOW, config);
+  assert.ok(accordingToCpv.score >= withoutCpv.score + 50, `${accordingToCpv.score} vs ${withoutCpv.score}`);
+  assert.ok(accordingToCpv.duvody.some((reason) => reason.includes('odpovídá nastavenému zájmu')));
+});
+
+test('scoreFeedItem zohlední CPV v sektorovém skóre i bez filtru kategorie_zajmu', () => {
+  const base = {
+    nazev: 'Rámcová dohoda na dodávky', zadavatel: null,
+    predpokladana_hodnota: null, lhuta_nabidek: null,
+  };
+  const accordingToCpv = scoreFeedItem(
+    { ...base, cpv: ['44510000-8'] },
+    { obory: ['naradi_dilna'] },
+    NOW,
+  );
+  const withoutCpv = scoreFeedItem(base, { obory: ['naradi_dilna'] }, NOW);
+  assert.ok(accordingToCpv.score > withoutCpv.score, `${accordingToCpv.score} vs ${withoutCpv.score}`);
+  assert.ok(accordingToCpv.duvody.some((reason) => reason.includes('odpovídá oborům firmy')));
+});
+
 test('scoreFeedItem bez hodnoty skládá důvody rozpočtu, sektoru, lhůty a kategorie', () => {
   const result = scoreFeedItem(
     {
@@ -326,9 +443,10 @@ test('store bez DATABASE_URL degraduje gracefully (čtení prázdno, zápis vyha
   await closePool(); // zahodí případný cachovaný pool → getPool() vrátí null
   try {
     assert.deepEqual(await listFeed('nova'), []);
+    assert.equal(await countFeed('nova'), 0);
     assert.equal(await getFeedItem('1'), null);
     await assert.rejects(
-      () => upsertFeed([{ zdroj: 'nen', zdroj_id: 'x', nazev: 'X', kategorie: 'ostatni', zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null, url: 'https://h', raw: null }]),
+      () => upsertFeed([{ zdroj: 'nen', zdroj_id: 'x', nazev: 'X', kategorie: 'ostatni', cpv: [], zadavatel: null, predpokladana_hodnota: null, lhuta_nabidek: null, url: 'https://h', raw: null }]),
       /db_unavailable/,
     );
     await assert.rejects(() => setFeedStav('1', 'ignorovana'), /db_unavailable/);

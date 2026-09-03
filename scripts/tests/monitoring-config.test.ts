@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,18 @@ import {
   resolveMonitoringPipelineStart,
   saveMonitoringConfig,
 } from '../src/lib/monitoring/monitoring-config.js';
+
+test('produkční monitoring config obsahuje schválený neprázdný seznam klíčových slov', async () => {
+  const raw = await readFile(new URL('../../config/monitoring.json', import.meta.url), 'utf-8');
+  const config = MonitoringConfigSchema.parse(JSON.parse(raw));
+  assert.equal(config.klicova_slova.length, 14);
+  assert.deepEqual(config.klicova_slova, [
+    'výpočetní technika', 'počítač', 'notebook', 'server', 'monitor', 'tiskárna',
+    'síťové prvky', 'software', 'dílenské vybavení', 'nářadí', 'obráběcí stroje',
+    'svářečka', '3D tiskárna', 'nábytek',
+  ]);
+  assert.equal(config.klicova_slova.some((word) => ['it', 'pc', 'av'].includes(word.toLowerCase())), false);
+});
 
 test('monitoring config vrátí fallback, když soubor chybí', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vz-monitoring-config-'));
@@ -42,14 +54,15 @@ test('monitoring config se validuje a uloží do nového adresáře', async () =
 });
 
 test('monitoring config odmítne neznámou kategorii a obrácený rozsah', () => {
-  const base = { kategorie_zajmu: [], klicova_slova: [], vyloucena_slova: [], min_hodnota: null, max_hodnota: null, auto_spustit_pipeline: true };
+  const base = { kategorie_zajmu: [], klicova_slova: ['notebook'], vyloucena_slova: [], min_hodnota: null, max_hodnota: null, auto_spustit_pipeline: true };
   assert.equal(MonitoringConfigSchema.safeParse({ ...base, kategorie_zajmu: ['neexistuje'] }).success, false);
   assert.equal(MonitoringConfigSchema.safeParse({ ...base, min_hodnota: 10, max_hodnota: 5 }).success, false);
+  assert.equal(MonitoringConfigSchema.safeParse({ ...base, klicova_slova: [] }).success, false);
 });
 
 test('monitoring config doplní auto-spuštění jako zapnuté i starému souboru', () => {
   const parsed = MonitoringConfigSchema.parse({
-    kategorie_zajmu: [], klicova_slova: [], vyloucena_slova: [], min_hodnota: null, max_hodnota: null,
+    kategorie_zajmu: [], klicova_slova: ['notebook'], vyloucena_slova: [], min_hodnota: null, max_hodnota: null,
   });
   assert.equal(parsed.auto_spustit_pipeline, true);
 });
