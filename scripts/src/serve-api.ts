@@ -19,8 +19,21 @@ import {
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { randomUUID, createHash } from 'crypto';
 import {
-  authenticateBearer, isJwtEnabled, requireJwtBearer as requireJwt, signToken,
+  agentMoneyPathGuard, authenticateBearerIdentity, getRequestIdentity, isJwtEnabled,
+  requireJwtBearer as requireJwt, setRequestIdentity, signToken,
+  type RequestIdentity,
 } from './lib/jwt-auth.js';
+import {
+  auditActorForIdentity,
+  getAgentAccessById,
+  getTotalAgentSpend,
+  recordAgentSpend,
+} from './lib/agent-identity.js';
+import {
+  agentChargesSince,
+  agentDailyLimitBlock,
+  humanDailySpendCzk,
+} from './lib/ai-budget.js';
 import {
   getAllUsers, getUserByEmail, getUserById, createUser,
   verifyPassword, updatePassword, deleteUser, updateLastLogin, isFirstRun,
@@ -248,7 +261,7 @@ const API_TOKEN = process.env.API_TOKEN;
 // Public routes that never require auth
 const PUBLIC_PATHS = ['/api/health', '/api/auth/status', '/api/auth/login', '/api/auth/setup'];
 
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   if (PUBLIC_PATHS.includes(req.path)) return next();
 
@@ -258,12 +271,22 @@ app.use((req, res, next) => {
   // z PUBLIC_PATHS (health, auth status/login/setup). Read-only role `viewer` čtení nadále smí —
   // RBAC middleware níže blokuje jen mutace.
 
-  // JWT Bearer token / legacy statický API_TOKEN (platí pro GET i mutace).
+  // JWT Bearer token / agentní DB klíč / legacy statický API_TOKEN (platí pro GET i mutace).
   // Tokeny v query stringu se záměrně neakceptují, aby nekončily v access lozích.
-  const bearerAuth = authenticateBearer(req.headers.authorization, API_TOKEN);
-  if (bearerAuth.authenticated) {
-    if (bearerAuth.payload) (req as any).user = bearerAuth.payload;
-    return next();
+  try {
+    const bearerAuth = await authenticateBearerIdentity(req.headers.authorization, API_TOKEN);
+    if (bearerAuth.authenticated) {
+      setRequestIdentity(req, bearerAuth.identity);
+      return next();
+    }
+    if (bearerAuth.agentKeyAttempted) {
+      return res.status(401).json({ error: 'Unauthorized — invalid or revoked agent key' });
+    }
+  } catch {
+    return res.status(503).json({
+      error: 'authentication_unavailable',
+      reason: 'Ověření agentní identity je dočasně nedostupné.',
+    });
   }
 
   // Dev režim (JWT_SECRET nenastaven, isJwtEnabled()===false) = single-user lokální vývoj.
@@ -286,23 +309,79 @@ app.use((req, res, next) => {
   res.status(401).json({ error: 'Unauthorized' });
 });
 
+// Agentní money-path politika je jeden autoritativní výčet v agent-identity.ts.
+// Běží před budgetem i RBAC, aby zakázaná akce vždy vrátila jednoznačné 403.
+app.use(agentMoneyPathGuard);
+
+// Vyčerpaný agent může přečíst pouze vlastní čerstvý budget. Money-path guard má
+// záměrně přednost, takže ani vyčerpaný agent nedostane na zakázané cestě matoucí 429.
+app.use((req, res, next) => {
+  const identity = getRequestIdentity(req);
+  if (identity?.type !== 'agent') return next();
+  const normalizedPath = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+  if (req.method === 'GET' && normalizedPath === '/api/agent/me') return next();
+  const budget = identity.agent.budget;
+  const reason = agentDailyLimitBlock(budget);
+  if (reason) {
+    return res.status(429).json({ error: 'agent_budget_exhausted', reason, budget });
+  }
+  next();
+});
+
+async function roleForRequestIdentity(
+  req: express.Request,
+  identity: RequestIdentity | undefined = getRequestIdentity(req),
+): Promise<UserRole | undefined> {
+  if (identity?.type === 'agent') return identity.agent.role;
+  const payload = identity?.type === 'user' ? identity.payload : (req as any).user;
+  if (!payload) return undefined;
+  let role = payload.role as UserRole | undefined;
+  if (payload.sub) {
+    const user = await getUserById(payload.sub);
+    role = user?.role as UserRole | undefined;
+  }
+  return role;
+}
+
+interface RequestAuditActor {
+  id: string | null;
+  type: 'agent' | 'user' | null;
+  name: string | null;
+}
+
+/** Auditní identita se odvozuje jen z credentialu, nikdy z request body. */
+function auditActorForRequest(req: express.Request): RequestAuditActor {
+  const identity = getRequestIdentity(req);
+  if (identity?.type === 'agent') {
+    return {
+      id: auditActorForIdentity(identity.agent),
+      type: 'agent',
+      name: identity.agent.name,
+    };
+  }
+  if (identity?.type === 'user') {
+    return {
+      id: auditActorForIdentity(identity.payload),
+      type: 'user',
+      name: identity.payload.name,
+    };
+  }
+  return { id: null, type: null, name: null };
+}
+
 // RBAC (M7): viewer je read-only. Blokuj mutace (non-GET) pro roli viewer napříč API, kromě
 // vlastních akcí (přečtení notifikací, změna vlastního hesla) a auth/setup. V dev bez JWT se
 // neomezuje (single-user). Běží po auth middleware (req.user je nastaven pro platný JWT).
 const ROLE_EXEMPT_MUTATIONS = new Set(['/api/notifications/read', '/api/auth/change-password']);
 app.use(async (req, res, next) => {
-  if (!isJwtEnabled()) return next();
+  const identity = getRequestIdentity(req);
+  if (!isJwtEnabled() && identity?.type !== 'agent') return next();
   if (req.method === 'GET') return next();
   if (!req.path.startsWith('/api/')) return next();
   if (req.path.startsWith('/api/auth/')) return next();
   if (ROLE_EXEMPT_MUTATIONS.has(req.path)) return next();
-  // Aktuální role z user-store (ne JWT claim) → demote na viewer se projeví ihned.
-  const sub = (req as any).user?.sub;
-  let role = (req as any).user?.role as UserRole | undefined;
-  if (sub) {
-    const u = await getUserById(sub);
-    role = (u?.role as UserRole | undefined);
-  }
+  // Aktuální user role je z user-store; agent role je z DB záznamu ověřeného pro request.
+  const role = await roleForRequestIdentity(req, identity);
   if (role === 'viewer') {
     return res.status(403).json({ error: 'forbidden_role', reason: 'Účet s rolí Prohlížeč nemůže provádět změny.' });
   }
@@ -312,6 +391,26 @@ app.use(async (req, res, next) => {
 // --- Async Job Queue ---
 
 const jobs = new Map<string, Job>();
+type AgentAwareJob = Job & {
+  /** DB id agenta, nikdy samotný API klíč ani jeho hash. */
+  agentKeyId?: string;
+  /** Počet cost-log položek před startem tohoto konkrétního child jobu. */
+  agentCostEntryOffset?: number;
+  /** Stabilní idempotency key jednoho pokusu, bezpečný i přes restart procesu. */
+  agentCostChargeId?: string;
+};
+
+function requestAgentKeyId(req: express.Request): string | undefined {
+  const identity = (req as any).authIdentity;
+  return identity?.type === 'agent' ? identity.agent?.id : undefined;
+}
+
+function setJobAgentOwner(job: Job, agentKeyId: string | undefined): void {
+  const attributed = job as AgentAwareJob;
+  if (agentKeyId) attributed.agentKeyId = agentKeyId;
+  else delete attributed.agentKeyId;
+}
+
 // Souběžná fronta: místo jednoho slotu držíme množinu právě běžících úloh. Limit řídí
 // PIPELINE_MAX_CONCURRENT (default 2). Plánovač (selectJobsToStart) navíc zaručuje per-tender
 // serializaci — nikdy dvě úlohy téže zakázky současně (sdílí soubory v output/<tenderId>).
@@ -458,6 +557,57 @@ const STEP_FILES: Record<string, string> = {
   'verify-prices': 'verify-prices.ts',
 };
 
+const AI_COST_STEPS = new Set(['analyze', 'match', 'generate', 'validate', 'verify-prices']);
+
+/**
+ * Zauctuje nove append-only cost-log polozky agentovi. Charge ID je stabilni pres restart,
+ * takze opakovane dorovnani nemuze utratu zdvojit.
+ */
+async function settleAgentJobCosts(job: Job): Promise<void> {
+  const attributed = job as AgentAwareJob;
+  if (!attributed.agentKeyId || attributed.agentCostEntryOffset === undefined) return;
+  if (!attributed.agentCostChargeId) {
+    throw new Error('Chybi idempotency ID agentniho uctovani.');
+  }
+
+  const summary = await getCostSummary(job.tenderId);
+  const charges = agentChargesSince(summary.entries, attributed.agentCostEntryOffset);
+  for (const charge of charges) {
+    await recordAgentSpend({
+      agentKeyId: attributed.agentKeyId,
+      chargeId: `${attributed.agentCostChargeId}:${charge.day}`,
+      day: charge.day,
+      amountCzk: charge.amountCzk,
+    });
+  }
+  delete attributed.agentCostEntryOffset;
+  delete attributed.agentCostChargeId;
+  scheduleJobsPersist();
+}
+
+/** Revokace i vlastni limit se znovu kontroluji tesne pred vznikem child procesu. */
+async function prepareAgentJobExecution(job: Job): Promise<string | null> {
+  const attributed = job as AgentAwareJob;
+  if (!attributed.agentKeyId) return null;
+
+  if (attributed.agentCostEntryOffset !== undefined) {
+    await settleAgentJobCosts(job);
+  }
+  const access = await getAgentAccessById(attributed.agentKeyId);
+  if (!access) return 'Agentni klic byl odvolan nebo neznamy.';
+  const budgetError = agentDailyLimitBlock(access.budget);
+  if (budgetError) return budgetError;
+
+  if (AI_COST_STEPS.has(job.step)) {
+    attributed.agentCostEntryOffset = (await getCostSummary(job.tenderId)).entries.length;
+    attributed.agentCostChargeId = randomUUID();
+    scheduleJobsPersist();
+    // Attribution musi byt na disku drive, nez placeny child muze zapsat prvni naklad.
+    await flushJobsPersist();
+  }
+  return null;
+}
+
 /**
  * Vrátí počet položek s NEPOTVRZENOU cenou pro generate money-gate (a jejich názvy).
  * `null` = product-match.json chybí nebo je nečitelný → fail-closed v každém volajícím.
@@ -517,6 +667,7 @@ function enqueueStepJob(
   parentJobId?: string,
   startQueue = true,
   initiator: Job['initiator'] = 'operator',
+  agentKeyId?: string,
 ): Job {
   let jobId = randomUUID().slice(0, 8);
   while (jobs.has(jobId)) jobId = randomUUID().slice(0, 8);
@@ -531,6 +682,7 @@ function enqueueStepJob(
     parentJobId,
     initiator,
   };
+  setJobAgentOwner(job, agentKeyId);
   jobs.set(jobId, job);
   jobQueue.push(jobId);
   cleanupJobs();
@@ -549,6 +701,7 @@ function enqueueStepJob(
 function enqueueRunAllPipeline(
   tenderId: string,
   initiator: Job['initiator'] = 'operator',
+  agentKeyId?: string,
 ): { job: Job; created: boolean } {
   const existing = [...jobs.values()].find((job) =>
     job.tenderId === tenderId && job.kind === 'pipeline'
@@ -570,8 +723,9 @@ function enqueueRunAllPipeline(
     currentStep: RUN_ALL_STEPS[0],
     initiator,
   };
+  setJobAgentOwner(parent, agentKeyId);
   jobs.set(parent.id, parent);
-  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id, true, initiator);
+  enqueueStepJob(tenderId, RUN_ALL_STEPS[0], parent.id, true, initiator, agentKeyId);
   scheduleJobsPersist();
   console.log(`Pipeline job ${parent.id} queued for ${tenderId}`);
   return { job: parent, created: true };
@@ -661,6 +815,17 @@ async function startJob(job: Job) {
     scheduleJobsPersist();
     processQueue();
   };
+
+  try {
+    const agentBlock = await prepareAgentJobExecution(job);
+    if (agentBlock) {
+      failBeforeSpawn(agentBlock);
+      return;
+    }
+  } catch (error) {
+    failBeforeSpawn(`Agentni identitu nebo jeji rozpocet nelze bezpecne overit: ${String(error)}.`);
+    return;
+  }
 
   const scriptFile = STEP_FILES[job.step];
   if (!scriptFile) {
@@ -817,6 +982,12 @@ async function startJob(job: Job) {
       finalError = `Kontrolu úplnosti kroku ${job.step} nelze uložit nebo načíst: ${String(uplnostError)}. `
         + 'Zkontrolujte stav zakázky a spusťte krok znovu.';
     }
+    try {
+      await settleAgentJobCosts(job);
+    } catch (accountingError) {
+      finalStatus = 'error';
+      finalError = `Agentni naklad nelze bezpecne zauctovat; dalsi krok nebyl spusten: ${String(accountingError)}.`;
+    }
     job.status = finalStatus;
     if (finalError) job.error = finalError;
     job.finishedAt = new Date().toISOString();
@@ -836,7 +1007,8 @@ async function startJob(job: Job) {
       return;
     }
     void advanceRunAllChain(parent, job, async (nextStep) => {
-      const governanceDecision = await pipelineEnqueueBlock(nextStep);
+      const agentKeyId = (parent as AgentAwareJob).agentKeyId;
+      const governanceDecision = await pipelineEnqueueBlock(nextStep, agentKeyId);
       if (governanceDecision?.budget) throw new BudgetPausedError(governanceDecision.reason);
       if (governanceDecision) throw new Error(governanceDecision.reason);
       // Money-gate před generate: po verifieru musí každá cena mít lidské potvrzení
@@ -864,7 +1036,7 @@ async function startJob(job: Job) {
         scheduleJobsPersist();
         return;
       }
-      enqueueStepJob(job.tenderId, nextStep, parent.id, false, parent.initiator);
+      enqueueStepJob(job.tenderId, nextStep, parent.id, false, parent.initiator, agentKeyId);
     }).finally(() => {
       scheduleJobsPersist();
       processQueue();
@@ -1231,6 +1403,43 @@ function stepsDone(steps: { extract: string; analyze: string; match: string; gen
   };
 }
 
+async function getHumanDailySpendCzk(): Promise<number> {
+  const totalTodayCzk = (await getCostsOverview()).dnes_czk;
+  try {
+    const agentTodayCzk = await getTotalAgentSpend();
+    return humanDailySpendCzk(totalTodayCzk, agentTodayCzk);
+  } catch {
+    // DB vypadek nesmi byt novou regresi pro lokalni/lidskou file-based pipeline.
+    return totalTodayCzk;
+  }
+}
+
+interface AiLimitDecision {
+  reason: string;
+  status: 401 | 429 | 503;
+  scope: 'agent' | 'human';
+}
+
+async function dailyAiLimitDecision(
+  governance: Awaited<ReturnType<typeof getGovernance>>,
+  agentKeyId?: string,
+): Promise<AiLimitDecision | null> {
+  if (agentKeyId) {
+    const access = await getAgentAccessById(agentKeyId);
+    if (!access) {
+      return {
+        reason: 'Agentni klic byl odvolan nebo neznamy.',
+        status: 401,
+        scope: 'agent',
+      };
+    }
+    const reason = agentDailyLimitBlock(access.budget);
+    return reason ? { reason, status: 429, scope: 'agent' } : null;
+  }
+  const reason = dailyAiLimitBlock(governance, await getHumanDailySpendCzk());
+  return reason ? { reason, status: 503, scope: 'human' } : null;
+}
+
 // GET /api/health - health check (no auth required)
 app.get('/api/health', async (_req, res) => {
   let gotenberg: 'ok' | 'unreachable' | 'not_configured' = 'not_configured';
@@ -1269,7 +1478,7 @@ app.get('/api/health', async (_req, res) => {
   };
   try {
     const governance = await getGovernance();
-    const todayCzk = (await getCostsOverview()).dnes_czk;
+    const todayCzk = await getHumanDailySpendCzk();
     const reason = governanceSwitchBlock(governance, 'ai_jobs_enabled')
       ?? dailyAiLimitBlock(governance, todayCzk);
     aiBudget = {
@@ -1301,15 +1510,10 @@ app.get('/api/health', async (_req, res) => {
 // (single-user provoz). Legacy token bez role → dohledat z user-store dle sub (ať se nezamkne).
 function requireRole(...roles: UserRole[]) {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (!isJwtEnabled()) return next();
-    const sub = (req as any).user?.sub;
-    // Aktuální role z user-store dle sub (ne z JWT claimu) → demote/revoke se projeví ihned,
-    // ne až po expiraci tokenu (rememberMe = 30 dní). Fallback na claim jen bez sub.
-    let role: UserRole | undefined = (req as any).user?.role;
-    if (sub) {
-      const u = await getUserById(sub);
-      role = (u?.role as UserRole | undefined);
-    }
+    const identity = getRequestIdentity(req);
+    if (!isJwtEnabled() && identity?.type !== 'agent') return next();
+    // User role se obnovuje z user-store; agent role pochází z čerstvě ověřeného DB klíče.
+    const role = await roleForRequestIdentity(req, identity);
     if (!role || !roles.includes(role)) {
       return res.status(403).json({ error: 'forbidden_role', reason: 'Nedostatečná oprávnění pro tuto akci.' });
     }
@@ -1322,6 +1526,7 @@ async function enforceGovernance(
   res: express.Response,
   key: GovernanceSwitch,
   checkAiLimit = false,
+  req?: express.Request,
 ): Promise<boolean> {
   try {
     const governance = await getGovernance();
@@ -1336,9 +1541,18 @@ async function enforceGovernance(
         res.status(503).json({ error: aiError, governance_switch: 'ai_jobs_enabled' });
         return false;
       }
-      const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
-      if (limitError) {
-        res.status(503).json({ error: limitError, governance_switch: 'denni_ai_limit_czk' });
+      const limitDecision = await dailyAiLimitDecision(
+        governance,
+        req ? requestAgentKeyId(req) : undefined,
+      );
+      if (limitDecision) {
+        res.status(limitDecision.status).json({
+          error: limitDecision.status === 401
+            ? 'invalid_or_revoked_agent_key'
+            : limitDecision.scope === 'agent' ? 'agent_budget_exhausted' : limitDecision.reason,
+          reason: limitDecision.reason,
+          governance_switch: limitDecision.scope === 'human' ? 'denni_ai_limit_czk' : undefined,
+        });
         return false;
       }
     }
@@ -1350,7 +1564,7 @@ async function enforceGovernance(
 }
 
 /** Kontrola pro navazující AI kroky run/all, které se enqueueují bez HTTP response. */
-async function aiEnqueueBlock(step: string): Promise<string | null> {
+async function aiEnqueueBlock(step: string, agentKeyId?: string): Promise<string | null> {
   const governance = await getGovernance();
   const aiError = governanceSwitchBlock(governance, 'ai_jobs_enabled');
   if (aiError) return aiError;
@@ -1358,12 +1572,13 @@ async function aiEnqueueBlock(step: string): Promise<string | null> {
     const generateError = governanceSwitchBlock(governance, 'generate_enabled');
     if (generateError) return generateError;
   }
-  return dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
+  return (await dailyAiLimitDecision(governance, agentKeyId))?.reason ?? null;
 }
 
 /** Fail-closed rozlišení rozpočtu pro checkpointovaný řetězec. */
 async function pipelineEnqueueBlock(
   step: string,
+  agentKeyId?: string,
 ): Promise<{ reason: string; budget: boolean } | null> {
   try {
     const governance = await getGovernance();
@@ -1373,8 +1588,10 @@ async function pipelineEnqueueBlock(
       const generateError = governanceSwitchBlock(governance, 'generate_enabled');
       if (generateError) return { reason: generateError, budget: false };
     }
-    const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
-    return limitError ? { reason: limitError, budget: true } : null;
+    const limitDecision = await dailyAiLimitDecision(governance, agentKeyId);
+    return limitDecision
+      ? { reason: limitDecision.reason, budget: limitDecision.status !== 401 }
+      : null;
   } catch (error) {
     return {
       reason: `AI rozpočet nelze bezpečně ověřit; pipeline je pozastavena: ${String(error)}`,
@@ -1449,7 +1666,11 @@ app.post('/api/auth/login', async (req, res) => {
 // GET /api/auth/me - get current user info
 app.get('/api/auth/me', requireJwt, async (req, res) => {
   try {
-    const payload = (req as any).user;
+    const identity = getRequestIdentity(req);
+    if (identity?.type !== 'user') {
+      return res.status(403).json({ error: 'human_identity_required' });
+    }
+    const payload = identity.payload;
     const user = await getUserById(payload.sub);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -1461,10 +1682,44 @@ app.get('/api/auth/me', requireJwt, async (req, res) => {
   }
 });
 
+// GET /api/agent/me - autoritativní identita a čerstvý vlastní denní rozpočet.
+app.get('/api/agent/me', requireJwt, async (req, res) => {
+  const identity = getRequestIdentity(req);
+  if (identity?.type !== 'agent') {
+    return res.status(403).json({ error: 'agent_identity_required' });
+  }
+  try {
+    const access = await getAgentAccessById(identity.agent.id);
+    if (!access) {
+      return res.status(401).json({ error: 'Unauthorized — invalid or revoked agent key' });
+    }
+    // Refresh se propíše i do requestu; odpověď nikdy neobsahuje klíč ani jeho hash.
+    setRequestIdentity(req, { type: 'agent', agent: access.identity });
+    res.json({
+      agent: {
+        id: access.identity.id,
+        name: access.identity.name,
+        purpose: access.identity.purpose,
+        role: access.identity.role,
+      },
+      budget: access.budget,
+    });
+  } catch {
+    res.status(503).json({
+      error: 'agent_status_unavailable',
+      reason: 'Agentní identitu a rozpočet nyní nelze načíst.',
+    });
+  }
+});
+
 // POST /api/auth/change-password - change own password
 app.post('/api/auth/change-password', requireJwt, async (req, res) => {
   try {
-    const payload = (req as any).user;
+    const identity = getRequestIdentity(req);
+    if (identity?.type !== 'user') {
+      return res.status(403).json({ error: 'human_identity_required' });
+    }
+    const payload = identity.payload;
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
@@ -1691,7 +1946,8 @@ app.get('/api/monitoring/feed', requireJwt, async (req, res) => {
 // waiting_approval, dokud operátor nepotvrdí ceny. Bez stažených souborů se „spustit" ignoruje.
 app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const id = String(req.params.id); // Express params jsou vždy string; coerce kvůli typům
-  const actor = (req as any).user?.sub ?? null;
+  const auditActor = auditActorForRequest(req);
+  const actor = auditActor.id;
   const stahnoutZd = req.body?.stahnout_zd === true;
   if (!(await enforceGovernance(res, 'ingest_enabled'))) return;
   let reservedTenderId: string | undefined;
@@ -1735,7 +1991,12 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
 
     // CRM stav 'nova' + zápis do feedu (stav 'prevzata', vazba tender_id). Bez DB → 503.
     await setStatus(tenderId, 'nova');
-    await logActivity(tenderId, 'created_from_monitoring', actor, { zdroj: item.zdroj, zdroj_id: item.zdroj_id });
+    await logActivity(tenderId, 'created_from_monitoring', actor, {
+      zdroj: item.zdroj,
+      zdroj_id: item.zdroj_id,
+      actor_type: auditActor.type,
+      actor_name: auditActor.name,
+    });
     await setFeedStav(id, 'prevzata', tenderId);
 
     // Převzetí je hlavní operace; kalibrační zápis při výpadku DB pouze varuje.
@@ -1828,7 +2089,12 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
             varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
           } else if (pocetStazenych > 0) {
             try {
-              await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+              await logActivity(tenderId, 'zd_downloaded', actor, {
+                pocet: pocetStazenych,
+                zdroj_id: item.zdroj_id,
+                actor_type: auditActor.type,
+                actor_name: auditActor.name,
+              });
             } catch (auditError) {
               console.warn(`Audit stažení ZD pro ${tenderId} se nepodařilo uložit:`, auditError);
             }
@@ -1848,7 +2114,12 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
             varovani.push('Hlídač státu nevrátil žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
           } else if (pocetStazenych > 0) {
             try {
-              await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+              await logActivity(tenderId, 'zd_downloaded', actor, {
+                pocet: pocetStazenych,
+                zdroj_id: item.zdroj_id,
+                actor_type: auditActor.type,
+                actor_name: auditActor.name,
+              });
             } catch (auditError) {
               console.warn(`Audit stažení ZD pro ${tenderId} se nepodařilo uložit:`, auditError);
             }
@@ -1897,13 +2168,17 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
           if (!governanceDecision.spustit) {
             varovani.push(governanceDecision.varovani!);
           } else {
-            const limitError = dailyAiLimitBlock(governance, (await getCostsOverview()).dnes_czk);
-            if (limitError) {
-              varovani.push(limitError);
+            const limitDecision = await dailyAiLimitDecision(governance, requestAgentKeyId(req));
+            if (limitDecision) {
+              varovani.push(limitDecision.reason);
             } else if (draining) {
               varovani.push('Pipeline nebyl spuštěn — server se připravuje na nasazení nové verze.');
             } else {
-              const { job, created } = enqueueRunAllPipeline(tenderId, 'monitoring');
+              const { job, created } = enqueueRunAllPipeline(
+                tenderId,
+                'monitoring',
+                requestAgentKeyId(req),
+              );
               spusteno = true;
               jobId = job.id;
               if (!created) varovani.push('Pipeline pro tuto zakázku už běží.');
@@ -2523,10 +2798,12 @@ app.post<{ id: string }>('/api/tenders/:id/archive', requireJwt, requireRole('ad
   const archived = (req.body?.archived ?? true) === true;
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     await setArchived(id, archived, actor, await tenderFallbackStatus(id));
-    await logActivity(id, archived ? 'archived' : 'unarchived', actor, { actor_name: actorName });
+    await logActivity(id, archived ? 'archived' : 'unarchived', actor, {
+      actor_name: actorName,
+      actor_type: actorType,
+    });
     res.json({ success: true, archived });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -2538,10 +2815,9 @@ app.delete<{ id: string }>('/api/tenders/:id', requireJwt, requireRole('admin', 
   const { id } = req.params;
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     await setDeleted(id, true, actor, await tenderFallbackStatus(id));
-    await logActivity(id, 'deleted', actor, { actor_name: actorName });
+    await logActivity(id, 'deleted', actor, { actor_name: actorName, actor_type: actorType });
     res.json({ success: true, deleted: id });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -2553,10 +2829,9 @@ app.post<{ id: string }>('/api/tenders/:id/restore', requireJwt, requireRole('ad
   const { id } = req.params;
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     await setDeleted(id, false, actor, await tenderFallbackStatus(id));
-    await logActivity(id, 'restored', actor, { actor_name: actorName });
+    await logActivity(id, 'restored', actor, { actor_name: actorName, actor_type: actorType });
     res.json({ success: true, restored: id });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -2712,9 +2987,12 @@ const applyMarketPricesHandler = createApplyMarketPricesHandler({
   resolveDefaultMargin: async (tenderId) =>
     (await resolvePricingDefaults(tenderId)).default_marze_procent,
   onReviewsInvalidated: async (tenderId, indexes, request) => {
-    await logActivity(tenderId, 'cena_potvrzeni_zruseno', (request as any).user?.sub ?? null, {
+    const actor = auditActorForRequest(request);
+    await logActivity(tenderId, 'cena_potvrzeni_zruseno', actor.id, {
       duvod: 'apply-market-prices změnil nákupní nebo nabídkovou cenu',
       polozka_indexy: indexes,
+      actor_type: actor.type,
+      actor_name: actor.name,
     });
   },
 });
@@ -3411,9 +3689,12 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     );
 
     if (reviewWasInvalidated) {
-      await logActivity(id, 'cena_potvrzeni_zruseno', (req as any).user?.sub ?? null, {
+      const actor = auditActorForRequest(req);
+      await logActivity(id, 'cena_potvrzeni_zruseno', actor.id, {
         duvod: 'operátor změnil vybraný produkt',
         polozka_index: Number(itemIndex),
+        actor_type: actor.type,
+        actor_name: actor.name,
       });
     }
 
@@ -4026,7 +4307,7 @@ app.get('/api/jobs/:jobId', async (req, res) => {
 // POST /api/tenders/:id/run/all - zařadí celý pipeline jako jeden řetězený job
 app.post('/api/tenders/:id/run/all', async (req, res) => {
   const { id } = req.params;
-  if (!(await enforceGovernance(res, 'ai_jobs_enabled', true))) return;
+  if (!(await enforceGovernance(res, 'ai_jobs_enabled', true, req))) return;
   try {
     await stat(join(INPUT_DIR, id));
   } catch {
@@ -4049,7 +4330,7 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
     });
   }
 
-  const { job: parent, created } = enqueueRunAllPipeline(id);
+  const { job: parent, created } = enqueueRunAllPipeline(id, 'operator', requestAgentKeyId(req));
   if (!created) {
     return res.json({ jobId: parent.id, status: parent.status, message: 'Pipeline already in progress' });
   }
@@ -4084,7 +4365,7 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
     return res.status(409).json({ error: 'Pozastavená pipeline nemá uložený krok pro pokračování.', jobId: waiting.id });
   }
   const governanceKey: GovernanceSwitch = resumeStep === 'generate' ? 'generate_enabled' : 'ai_jobs_enabled';
-  if (!(await enforceGovernance(res, governanceKey, true))) return;
+  if (!(await enforceGovernance(res, governanceKey, true, req))) return;
 
   if (rejectIfDraining(res)) return;
 
@@ -4138,7 +4419,9 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
     return res.status(409).json({ error: message, jobId: waiting.id });
   }
 
-  enqueueStepJob(id, resumeStep, waiting.id, true, waiting.initiator);
+  const agentKeyId = requestAgentKeyId(req);
+  setJobAgentOwner(waiting, agentKeyId);
+  enqueueStepJob(id, resumeStep, waiting.id, true, waiting.initiator, agentKeyId);
   scheduleJobsPersist();
 
   console.log(`Pipeline job ${waiting.id} resumed (${resumeStep}) for ${id}`);
@@ -4157,7 +4440,7 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   const aiSteps = new Set(['analyze', 'match', 'generate', 'validate', 'verify-prices']);
   if (aiSteps.has(step)) {
     const governanceKey: GovernanceSwitch = step === 'generate' ? 'generate_enabled' : 'ai_jobs_enabled';
-    if (!(await enforceGovernance(res, governanceKey, true))) return;
+    if (!(await enforceGovernance(res, governanceKey, true, req))) return;
   }
 
   // Check input exists
@@ -4211,7 +4494,7 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     }
   }
 
-  const job = enqueueStepJob(id, step);
+  const job = enqueueStepJob(id, step, undefined, true, 'operator', requestAgentKeyId(req));
   res.json({ jobId: job.id, status: job.status });
 });
 
@@ -4260,10 +4543,9 @@ app.patch('/api/tenders/:id/status', async (req, res) => {
       return res.status(409).json({ error: 'illegal_transition', reason: check.reason });
     }
     await setStatus(id, target as StageKey);
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     await logActivity(id, 'status_change', actor, {
-      old: current, new: target, reason: reason ?? null, actor_name: actorName,
+      old: current, new: target, reason: reason ?? null, actor_name: actorName, actor_type: actorType,
     });
     if (crm?.assignee) {
       await notify({ user_id: crm.assignee, typ: 'status_change', text: 'Změnil se stav přiřazené zakázky.', url: `#/tender/${encodeURIComponent(id)}`, tender_id: id, actor_id: actor, dedup_key: `status_change:${id}` });
@@ -4288,9 +4570,12 @@ app.put('/api/tenders/:id/assignee', async (req, res) => {
     const current = crm?.status ?? deriveStageFromSteps(done);
     const value = assignee && typeof assignee === 'string' ? assignee : null;
     await setAssignee(id, value, current);
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
-    await logActivity(id, 'assignment', actor, { assignee: value, actor_name: actorName });
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
+    await logActivity(id, 'assignment', actor, {
+      assignee: value,
+      actor_name: actorName,
+      actor_type: actorType,
+    });
     if (value) {
       await notify({ user_id: value, typ: 'assigned', text: 'Byla vám přiřazena zakázka.', url: `#/tender/${encodeURIComponent(id)}`, tender_id: id, actor_id: actor, dedup_key: `assigned:${id}` });
     }
@@ -4367,8 +4652,7 @@ app.post('/api/tenders/:id/tasks', async (req, res) => {
   if (priorita && !TASK_PRIORITY.includes(priorita)) return res.status(400).json({ error: 'invalid_priorita' });
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     const task = await createTask({
       tender_id: id,
       title: title.trim(),
@@ -4379,7 +4663,9 @@ app.post('/api/tenders/:id/tasks', async (req, res) => {
       je_checklist: !!je_checklist,
       created_by: actor,
     });
-    await logActivity(id, 'task_created', actor, { task_id: task.id, title: task.title, actor_name: actorName });
+    await logActivity(id, 'task_created', actor, {
+      task_id: task.id, title: task.title, actor_name: actorName, actor_type: actorType,
+    });
     if (task.assignee) {
       await notify({ user_id: task.assignee, typ: 'task_assigned', text: `Nový úkol: ${task.title}`, url: `#/tender/${encodeURIComponent(id)}?tab=ukoly`, tender_id: id, entity_typ: 'task', entity_id: task.id, actor_id: actor, dedup_key: `task_assigned:${task.id}` });
     }
@@ -4402,12 +4688,11 @@ app.patch('/api/tasks/:taskId', async (req, res) => {
     if (!before) return res.status(404).json({ error: 'not_found' });
     const task = await updateTask(taskId, body);
     if (!task) return res.status(404).json({ error: 'not_found' });
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     // Aktivitu „dokončeno" logujeme jen při přechodu do 'hotovo' (ne při opakovaném uložení).
     if (before.stav !== 'hotovo' && task.stav === 'hotovo') {
       await logActivity(task.tender_id, 'task_completed', actor, {
-        task_id: task.id, title: task.title, actor_name: actorName,
+        task_id: task.id, title: task.title, actor_name: actorName, actor_type: actorType,
       });
     }
     res.json(task);
@@ -4451,10 +4736,11 @@ app.post('/api/tenders/:id/tasks/seed', async (req, res) => {
         seed_key: 'kval:' + createHash('sha1').update(`${k.typ ?? ''}\n${k.popis}`).digest('hex').slice(0, 16),
       }));
     const inserted = await seedChecklist(id, items);
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     if (inserted > 0) {
-      await logActivity(id, 'checklist_seeded', actor, { count: inserted, actor_name: actorName });
+      await logActivity(id, 'checklist_seeded', actor, {
+        count: inserted, actor_name: actorName, actor_type: actorType,
+      });
     }
     res.json({ seeded: inserted, tasks: await getTasks(id) });
   } catch (err) {
@@ -4682,7 +4968,7 @@ function bulkIds(body: unknown, maxIds: number): string[] | null {
 app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, res) => {
   const ids = bulkIds(req.body, 200);
   if (!ids) return res.status(400).json({ error: 'invalid_ids' });
-  if (!(await enforceGovernance(res, 'generate_enabled', true))) return;
+  if (!(await enforceGovernance(res, 'generate_enabled', true, req))) return;
 
   const started: string[] = [];
   const skipped: BulkSkip[] = [];
@@ -4714,7 +5000,7 @@ app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, r
       status(code: number) { governanceStatus = code; return this; },
       json(value: unknown) { governanceBody = value; return this; },
     } as unknown as express.Response;
-    if (!(await enforceGovernance(governanceResponse, 'generate_enabled', true))) {
+    if (!(await enforceGovernance(governanceResponse, 'generate_enabled', true, req))) {
       skipped.push({ id, status: governanceStatus, reason: 'governance_disabled', detail: governanceBody });
       continue;
     }
@@ -4727,7 +5013,7 @@ app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, r
       skipped.push({ id, status: 409, reason: 'already_running', detail: { jobId: activeAfterGate.id } });
       continue;
     }
-    enqueueStepJob(id, 'generate');
+    enqueueStepJob(id, 'generate', undefined, true, 'operator', requestAgentKeyId(req));
     started.push(id);
   }
   res.json({ started, skipped });
@@ -4931,10 +5217,11 @@ app.post('/api/tenders/:id/terminy', async (req, res) => {
   if (pripominka != null && (typeof pripominka !== 'number' || pripominka < 0)) return res.status(400).json({ error: 'invalid_pripominka' });
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     const termin = await createTermin({ tender_id: id, typ, datum, cas: cas ?? null, popis: popis ?? null, pripominka: pripominka ?? null, created_by: actor });
-    await logActivity(id, 'termin_created', actor, { termin_id: termin.id, typ, datum, actor_name: actorName });
+    await logActivity(id, 'termin_created', actor, {
+      termin_id: termin.id, typ, datum, actor_name: actorName, actor_type: actorType,
+    });
     res.json(termin);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -5000,9 +5287,12 @@ app.post('/api/tenders/:id/terminy/seed', async (req, res) => {
         return { typ: x.typ, datum: raw.slice(0, 10), cas: timeMatch ? timeMatch[1] : null, seed_key: `analysis:${x.field}` };
       });
     const inserted = await seedTerminy(id, items);
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
-    if (inserted > 0) await logActivity(id, 'terminy_seeded', actor, { count: inserted, actor_name: actorName });
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
+    if (inserted > 0) {
+      await logActivity(id, 'terminy_seeded', actor, {
+        count: inserted, actor_name: actorName, actor_type: actorType,
+      });
+    }
     res.json({ seeded: inserted, terminy: await getTerminy(id) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -5037,14 +5327,15 @@ app.post('/api/tenders/:id/comments', async (req, res) => {
     : [];
   if (!(await isDbAvailable())) return res.status(503).json({ error: 'db_unavailable' });
   try {
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     // mentions ověř proti reálným uživatelům (nedůvěřuj klientovi) + dedup + cap.
     const users = await getAllUsers().catch(() => [] as Array<{ id: string }>);
     const validIds = new Set(users.map((u) => u.id));
     const mentions = Array.from(new Set(rawMentions)).filter((m) => validIds.has(m)).slice(0, MAX_MENTIONS);
     const comment = await createComment({ tender_id: id, text, mentions, author_id: actor, author_name: actorName });
-    await logActivity(id, 'comment_added', actor, { comment_id: comment.id, actor_name: actorName });
+    await logActivity(id, 'comment_added', actor, {
+      comment_id: comment.id, actor_name: actorName, actor_type: actorType,
+    });
     const notified = new Set<string>();
     for (const uid of mentions) {
       if (uid === actor) continue;
@@ -5079,7 +5370,8 @@ app.delete('/api/comments/:commentId', async (req, res) => {
   try {
     const comment = await getComment(commentId);
     if (!comment) return res.status(404).json({ error: 'not_found' });
-    const sub = (req as any).user?.sub ?? null;
+    const requestActor = auditActorForRequest(req);
+    const sub = requestActor.id;
     let isAdmin = false;
     if (sub) {
       const u = await getUserById(sub);
@@ -5091,7 +5383,13 @@ app.delete('/api/comments/:commentId', async (req, res) => {
       return res.status(403).json({ error: 'forbidden', reason: 'Smazat komentář může jen autor nebo administrátor.' });
     }
     const ok = await softDeleteComment(commentId);
-    if (ok) await logActivity(comment.tender_id, 'comment_deleted', sub, { comment_id: comment.id });
+    if (ok) {
+      await logActivity(comment.tender_id, 'comment_deleted', sub, {
+        comment_id: comment.id,
+        actor_name: requestActor.name,
+        actor_type: requestActor.type,
+      });
+    }
     res.json({ success: ok });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -5378,13 +5676,13 @@ app.put('/api/tenders/:id/outcome', async (req, res) => {
   try {
     const outcome = await upsertOutcome(id, parsed.data);
     if (parsed.data.kandidat_id) await markOutcomeCandidateConfirmed(id, parsed.data.kandidat_id);
-    const actor = (req as any).user?.sub ?? null;
-    const actorName = (req as any).user?.name ?? null;
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
     await logActivity(id, 'vysledek_ulozen', actor, {
       vysledek: outcome.vysledek,
       vitezna_cena_bez_dph: outcome.vitezna_cena_bez_dph,
       nase_cena_bez_dph: outcome.nase_cena_bez_dph,
       actor_name: actorName,
+      actor_type: actorType,
     });
     // Feedback do win_prices je best-effort — selhání nesmí shodit uložení výsledku.
     let winpriceFeedback = false;
@@ -5464,11 +5762,13 @@ app.post('/api/tenders/:id/nakupy/seed', async (req, res) => {
     );
     const seeded = await upsertNakupy(id, plan.items);
     const nakupy = await listNakupy(id);
-    await logActivity(id, 'nakupni_seznam_sestaven', (req as any).user?.sub ?? null, {
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
+    await logActivity(id, 'nakupni_seznam_sestaven', actor, {
       seeded,
       celkem: nakupy.length,
       vynechane_nepotvrzene: plan.vynechane_nepotvrzene,
-      actor_name: (req as any).user?.name ?? null,
+      actor_name: actorName,
+      actor_type: actorType,
     });
     res.json({ nakupy, seeded, vynechane_nepotvrzene: plan.vynechane_nepotvrzene });
   } catch (err: any) {
@@ -5510,10 +5810,12 @@ app.put('/api/tenders/:id/nakupy/:polozkaIndex', async (req, res) => {
       parsedBody.data.poznamka,
     );
     if (!nakup) return res.status(404).json({ error: 'nakup_not_found' });
-    await logActivity(id, 'nakup_aktualizovan', (req as any).user?.sub ?? null, {
+    const { id: actor, name: actorName, type: actorType } = auditActorForRequest(req);
+    await logActivity(id, 'nakup_aktualizovan', actor, {
       polozka_index: nakup.polozka_index,
       objednano: nakup.objednano,
-      actor_name: (req as any).user?.name ?? null,
+      actor_name: actorName,
+      actor_type: actorType,
     });
     res.json({ nakup });
   } catch (err) {
@@ -5876,6 +6178,15 @@ async function startup() {
   try {
     await runMigrations();
     if (await isDbAvailable()) {
+      // Po padu procesu dorovnej agentni cost-log od persistovaneho offsetu. Charge ID
+      // je idempotentni, takze crash mezi DB zapisem a smazanim offsetu nic nezdvoji.
+      for (const job of jobs.values()) {
+        try {
+          await settleAgentJobCosts(job);
+        } catch (error) {
+          console.error(`Agentni naklad jobu ${job.id} se pri startu nepodarilo dorovnat:`, error);
+        }
+      }
       const stats = await getWarehouseStats();
       console.log(`Warehouse DB: ${stats.products} products, ${stats.sources} sources, ${stats.categories} categories`);
 
