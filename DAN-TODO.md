@@ -111,3 +111,25 @@ Nasazeno: cena a strop za každou část zvlášť · dokumenty se vyplňují do
 **Stropy částí u testovací zakázky** (vytěženo z reálné ZD, ne odhad): 646 500 / 552 000 /
 531 600 Kč **včetně DPH**. Překročení dnes **varuje**, neblokuje; tvrdé blokování zapneš
 přepínačem `BLOCK_PART_PRICE_CAP_EXCEEDED=true`. **Nesahal jsem na něj** — je to tvoje volba.
+
+## 2026-09-04 — Agentní vrstva hotová (PR #112, #113)
+
+Nasazeno: odvolatelná agentní identita (migrace 025) + MCP brána `/mcp` s devíti nástroji.
+**Agent typu Hermes se teď dostane dovnitř.**
+
+**Co musíš udělat ty, než ho pustíš:**
+
+- [ ] 🔑 **Vygenerovat agentní klíč.** V repu žádný není — schválně. Použij CLI
+      `scripts/src/tools/agent-keys.ts`. Klíč uvidíš **jednou**; ukládá se jen jako SHA-256 hash.
+      Nastav mu při tom **denní strop v Kč** (má vlastní, oddělený od lidského).
+- [ ] ⚙️ **Nakonfigurovat Hermese** podle `docs/agent/SKILL.md` — `mcp_servers` v
+      `~/.hermes/config.yaml`, `url: https://vz.ludone.cz/mcp` + `headers.Authorization`.
+- [ ] 🔒 **Rozhodnout expozici `/mcp`.** Dnes je chráněná jen Bearer klíčem. Zvaž rate limit
+      nebo IP allowlist — Hermes běží zvenčí, takže VPN by ho odřízla.
+
+**Co agent SMÍ:** číst, přinést zakázku z odkazu, nahrát dokumenty, spustit pipeline, posunout
+stav v pracovní části cyklu, **navrhnout cenu s doloženým odkazem na produkt**.
+
+**Co NESMÍ (a je to vynucené už při registraci nástroje):** potvrdit cenu, finalizovat,
+označit „podáno", posunout stav na `odeslana`/`vyhodnocena`/`vyhrano`/`prohrano`/`nepodano`,
+mazat zakázky. Potvrzení cen zůstává na člověku — tvůj invariant lidské kontroly platí.
