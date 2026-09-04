@@ -2,8 +2,10 @@ import { readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { basename, join } from 'path';
 import { parseDocx } from './document-parser.js';
-import type { ProductMatch, ProductCandidate, TenderAnalysis, ValidationCheck } from './types.js';
+import type { Cast, ProductMatch, ProductCandidate, TenderAnalysis, ValidationCheck } from './types.js';
 import type { CompanyProfile } from './data-resolver.js';
+import type { PartPriceRecap } from './price-calculator.js';
+import { checkPartPriceCaps } from './price-sanity.js';
 
 export const DOCUMENT_TEXT_LIMIT = 15_000;
 
@@ -54,6 +56,24 @@ function round2(value: number): number {
 
 function formatMoney(value: number): string {
   return value.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * Převod překročených stropů částí do společného validačního formátu. Výchozí
+ * status je warning; fail smí zapnout pouze explicitní konfigurační přepínač.
+ */
+export function buildPartPriceCapValidationChecks(
+  parts: readonly Cast[],
+  recaps: readonly PartPriceRecap[],
+  blocking = false,
+): ValidationCheck[] {
+  return checkPartPriceCaps(parts, recaps).map((finding) => ({
+    kategorie: 'cenova_spravnost',
+    kontrola: `Cenový strop části ${finding.cast_id}`,
+    status: blocking ? 'fail' : 'warning',
+    detail: finding.message,
+    zdroj: 'deterministic',
+  }));
 }
 
 function priority(filename: string): number {

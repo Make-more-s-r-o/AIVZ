@@ -259,6 +259,23 @@ export const CastSchema = z.object({
   terminy: TenderTerminySchema.optional(),
   pocet_polozek: z.number().int().nonnegative().optional().default(0),
   soupis_filename: z.string().optional(), // source soupis file
+  // Nepřekročitelná nabídková cena celé části. Není-li v ZD výslovně uvedena,
+  // zůstává null/undefined; predpokladana_hodnota se za strop automaticky nepovažuje.
+  cenovy_strop: z.preprocess(
+    (value) => value == null ? value : aiFiniteNumber(value) ?? value,
+    z.number().nonnegative().optional().nullable(),
+  ),
+  // true = strop je včetně DPH, false = bez DPH. Bez tohoto příznaku nelze
+  // bezpečně zvolit porovnávanou cenu.
+  cenovy_strop_vcetne_dph: z.boolean().optional().nullable(),
+}).superRefine((cast, context) => {
+  if (cast.cenovy_strop != null && typeof cast.cenovy_strop_vcetne_dph !== 'boolean') {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Cenový strop části musí uvádět, zda je včetně DPH nebo bez DPH.',
+      path: ['cenovy_strop_vcetne_dph'],
+    });
+  }
 });
 
 type CastOutput = z.output<typeof CastSchema>;

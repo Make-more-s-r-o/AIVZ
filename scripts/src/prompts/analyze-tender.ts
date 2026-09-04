@@ -24,6 +24,14 @@ U dělené zakázky použij pro doba_plneni_od nejčasnější datum, pro doba_p
 datum a pro lhůty nejbližší/nejčasnější datum. Termíny jednotlivých částí zachovej v
 casti[].terminy. U nedělené zakázky vrať casti: [].
 
+U každé části vytěž cenovy_strop JEN tehdy, když zadávací dokumentace výslovně říká,
+že jde o maximální/nepřekročitelnou nabídkovou cenu dané části. Běžná předpokládaná
+hodnota není automaticky cenový strop. Současně nastav cenovy_strop_vcetne_dph na true,
+je-li strop uveden včetně DPH, nebo false, je-li bez DPH. Když výslovný strop uveden není,
+vrať cenovy_strop: null a cenovy_strop_vcetne_dph: null. Strop nikdy neodhaduj ani
+nedopočítávej z hodnot jiných částí. Pokud je maximum uvedeno, ale dokumentace neurčuje
+jednoznačně, zda je s DPH nebo bez DPH, základ nehádej a vrať obě pole jako null.
+
 Odpověz POUZE validním JSON. Žádný další text.`;
 
 export function buildAnalyzeUserMessage(extractedText: string): string {
@@ -65,6 +73,8 @@ Odpověz ve formátu:
       "id": "1",
       "nazev": "Část 1 - ...",
       "predpokladana_hodnota": null,
+      "cenovy_strop": null,
+      "cenovy_strop_vcetne_dph": null,
       "pocet_polozek": 0,
       "terminy": {
         "lhuta_nabidek": null,

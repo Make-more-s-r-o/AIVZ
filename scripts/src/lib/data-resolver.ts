@@ -7,6 +7,11 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { TenderAnalysis, ProductMatch, ProductCandidate } from './types.js';
+import {
+  calculateTenderPriceRecap,
+  type UnassignedPartPriceItem,
+} from './price-calculator.js';
+import { extractCastIdFromFilename } from '../parse-soupis.js';
 
 const ROOT = new URL('../../../', import.meta.url).pathname;
 
@@ -20,6 +25,9 @@ export interface GenerationMeta {
     source: 'clean-builder' | 'reconstruct-engine' | 'ai-fill' | 'excel-ai' | 'programmatic';
     cost_czk: number;
     template_source?: string;
+    cast_id?: string;
+    cena_bez_dph?: number;
+    cena_s_dph?: number;
   };
 }
 
@@ -53,6 +61,14 @@ export interface DocumentDataItem {
 export interface DocumentDataCast {
   id: string;
   nazev: string;
+  cena_bez_dph: number;
+  cena_s_dph: number;
+  pocet_polozek: number;
+}
+
+export interface PartDocumentPriceAssignment {
+  document: string;
+  cast_id: string;
   cena_bez_dph: number;
   cena_s_dph: number;
 }
@@ -90,6 +106,9 @@ export interface DocumentData {
 
   // Multi-part tender
   casti?: DocumentDataCast[];
+  /** Rekapitulace všech částí pro povinné šablony, i když se podává jen jejich podmnožina. */
+  cenova_rekapitulace_po_castech?: DocumentDataCast[];
+  polozky_bez_cast_id?: UnassignedPartPriceItem[];
 
   // Meta
   datum: string;
@@ -161,6 +180,67 @@ function extractMisto(sidlo: string): string {
 /** Zaokrouhlí na 2 desetinná místa (odstraní i float šum typu 92828.19000000006) */
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/** Určí část explicitním cast_id, jinak stabilním identifikátorem v názvu šablony. */
+export function resolveDocumentCastId(
+  document: { filename: string; cast_id?: string },
+  availableParts: readonly { id: string }[],
+): string | undefined {
+  const candidate = document.cast_id?.trim() || extractCastIdFromFilename(document.filename);
+  return candidate && availableParts.some((part) => part.id === candidate) ? candidate : undefined;
+}
+
+/** Přepne pouze data dokumentu vázaného na část; bez cast_id vrací původní agregát. */
+export function scopeDocumentDataToPart(data: DocumentData, castId?: string): DocumentData {
+  if (!castId) return data;
+  const part = (data.cenova_rekapitulace_po_castech ?? data.casti)
+    ?.find((candidate) => candidate.id === castId);
+  if (!part) throw new Error(`Pro část ${castId} chybí cenová rekapitulace dokumentu.`);
+  return {
+    ...data,
+    celkova_cena_bez_dph: part.cena_bez_dph,
+    celkova_cena_s_dph: part.cena_s_dph,
+    dph_castka: round2(part.cena_s_dph - part.cena_bez_dph),
+    polozky: data.polozky.filter((item) => item.cast_id === castId),
+    casti: [part],
+    polozky_bez_cast_id: [],
+  };
+}
+
+/**
+ * Obrana proti regresi, kdy různé části dostaly globální cenu. Stejné přidělené
+ * ceny jsou povolené jen tehdy, když jsou stejné i skutečné rekapitulace částí.
+ */
+export function assertPartDocumentPriceAssignments(
+  assignments: readonly PartDocumentPriceAssignment[],
+  expectedParts: readonly DocumentDataCast[],
+): void {
+  const expectedById = new Map(expectedParts.map((part) => [part.id, part]));
+  for (let left = 0; left < assignments.length; left++) {
+    for (let right = left + 1; right < assignments.length; right++) {
+      const a = assignments[left]!;
+      const b = assignments[right]!;
+      if (a.cast_id === b.cast_id) continue;
+      const expectedA = expectedById.get(a.cast_id);
+      const expectedB = expectedById.get(b.cast_id);
+      if (!expectedA || !expectedB) continue;
+      const expectedDiffer = expectedA.cena_bez_dph !== expectedB.cena_bez_dph
+        || expectedA.cena_s_dph !== expectedB.cena_s_dph;
+      const assignedSame = a.cena_bez_dph === b.cena_bez_dph && a.cena_s_dph === b.cena_s_dph;
+      if (expectedDiffer && assignedSame) {
+        throw new Error(`Dokumenty ${a.document} (${a.cast_id}) a ${b.document} (${b.cast_id}) dostaly tutéž cenu, přestože ceny částí se liší.`);
+      }
+    }
+  }
+
+  for (const assignment of assignments) {
+    const expected = expectedById.get(assignment.cast_id);
+    if (!expected) throw new Error(`Dokument ${assignment.document} odkazuje na neznámou část ${assignment.cast_id}.`);
+    if (assignment.cena_bez_dph !== expected.cena_bez_dph || assignment.cena_s_dph !== expected.cena_s_dph) {
+      throw new Error(`Dokument ${assignment.document} nedostal cenu své části ${assignment.cast_id}.`);
+    }
+  }
 }
 
 /** Formátuje datum jako DD.MM.YYYY */
@@ -268,9 +348,9 @@ export async function resolveDocumentData(tenderId: string): Promise<DocumentDat
     lineSdph: round2(p.priceSdph * p.mnozstvi),
   }));
 
-  // Calculate totals
-  const celkova_cena_bez_dph = round2(lines.reduce((s, l) => s + l.lineBezDph, 0));
-  const celkova_cena_s_dph = round2(lines.reduce((s, l) => s + l.lineSdph, 0));
+  const priceRecap = calculateTenderPriceRecap(productMatch, analysis.casti ?? [], selectedPartIds);
+  const celkova_cena_bez_dph = priceRecap.celkova_cena_bez_dph;
+  const celkova_cena_s_dph = priceRecap.celkova_cena_s_dph;
   const dph_castka = round2(celkova_cena_s_dph - celkova_cena_bez_dph);
 
   // Build items
@@ -283,21 +363,14 @@ export async function resolveDocumentData(tenderId: string): Promise<DocumentDat
     cast_id: l.castId,
   }));
 
-  // Build casti (multi-part) — ceny per část sečteme ze zaokrouhlených řádků,
-  // aby Σ částí == celková cena (místo dopočtu s_dph přes ×1.21).
-  let casti: DocumentDataCast[] | undefined;
-  if (hasParts && selectedPartIds) {
-    casti = analysis.casti
-      .filter(c => selectedPartIds!.has(c.id))
-      .map(c => {
-        const castLines = lines.filter(l => l.castId === c.id);
-        return {
-          id: c.id,
-          nazev: c.nazev,
-          cena_bez_dph: round2(castLines.reduce((s, l) => s + l.lineBezDph, 0)),
-          cena_s_dph: round2(castLines.reduce((s, l) => s + l.lineSdph, 0)),
-        };
-      });
+  // Sdílená rekapitulace je současně zdrojem pro dokumenty vázané na část.
+  const casti: DocumentDataCast[] | undefined = hasParts
+    ? priceRecap.casti.filter((part) => !selectedPartIds || selectedPartIds.has(part.id))
+    : undefined;
+  for (const item of priceRecap.polozky_bez_cast_id) {
+    console.warn(
+      `  ⚠ Položka „${item.polozka_nazev}“ (#${item.polozka_index + 1}) nemá u dělené zakázky cast_id a není zahrnuta v rekapitulaci žádné části.`,
+    );
   }
 
   // Povinná pole zakázky: zástupný text z analýzy (AI hedge) do formálního dokumentu nepatří.
@@ -345,6 +418,8 @@ export async function resolveDocumentData(tenderId: string): Promise<DocumentDat
 
     // Multi-part
     casti,
+    cenova_rekapitulace_po_castech: hasParts ? priceRecap.casti : undefined,
+    polozky_bez_cast_id: hasParts ? priceRecap.polozky_bez_cast_id : undefined,
 
     // Meta
     datum: formatDatum(),
