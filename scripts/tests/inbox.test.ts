@@ -405,8 +405,8 @@ test('governance: bulk endpointy kontrolují guard uvnitř iterace bez finalize 
     source.indexOf("app.post(['/api/inbox/bulk-finalize'"),
   );
   const loop = generateRoute.indexOf('for (const id of ids)');
-  const perTenderGuard = generateRoute.indexOf("enforceGovernance(governanceResponse, 'generate_enabled', true)");
-  const enqueue = generateRoute.indexOf("enqueueStepJob(id, 'generate')");
+  const perTenderGuard = generateRoute.indexOf("enforceGovernance(governanceResponse, 'generate_enabled', true, req)");
+  const enqueue = generateRoute.indexOf("enqueueStepJob(id, 'generate', undefined, true, 'operator', requestAgentKeyId(req))");
   assert.ok(loop >= 0 && perTenderGuard > loop && enqueue > perTenderGuard);
 
   const finalizeRoute = source.slice(

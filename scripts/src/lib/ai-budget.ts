@@ -15,6 +15,62 @@ export interface BudgetWarningInput {
 
 export type BudgetWarningResult = 'below_threshold' | 'disabled' | 'already_sent' | 'sent';
 
+export interface DailyBudgetSnapshot {
+  day: string;
+  limitCzk: number;
+  spentCzk: number;
+  remainingCzk: number;
+  exhausted: boolean;
+}
+
+interface DatedCostEntry {
+  timestamp: string;
+  costCZK: number;
+}
+
+export interface DailyAgentCharge {
+  day: string;
+  amountCzk: number;
+}
+
+/**
+ * Náklad agenta je součástí společného cost-logu, ale nesmí čerpat lidský limit.
+ * Odečítáme pouze již přiřazené agentní náklady; záporný lidský náklad není možný.
+ */
+export function humanDailySpendCzk(totalTodayCzk: number, agentTodayCzk: number): number {
+  const total = Number.isFinite(totalTodayCzk) ? totalTodayCzk : 0;
+  const agent = Number.isFinite(agentTodayCzk) ? agentTodayCzk : 0;
+  return Math.max(0, total - agent);
+}
+
+/** Jednotná hláška pro HTTP guard i navazující kroky pipeline. */
+export function agentDailyLimitBlock(budget: DailyBudgetSnapshot): string | null {
+  if (!budget.exhausted && budget.spentCzk < budget.limitCzk) return null;
+  return `Agent vyčerpal denní AI limit ${budget.limitCzk.toFixed(2)} Kč; zbývá 0.00 Kč.`;
+}
+
+/**
+ * Rozdělí nové append-only cost-log záznamy po UTC dnech. Offset se ukládá s jobem,
+ * takže po restartu lze stejný job dopočítat idempotentním charge ID.
+ */
+export function agentChargesSince(
+  entries: readonly DatedCostEntry[],
+  offset: number,
+): DailyAgentCharge[] {
+  if (!Number.isInteger(offset) || offset < 0 || offset > entries.length) {
+    throw new Error('Neplatný offset agentního cost-logu.');
+  }
+  const totals = new Map<string, number>();
+  for (const entry of entries.slice(offset)) {
+    if (!entry || !Number.isFinite(entry.costCZK) || entry.costCZK <= 0) continue;
+    const timestamp = new Date(entry.timestamp);
+    if (Number.isNaN(timestamp.getTime())) continue;
+    const day = timestamp.toISOString().slice(0, 10);
+    totals.set(day, (totals.get(day) ?? 0) + entry.costCZK);
+  }
+  return [...totals.entries()].map(([day, amountCzk]) => ({ day, amountCzk }));
+}
+
 /** Odeslání do stejného incoming-webhook cíle, který používá provozní watchdog. */
 export async function sendWatchdogSlackWarning(message: string): Promise<void> {
   const webhook = process.env.VZ_WATCHDOG_SLACK_WEBHOOK_URL
