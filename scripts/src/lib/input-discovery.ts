@@ -15,9 +15,10 @@ import { ZIP_PEEK_SIZE_LIMIT_BYTES } from './upload-limits.js';
  *  - rekurzivně projde podadresáře (limit hloubky + max souborů),
  *  - transparentně rozbalí ZIP (a 1 úroveň vnořeného ZIPu) do pracovní složky
  *    `input/<tender>/.extracted/` (gitignore),
- *  - odfiltruje šum (__MACOSX, .DS_Store, Thumbs.db, LibreOffice ~$ zámky, 0 B),
- *  - deduplikuje stejný soubor (název+velikost) z více míst,
- *  - při kolizi jmen (stejný název, jiný obsah) prefixuje display name relativní cestou.
+ *  - odfiltruje šum (__MACOSX, .DS_Store, Thumbs.db, LibreOffice ~$ zámky),
+ *    ale 0 B dokumenty ponechá pro explicitní nahlášení neúplnosti,
+ *  - zachová každý nalezený soubor jako samostatný záměr, i když má shodný obsah,
+ *  - při kolizi jmen prefixuje display name relativní cestou.
  *
  * BEZPEČNOST:
  *  - zip-slip ochrana: žádná entry nesmí zapsat mimo cílovou složku,
@@ -26,6 +27,8 @@ import { ZIP_PEEK_SIZE_LIMIT_BYTES } from './upload-limits.js';
 
 /** Název pracovní složky pro rozbalené ZIPy (relativně k inputDir). Gitignorováno. */
 export const EXTRACTED_DIRNAME = '.extracted';
+/** Pracovní výstupy LibreOffice konverze `.doc`; nikdy nejsou zdrojovou přílohou. */
+export const CONVERTED_DOC_DIRNAME = '.converted-docx';
 
 export interface DiscoveredFile {
   /** Absolutní cesta k souboru (na disku — i uvnitř .extracted/). */
@@ -64,12 +67,35 @@ const DEFAULTS: Required<DiscoverOptions> = {
 
 /** Adresáře/soubory, které se při procházení ignorují (šum). */
 function isNoiseName(name: string): boolean {
+  if (name === CONVERTED_DOC_DIRNAME) return true;
   if (name === '__MACOSX') return true;
   if (name === '.DS_Store') return true;
   if (name === 'Thumbs.db' || name === 'thumbs.db') return true;
   // LibreOffice/MS Office zámkové/temp soubory: "~$Něco.xlsx"
   if (name.startsWith('~$')) return true;
   return false;
+}
+
+/**
+ * Soubory, které vědomě nejsou zadávací dokumentací pro textovou extrakci.
+ * Výčet držíme explicitní: neznámá přípona se nesmí omylem ztratit jako „šum“.
+ */
+export const INTENTIONALLY_IGNORED_INPUT_EXTENSIONS = new Set([
+  '.cer', '.crt', '.der',
+  '.p7s', '.p7m', '.sig',
+  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tif', '.tiff', '.webp', '.svg',
+]);
+
+const INTENTIONALLY_IGNORED_INPUT_NAMES = new Set([
+  // Technická metadata vytvářená upload endpointem vedle skutečných příloh.
+  '_metadata.json',
+]);
+
+/** Klasifikace sdílená discovery a parserem, včetně cest/display names. */
+export function isIntentionallyIgnoredInputName(name: string): boolean {
+  const leaf = name.split(/[\\/]/).pop()?.trim().toLowerCase() ?? '';
+  return INTENTIONALLY_IGNORED_INPUT_NAMES.has(leaf)
+    || INTENTIONALLY_IGNORED_INPUT_EXTENSIONS.has(extname(leaf).toLowerCase());
 }
 
 /** Interní stav jednoho discovery běhu. */
@@ -86,6 +112,8 @@ interface Ctx {
   extractedBytes: number;
   /** Kolik ZIPů se pro unikátní jméno extrahovalo — pro unikátní cílové složky. */
   zipCounter: number;
+  /** Názvy ZIP kontejnerů nalezených ve zdrojovém stromu (pro návaznost na ingest). */
+  archiveNames: string[];
   /** Varování k vypsání do logu. */
   warnings: string[];
 }
@@ -133,14 +161,19 @@ async function extractZipBuffer(
       continue;
     }
 
-    // 0 B soubory ignorujeme (šum, prázdné placeholdery).
-    if (content.length === 0) continue;
-
     // Cap na celkovou rozbalenou velikost (obrana proti zip bombě).
     if (ctx.extractedBytes + content.length > ctx.opts.maxExtractedBytes) {
       ctx.warnings.push(
         `Cap na rozbalenou velikost (${Math.round(ctx.opts.maxExtractedBytes / 1024 / 1024)} MB) dosažen — zbytek ZIPu přeskočen`
       );
+      break;
+    }
+
+    // Velikostní cap sám nestačí pro ZIP s tisíci 0 B entries (inode bomb).
+    // `considered` už zahrnuje právě zpracovávaný ZIP; zapsané entries se do něj
+    // započítají následným walk(), proto je zde pouze předběžně rezervujeme.
+    if (ctx.considered + written.length >= ctx.opts.maxFiles) {
+      ctx.warnings.push(`Limit ${ctx.opts.maxFiles} souborů dosažen už při rozbalování ZIPu — zbytek přeskočen`);
       break;
     }
 
@@ -204,6 +237,7 @@ async function walk(dir: string, depth: number, zipDepth: number, ctx: Ctx): Pro
         continue;
       }
       ctx.considered++;
+      ctx.archiveNames.push(entry.name);
       let buffer: Buffer;
       try {
         buffer = await readFile(full);
@@ -264,13 +298,13 @@ export function shouldPeekZipFile(sizeBytes: number): boolean {
 }
 
 /**
- * Hlavní vstupní bod. Vrátí deduplikovaný seznam relevantních souborů zakázky
+ * Hlavní vstupní bod. Vrátí seznam relevantních souborů zakázky
  * (rekurzivně + z rozbalených ZIPů), s vyřešenými display names.
  */
 export async function discoverInputFiles(
   inputDir: string,
   options: DiscoverOptions = {}
-): Promise<{ files: DiscoveredFile[]; warnings: string[] }> {
+): Promise<{ files: DiscoveredFile[]; warnings: string[]; archiveNames: string[] }> {
   const opts = { ...DEFAULTS, ...options };
   const extractRoot = join(inputDir, EXTRACTED_DIRNAME);
 
@@ -285,6 +319,7 @@ export async function discoverInputFiles(
     considered: 0,
     extractedBytes: 0,
     zipCounter: 0,
+    archiveNames: [],
     warnings: [],
   };
 
@@ -295,23 +330,27 @@ export async function discoverInputFiles(
     try {
       const st = await stat(r.absPath);
       r.size = st.size;
-    } catch {
-      r.size = 0;
+    } catch (error) {
+      // Nezaměňovat nedostupný soubor za skutečný 0 B dokument.
+      ctx.warnings.push(`Nelze zjistit velikost souboru "${r.relPath}": ${error}`);
+      r.size = -1;
     }
   }
 
-  // Filtr 0 B souborů (šum).
-  const nonEmpty = ctx.raw.filter((r) => r.size > 0);
-
-  // Dedup: stejný (basename, size) = tentýž soubor → jednou.
-  const seen = new Map<string, { absPath: string; relPath: string; size: number; fromZip: boolean }>();
-  for (const r of nonEmpty) {
-    const key = `${basename(r.relPath).toLowerCase()}|${r.size}`;
-    if (!seen.has(key)) {
-      seen.set(key, r);
+  // 0 B soubory nejsou automaticky šum: prázdný PDF/DOCX/XLS(X) je očekávaný
+  // dokument, který parser musí uvést jako chybějící. Vědomě ignorované technické
+  // položky (metadata/podpis/certifikát/obrázek) zůstanou bez blokujícího varování
+  // a parser je samostatně vykáže v ignoredDocumentNames.
+  for (const r of ctx.raw) {
+    if (r.size === 0 && !isIntentionallyIgnoredInputName(r.relPath)) {
+      ctx.warnings.push(`Prázdný vstupní soubor (0 B): "${r.relPath}"`);
     }
   }
-  const unique = [...seen.values()];
+
+  // Každá odlišná cesta je samostatný nalezený záměr. Ani shodný název, velikost
+  // a obsah nejsou dostatečný důvod dokument potichu ignorovat (typicky dvě části
+  // používají stejný formulář). Vědomě ignorované typy vykazuje až parser.
+  const unique = ctx.raw;
 
   // Přiřazení display name: pokud stejný basename nesou 2+ RŮZNÉ soubory,
   // dostanou všechny relativní cestu (aby se nezaměnily); jinak čistý basename.
@@ -338,5 +377,32 @@ export async function discoverInputFiles(
   // Stabilní pořadí výstupu.
   files.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
-  return { files, warnings: ctx.warnings };
+  return { files, warnings: ctx.warnings, archiveNames: ctx.archiveNames };
+}
+
+const SOURCE_ATTACHMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.zip']);
+
+/**
+ * Seznam fyzických zdrojových příloh bez rozbalování ZIPů. Používá jej ruční upload
+ * k bezpečnému sloučení s dřívějším ingest očekáváním (např. průběžné doplnění 10/18).
+ */
+export async function listSourceAttachmentNames(inputDir: string, maxDepth = 5): Promise<string[]> {
+  const names: string[] = [];
+  const visit = async (dir: string, depth: number): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (isNoiseName(entry.name) || (dir === inputDir && entry.name === EXTRACTED_DIRNAME)) continue;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth < maxDepth) await visit(fullPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !SOURCE_ATTACHMENT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
+      const fileStat = await stat(fullPath);
+      if (fileStat.size > 0) names.push(relative(inputDir, fullPath).split(sep).join('/'));
+    }
+  };
+  await visit(inputDir, 0);
+  return names;
 }

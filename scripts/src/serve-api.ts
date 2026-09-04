@@ -64,8 +64,23 @@ import {
 } from './lib/podani.js';
 import { refreshProductMatchPriceSanity } from './lib/price-sanity.js';
 import type { PriceSanityFlag } from './lib/types.js';
-import { peekZipFileCount } from './lib/input-discovery.js';
+import { listSourceAttachmentNames, peekZipFileCount } from './lib/input-discovery.js';
 import { isStale } from './lib/stale-check.js';
+import {
+  RadkovySberacLogu,
+  aplikujUplnostNaStavy,
+  nactiUplnostZakazky,
+  ocekavanyPocetPoMultipartDavce,
+  stavPoKontroleUplnosti,
+  ulozUplnostKroku,
+  vytvorUplnostKroku,
+  vytvorSloucenouUplnostIngestu,
+  zaznamenejVysledekPipelineKroku,
+  zpravaUplnostiProUzivatele,
+  zpravaUplnostiZLogu,
+  type UplnostKroku,
+  type UplnostZakazky,
+} from './lib/uplnost.js';
 import { findUnconfirmedPrices, validateServerPriceWrite } from './lib/price-confirmation.js';
 import {
   UPLOAD_FILE_SIZE_LIMIT_BYTES,
@@ -111,9 +126,16 @@ import {
 } from './lib/winprice-store.js';
 import { z } from 'zod';
 import { monitoringHlidacHandler } from './lib/monitoring/hlidac-route.js';
-import { fetchNenTenders, fetchNenAttachments } from './lib/monitoring/nen-client.js';
+import {
+  MAX_NEN_PAGES,
+  fetchNenTenders,
+  fetchNenAttachments,
+  isAllowedNenUrl,
+  parseNenAttachments,
+} from './lib/monitoring/nen-client.js';
 import {
   downloadNenAttachments, downloadHlidacAttachments, incompleteDownloadWarning,
+  IGNORABLE_ZD_EXTENSIONS,
   monitoringAutoStartGovernanceDecision, shouldAutoStartDownloadedPipeline,
 } from './lib/monitoring/zd-download.js';
 import { fetchNewTenders, fetchHlidacTenderDocuments } from './lib/monitoring/hlidac-client.js';
@@ -303,6 +325,103 @@ const jobQueue: string[] = [];
 let persistTimer: NodeJS.Timeout | null = null;
 let persistDirty = false;
 let persistPromise = Promise.resolve();
+
+const ACTIVE_EXECUTION_STATUSES = new Set(['running', 'queued']);
+const RESUMABLE_PIPELINE_STATUSES = new Set(['waiting_approval', 'budget_paused', 'interrupted']);
+const activeIngests = new Set<string>();
+
+/**
+ * Vstup zakázky je snapshot každého kroku. Během aktivního či resumovatelného
+ * pipeline jej proto nelze měnit, jinak by starý child mohl přepsat novější ingest.
+ */
+function findTenderExecutionConflict(tenderId: string): { id: string; step: string } | undefined {
+  if (activeIngests.has(tenderId)) return { id: `ingest:${tenderId}`, step: 'ingest' };
+  return [...jobs.values()].find((job) => job.tenderId === tenderId && (
+    ACTIVE_EXECUTION_STATUSES.has(job.status)
+    || (job.kind === 'pipeline' && RESUMABLE_PIPELINE_STATUSES.has(job.status))
+  ));
+}
+
+/**
+ * Krátká exkluzivní rezervace souborového snapshotu pro ruční cenové mutace.
+ * Waiting-approval je záměrně povolen (tam operátor ceny upravuje), running/queued
+ * child však ne: nesmí současně číst či přepisovat product-match.json.
+ */
+function reserveTenderSnapshotMutation(tenderId: string): { id: string; step: string } | undefined {
+  if (activeIngests.has(tenderId)) return { id: `mutation:${tenderId}`, step: 'mutation' };
+  const active = [...jobs.values()].find((job) => job.tenderId === tenderId
+    && ACTIVE_EXECUTION_STATUSES.has(job.status));
+  if (active) return { id: active.id, step: active.step };
+  activeIngests.add(tenderId);
+  return undefined;
+}
+
+function snapshotMutationConflictResponse(
+  res: express.Response,
+  conflict: { id: string; step: string },
+): express.Response {
+  return res.status(409).json({
+    error: 'Produkt ani cenu nelze měnit souběžně s jinou změnou nebo běžícím krokem pipeline.',
+    jobId: conflict.id,
+  });
+}
+
+async function reserveTenderIngest(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): Promise<void | express.Response> {
+  const rawId = req.params.id || (req as any)._tenderId;
+  const tenderId = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!tenderId) return res.status(400).json({ error: 'Chybí ID zakázky.' });
+  const conflict = tenderId ? findTenderExecutionConflict(tenderId) : undefined;
+  if (conflict) {
+    return res.status(409).json({
+      error: 'Dokumenty nelze měnit během aktivního nebo pozastaveného pipeline. Nejdříve jej dokončete nebo zrušte.',
+      jobId: conflict.id,
+    });
+  }
+  activeIngests.add(tenderId);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeIngests.delete(tenderId);
+  };
+  (res.locals as Record<string, unknown>).releaseTenderIngest = release;
+  try {
+    const outputDir = join(OUTPUT_DIR, tenderId);
+    const previous = (await nactiUplnostZakazky(outputDir))?.kroky.ingest;
+    (res.locals as Record<string, unknown>).previousIngest = previous ?? null;
+    const sourceNames = await listSourceAttachmentNames(join(INPUT_DIR, tenderId)).catch(() => [] as string[]);
+    (res.locals as Record<string, unknown>).sourceNamesBeforeIngest = sourceNames;
+    // Až první povolený file part prokáže, že request opravdu začne měnit input,
+    // fileFilter před zápisem zavolá tuto idempotentní fail-closed pojistku.
+    let preflightPromise: Promise<unknown> | undefined;
+    (req as any)._ensureTenderIngestPreflight = () => {
+      if (!preflightPromise) {
+        const preflight = vytvorSloucenouUplnostIngestu({
+          skutecneDokumenty: sourceNames,
+          ocekavanoVDavce: previous ? 0 : 1,
+          predchozi: previous,
+          noveChybi: ['příjem nové dávky dokumentů nebyl dokončen'],
+          probiha: true,
+        });
+        preflightPromise = ulozUplnostKroku(outputDir, tenderId, preflight);
+      }
+      return preflightPromise;
+    };
+    next();
+  } catch (error) {
+    release();
+    next(error);
+  }
+}
+
+function releaseTenderIngestReservation(res: express.Response): void {
+  const release = (res.locals as Record<string, unknown>).releaseTenderIngest;
+  if (typeof release === 'function') release();
+}
 
 // Logy mohou přicházet po malých kusech, proto zápisy krátce slučujeme. Stavové přechody
 // přesto vždy skončí v atomickém snapshotu output/.jobs.json.
@@ -504,11 +623,11 @@ function processQueue() {
   }
   for (const jobId of toStart) {
     const job = jobs.get(jobId);
-    if (job) startJob(job);
+    if (job) void startJob(job);
   }
 }
 
-function startJob(job: Job) {
+async function startJob(job: Job) {
   runningJobs.add(job.id);
   job.status = 'running';
   const executionStartedAt = new Date().toISOString();
@@ -522,16 +641,68 @@ function startJob(job: Job) {
   }
   scheduleJobsPersist();
 
-  const scriptFile = STEP_FILES[job.step];
-  if (!scriptFile) {
+  const failBeforeSpawn = (reason: string) => {
+    const finishedAt = new Date().toISOString();
+    const message = `${reason} Proces nebyl spuštěn.`;
     job.status = 'error';
-    job.error = `Unknown step: ${job.step}`;
-    job.finishedAt = new Date().toISOString();
-    const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
-    if (parent) markPipelineStepFinished(parent, job.step as PipelineStep, job.finishedAt);
+    job.error = message;
+    job.finishedAt = finishedAt;
     runningJobs.delete(job.id);
+    activeJobStoppers.delete(job.id);
+    const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
+    if (parent) {
+      markPipelineStepFinished(parent, job.step as PipelineStep, finishedAt);
+      parent.status = 'error';
+      parent.currentStep = job.step as PipelineStep;
+      parent.failedStep = job.step as PipelineStep;
+      parent.error = message;
+      parent.finishedAt = finishedAt;
+    }
     scheduleJobsPersist();
     processQueue();
+  };
+
+  const scriptFile = STEP_FILES[job.step];
+  if (!scriptFile) {
+    failBeforeSpawn(`Unknown step: ${job.step}.`);
+    return;
+  }
+
+  // Než dítě začne měnit artefakty, atomicky zneplatni starý zelený výsledek
+  // tohoto kroku i všech downstream kroků. Pád serveru mezi spawnem a finálním
+  // callbackem tak po restartu nemůže vystavit předchozí artefakty jako aktuální.
+  try {
+    await ulozUplnostKroku(
+      join(OUTPUT_DIR, job.tenderId),
+      job.tenderId,
+      vytvorUplnostKroku({
+        krok: job.step as PipelineStep,
+        metriky: [{ nazev: 'novy_vysledek', jednotka: 'vystupy', ocekavano: 1, dostano: 0 }],
+        chybi: [`nový výsledek kroku ${job.step} dosud nevznikl`],
+        selhalo: true,
+        zprava: `Krok ${job.step} právě probíhá; předchozí výsledek už není aktuální.`,
+        naprava: 'Počkejte na dokončení kroku; při přerušení jej spusťte znovu.',
+      }),
+    );
+  } catch (error) {
+    // Shutdown mohl během awaitu už checkpointovat job jako interrupted; tento
+    // stav nesmíme přepsat ani po chybě zápisu rozběhnout nový proces.
+    if (draining || job.status !== 'running') {
+      runningJobs.delete(job.id);
+      scheduleJobsPersist();
+      return;
+    }
+    failBeforeSpawn(
+      `Krok ${job.step} nelze spustit, protože se nepodařilo uložit fail-closed stav úplnosti: ${String(error)}.`,
+    );
+    return;
+  }
+
+  // Nový await je hranice pro graceful drain. Kontrola a následující spawn jsou
+  // už bez dalšího awaitu, takže po zahájení shutdownu žádné nové dítě nevznikne.
+  if (draining || job.status !== 'running' || !runningJobs.has(job.id)) {
+    runningJobs.delete(job.id);
+    scheduleJobsPersist();
     return;
   }
 
@@ -569,6 +740,8 @@ function startJob(job: Job) {
   );
 
   let finished = false;
+  const stdoutLines = new RadkovySberacLogu();
+  const stderrLines = new RadkovySberacLogu();
 
   // Ukonči dítě: SIGTERM + eskalace na SIGKILL po 10s, pokud stále běží.
   const terminate = (reason: string) => {
@@ -606,23 +779,46 @@ function startJob(job: Job) {
 
   child.stdout.on('data', (data: Buffer) => {
     resetIdleTimer();
-    const lines = data.toString().split('\n').filter(Boolean);
-    appendJobLogs(job, lines);
+    appendJobLogs(job, stdoutLines.pridej(data));
   });
 
   child.stderr.on('data', (data: Buffer) => {
     resetIdleTimer();
-    const lines = data.toString().split('\n').filter(Boolean);
-    appendJobLogs(job, lines);
+    appendJobLogs(job, stderrLines.pridej(data));
   });
 
-  const finishJob = (status: 'done' | 'error', error?: string) => {
+  const flushLogRemainders = () => {
+    appendJobLogs(job, stdoutLines.dokoncit());
+    appendJobLogs(job, stderrLines.dokoncit());
+  };
+
+  const finishJob = async (status: 'done' | 'error', error?: string) => {
     if (finished) return; // Guard against double-fire (error + close)
     finished = true;
     clearTimeout(idleTimer);
     clearTimeout(absoluteTimer);
-    job.status = status;
-    if (error) job.error = error;
+    let finalStatus = status;
+    let finalError = error;
+    try {
+      const kontrola = await zaznamenejVysledekPipelineKroku(
+        join(OUTPUT_DIR, job.tenderId),
+        job.tenderId,
+        job.step as PipelineStep,
+        status === 'done',
+        error,
+      );
+      // I kdyby child omylem vrátil exit 0, částečný výsledek nesmí odstartovat další krok.
+      finalStatus = stavPoKontroleUplnosti(finalStatus, kontrola);
+      if (kontrola.stav !== 'uplne') {
+        finalError = finalError || zpravaUplnostiProUzivatele(kontrola);
+      }
+    } catch (uplnostError) {
+      finalStatus = 'error';
+      finalError = `Kontrolu úplnosti kroku ${job.step} nelze uložit nebo načíst: ${String(uplnostError)}. `
+        + 'Zkontrolujte stav zakázky a spusťte krok znovu.';
+    }
+    job.status = finalStatus;
+    if (finalError) job.error = finalError;
     job.finishedAt = new Date().toISOString();
     runningJobs.delete(job.id);
     activeJobStoppers.delete(job.id);
@@ -630,7 +826,7 @@ function startJob(job: Job) {
     console.log(`Job ${job.id} (${job.step}/${job.tenderId}) ${job.status}`);
     const parent = job.parentJobId ? jobs.get(job.parentJobId) : undefined;
     if (parent) markPipelineStepFinished(parent, job.step as PipelineStep, job.finishedAt);
-    if (parent && draining && status === 'done') {
+    if (parent && draining && finalStatus === 'done') {
       checkpointPipelineAfterCompletedStep(parent, job.step as PipelineStep, job.finishedAt);
       scheduleJobsPersist();
       return;
@@ -661,6 +857,13 @@ function startJob(job: Job) {
       // Ostatní gate chyby (chybějící soubor apod.) zůstávají tvrdou chybou řetězce.
       const gateError = await getStepGateError(job.tenderId, nextStep);
       if (gateError) throw new Error(gateError);
+      // Awaity výše mohou doběhnout až po zahájení shutdownu. Druhá kontrola brání
+      // vložení nového child jobu za již uložený drain checkpoint.
+      if (draining) {
+        checkpointPipelineAfterCompletedStep(parent, job.step as PipelineStep, job.finishedAt!);
+        scheduleJobsPersist();
+        return;
+      }
       enqueueStepJob(job.tenderId, nextStep, parent.id, false, parent.initiator);
     }).finally(() => {
       scheduleJobsPersist();
@@ -669,21 +872,24 @@ function startJob(job: Job) {
   };
 
   child.on('close', (code, signal) => {
+    flushLogRemainders();
     if (code === 0) {
-      finishJob('done');
+      void finishJob('done');
     } else {
       // Rozliš zabití watchdogem (SIGTERM/SIGKILL) od pádu skriptu — jasnější chybová hláška.
       const killed = signal === 'SIGTERM' || signal === 'SIGKILL';
       const tail = job.logs.slice(-3).join(' | ');
-      const reason = killed
+      const structuredUplnostError = zpravaUplnostiZLogu(job.logs);
+      const reason = structuredUplnostError ?? (killed
         ? `Krok ukončen watchdogem (${signal}) — pravděpodobně zaseknutý nebo příliš dlouhý. Poslední log: ${tail}`
-        : `Process exited with code ${code}${signal ? ` (signal ${signal})` : ''}${tail ? ` — ${tail}` : ''}`;
-      finishJob('error', reason);
+        : `Process exited with code ${code}${signal ? ` (signal ${signal})` : ''}${tail ? ` — ${tail}` : ''}`);
+      void finishJob('error', reason);
     }
   });
 
   child.on('error', (err) => {
-    finishJob('error', String(err));
+    flushLogRemainders();
+    void finishJob('error', String(err));
   });
 
   console.log(`Job ${job.id} started: ${job.step} for ${job.tenderId}`);
@@ -709,22 +915,185 @@ function assignTenderId(req: express.Request, _res: express.Response, next: expr
   next();
 }
 
+interface TenderUploadStorageState {
+  pending: number;
+  waiters: Set<() => void>;
+}
+
+const tenderUploadStorageStates = new WeakMap<express.Request, TenderUploadStorageState>();
+const tenderUploadFinalPath = Symbol('tenderUploadFinalPath');
+
+function beginTenderUploadStorage(req: express.Request): () => void {
+  const state = tenderUploadStorageStates.get(req) ?? { pending: 0, waiters: new Set<() => void>() };
+  state.pending += 1;
+  tenderUploadStorageStates.set(req, state);
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    state.pending -= 1;
+    if (state.pending !== 0) return;
+    tenderUploadStorageStates.delete(req);
+    for (const resolve of state.waiters) resolve();
+    state.waiters.clear();
+  };
+}
+
+function waitForTenderUploadStorage(req: express.Request): Promise<void> {
+  const state = tenderUploadStorageStates.get(req);
+  if (!state || state.pending === 0) return Promise.resolve();
+  return new Promise((resolve) => state.waiters.add(resolve));
+}
+
+function asUploadError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function closeTenderUploadStream(stream: ReturnType<typeof createWriteStream>): Promise<void> {
+  if (stream.closed) return;
+  await new Promise<void>((resolve) => {
+    stream.once('close', resolve);
+    stream.destroy();
+  });
+}
+
+/**
+ * Multer při chybě zdrojového streamu sníží svůj pending counter ještě předtím,
+ * než asynchronní diskStorage.destination doběhne. Vlastní tracker proto začíná
+ * synchronně v _handleFile a končí až po preflightu, zavření FD a úklidu.
+ */
+const tenderUploadStorage: multer.StorageEngine = {
+  _handleFile(req, file, callback): void {
+    const finishTracking = beginTenderUploadStorage(req);
+    let sourceError: Error | undefined;
+    let output: ReturnType<typeof createWriteStream> | undefined;
+    let outputPath: string | undefined;
+    let temporaryPath: string | undefined;
+
+    const onSourceError = (error: unknown) => {
+      sourceError = asUploadError(error);
+      if (output) {
+        file.stream.unpipe(output);
+        output.destroy();
+      }
+    };
+    // Multerův listener je registrován dříve a může middleware ukončit okamžitě;
+    // náš nezávislý tracker ale rezervaci podrží po celý zbývající lifecycle.
+    file.stream.once('error', onSourceError);
+
+    void (async () => {
+      try {
+        const ensurePreflight = (req as any)._ensureTenderIngestPreflight;
+        if (typeof ensurePreflight === 'function') await ensurePreflight();
+
+        const tenderId = req.params.id || (req as any)._tenderId || `tender-${Date.now()}`;
+        const destination = join(INPUT_DIR, tenderId);
+        await mkdir(destination, { recursive: true });
+        if (sourceError) return;
+
+        const filename = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        outputPath = join(destination, filename);
+        temporaryPath = join(destination, `.upload-${randomUUID()}.tmp`);
+        output = createWriteStream(temporaryPath);
+
+        await new Promise<void>((resolve, reject) => {
+          output!.once('error', reject);
+          output!.once('close', () => {
+            if (sourceError || output!.writableFinished) resolve();
+            else reject(new Error(`Zápis uploadu ${filename} byl předčasně ukončen.`));
+          });
+          if (sourceError) output!.destroy();
+          else file.stream.pipe(output!);
+        });
+        if (sourceError) return;
+
+        // Všechny soubory requestu zůstávají ve stagingu. Finální názvy zveřejní
+        // až uploadTenderDocuments po úspěchu celé multipart dávky.
+        const stagedPath = temporaryPath;
+        temporaryPath = undefined;
+
+        const info: Express.Multer.File = {
+          destination,
+          filename,
+          path: stagedPath,
+          size: output.bytesWritten,
+        } as Express.Multer.File;
+        (info as any)[tenderUploadFinalPath] = outputPath;
+        callback(null, info);
+      } catch (error) {
+        // Source-stream error už Multer zpracoval a svůj counter snížil. Druhý
+        // callback by jej snížil znovu; pouze dokončíme vlastní úklid/tracker.
+        if (!sourceError) callback(asUploadError(error));
+      } finally {
+        file.stream.removeListener('error', onSourceError);
+        if (sourceError || (output && !output.writableFinished)) {
+          if (output) await closeTenderUploadStream(output);
+        }
+        if (temporaryPath) await rm(temporaryPath, { force: true }).catch(() => {});
+        finishTracking();
+      }
+    })();
+  },
+
+  _removeFile(_req, file, callback): void {
+    const path = file.path;
+    delete (file as Partial<Express.Multer.File>).destination;
+    delete (file as Partial<Express.Multer.File>).filename;
+    delete (file as Partial<Express.Multer.File>).path;
+    if (!path) return callback(null);
+    void rm(path, { force: true }).then(() => callback(null), (error) => callback(asUploadError(error)));
+  },
+};
+
+/**
+ * Zveřejní staging soubory jako jednu requestovou transakci. Původní soubory
+ * stejného názvu se do úspěšného commitnutí celé dávky drží v záloze a při
+ * jakékoli chybě se obnoví.
+ */
+async function commitTenderUploadFiles(req: express.Request): Promise<void> {
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const originals = new Map<string, string | null>();
+  const published = new Set<string>();
+  try {
+    for (const file of files) {
+      const finalPath = (file as any)[tenderUploadFinalPath] as string | undefined;
+      if (!finalPath) throw new Error(`Upload ${file.originalname} nemá cílovou cestu.`);
+      if (!originals.has(finalPath)) {
+        const backupPath = `${finalPath}.upload-backup-${randomUUID()}`;
+        try {
+          await rename(finalPath, backupPath);
+          originals.set(finalPath, backupPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          originals.set(finalPath, null);
+        }
+      }
+      await rename(file.path, finalPath);
+      published.add(finalPath);
+    }
+    await Promise.all([...originals.values()]
+      .filter((path): path is string => path !== null)
+      .map((path) => rm(path, { force: true }).catch(() => {})));
+    // Teprve úspěšný commit celé dávky smí přepsat staging cestu v Multer
+    // metadatech. Rollback níže tak nikdy nesmaže právě obnovený originál.
+    for (const file of files) {
+      file.path = (file as any)[tenderUploadFinalPath] as string;
+    }
+  } catch (error) {
+    await Promise.all([...published].map((path) => rm(path, { force: true }).catch(() => {})));
+    await Promise.all([...originals].map(async ([finalPath, backupPath]) => {
+      if (backupPath) await rename(backupPath, finalPath).catch(() => {});
+    }));
+    await Promise.all(files.map((file) => rm(file.path, { force: true }).catch(() => {})));
+    throw error;
+  }
+}
+
 // File upload config
 const upload = multer({
   limits: { fileSize: UPLOAD_FILE_SIZE_LIMIT_BYTES },
-  storage: multer.diskStorage({
-    destination: async (req, _file, cb) => {
-      const tenderId = req.params.id || (req as any)._tenderId || `tender-${Date.now()}`;
-      const dir = join(INPUT_DIR, tenderId);
-      await mkdir(dir, { recursive: true });
-      cb(null, dir);
-    },
-    filename: (_req, file, cb) => {
-      // Preserve original filename with proper encoding
-      cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8'));
-    },
-  }),
-  fileFilter: (_req, file, cb) => {
+  storage: tenderUploadStorage,
+  fileFilter: (req, file, cb) => {
     const ext = extname(file.originalname).toLowerCase();
     // .zip povolen — extract krok (discoverInputFiles, viz lib/input-discovery.ts) ho už
     // bezpečně rozbaluje (zip-slip ochrana, cap na velikost), stačí ho pustit do input/<id>/.
@@ -735,6 +1104,27 @@ const upload = multer({
     }
   },
 });
+
+const uploadTenderDocuments: express.RequestHandler = (req, res, next) => {
+  upload.array('files', 20)(req, res, (error: any) => {
+    void waitForTenderUploadStorage(req).then(async () => {
+      if (error) {
+        releaseTenderIngestReservation(res);
+        return next(error);
+      }
+      try {
+        await commitTenderUploadFiles(req);
+        return next();
+      } catch (commitError) {
+        releaseTenderIngestReservation(res);
+        return next(commitError);
+      }
+    }, (waitError) => {
+      releaseTenderIngestReservation(res);
+      next(waitError);
+    });
+  });
+};
 
 // Helper: get pipeline status for a tender
 async function getPipelineStatus(tenderId: string) {
@@ -770,6 +1160,20 @@ async function getPipelineStatus(tenderId: string) {
     steps.validate = 'done';
   } catch {}
 
+  let uplnost: UplnostZakazky | null = null;
+  let uplnostChyba: string | undefined;
+  try {
+    uplnost = await nactiUplnostZakazky(outputDir);
+    Object.assign(steps, aplikujUplnostNaStavy(steps, uplnost));
+  } catch (error) {
+    uplnostChyba = `Kontrolu úplnosti nelze načíst: ${String(error)}`;
+    // Poškozený kontrakt nesmí nechat starší artefakt vypadat zeleně. Legacy zakázka
+    // bez kontraktu stále funguje jako dřív (`nactiUplnostZakazky` vrátí null, nehodí).
+    for (const step of Object.keys(steps) as Array<keyof typeof steps>) {
+      if (steps[step] === 'done') steps[step] = 'error';
+    }
+  }
+
   // Check if any step is currently running via job queue
   for (const job of jobs.values()) {
     if (job.tenderId === tenderId && job.kind !== 'pipeline'
@@ -789,6 +1193,7 @@ async function getPipelineStatus(tenderId: string) {
     error: latestRunAll.error,
     initiator: latestRunAll.initiator,
     stepDurationsMs: getPipelineStepDurationsMs(latestRunAll),
+    uplnost: uplnost?.kroky ?? null,
   } : undefined;
 
   // Zastaralost vygenerovaných dokumentů vůči poslední změně cen (viz lib/stale-check.ts).
@@ -812,7 +1217,7 @@ async function getPipelineStatus(tenderId: string) {
     }
   }
 
-  return { tenderId, steps, runAll, stale };
+  return { tenderId, steps, runAll, stale, uplnost, uplnostChyba };
 }
 
 // CRM (M2): převod pipeline steps → boolean flags + výpočet efektivní fáze (persistovaná ?? odvozená).
@@ -842,7 +1247,52 @@ app.get('/api/health', async (_req, res) => {
     }
   }
   const db = await isDbAvailable() ? 'ok' : 'unavailable';
-  res.json({ status: 'ok', version: process.env.npm_package_version || '0.1.0', gotenberg, db });
+  const vectorMatcherEnabled = process.env.WAREHOUSE_MATCH_ENABLED === '1';
+  const vectorMatcherConfigured = Boolean(process.env.OPENAI_API_KEY?.trim());
+  const vectorMatcher = {
+    status: !vectorMatcherEnabled
+      ? 'disabled' as const
+      : vectorMatcherConfigured ? 'configured' as const : 'unavailable' as const,
+    enabled: vectorMatcherEnabled,
+    configured: vectorMatcherConfigured,
+    reason: !vectorMatcherEnabled
+      ? 'Vektorový tier matcheru je vypnutý (WAREHOUSE_MATCH_ENABLED není 1).'
+      : vectorMatcherConfigured
+        ? null
+        : 'OPENAI_API_KEY není nastaven; vektorový tier matcheru není dostupný.',
+  };
+  let aiBudget: {
+    status: 'ok' | 'blocked' | 'unavailable';
+    todayCzk: number | null;
+    limitCzk: number | null;
+    reason: string | null;
+  };
+  try {
+    const governance = await getGovernance();
+    const todayCzk = (await getCostsOverview()).dnes_czk;
+    const reason = governanceSwitchBlock(governance, 'ai_jobs_enabled')
+      ?? dailyAiLimitBlock(governance, todayCzk);
+    aiBudget = {
+      status: reason ? 'blocked' : 'ok',
+      todayCzk,
+      limitCzk: governance.denni_ai_limit_czk,
+      reason,
+    };
+  } catch (error) {
+    aiBudget = {
+      status: 'unavailable',
+      todayCzk: null,
+      limitCzk: null,
+      reason: `AI rozpočet nelze ověřit: ${String(error)}`,
+    };
+  }
+  res.json({
+    status: 'ok',
+    version: process.env.npm_package_version || '0.1.0',
+    gotenberg,
+    db,
+    ai: { budget: aiBudget, vectorMatcher },
+  });
 });
 
 // --- Auth endpoints ---
@@ -1244,6 +1694,7 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
   const actor = (req as any).user?.sub ?? null;
   const stahnoutZd = req.body?.stahnout_zd === true;
   if (!(await enforceGovernance(res, 'ingest_enabled'))) return;
+  let reservedTenderId: string | undefined;
   try {
     // Explicitní hodnota z requestu má přednost; bez ní rozhoduje instance-wide nastavení.
     const monitoringConfig = await getMonitoringConfig();
@@ -1270,6 +1721,17 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
         lhuta_nabidek: item.lhuta_nabidek,
       },
     });
+    // Alokátor názvu awaituje několik FS operací. Než ID zveřejníme ve feedu, musíme
+    // proto synchronně ověřit a převzít stejný per-tender zámek jako ostatní ingest routy.
+    const conflict = findTenderExecutionConflict(tenderId);
+    if (conflict) {
+      return res.status(409).json({
+        error: 'Zakázku mezitím začal měnit nebo zpracovávat jiný požadavek; převzetí opakujte.',
+        jobId: conflict.id,
+      });
+    }
+    activeIngests.add(tenderId);
+    reservedTenderId = tenderId;
 
     // CRM stav 'nova' + zápis do feedu (stav 'prevzata', vazba tender_id). Bez DB → 503.
     await setStatus(tenderId, 'nova');
@@ -1296,38 +1758,132 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
     let pocetNalezenych = 0;
     let spusteno = false;
     let jobId: string | null = null;
+    let ingestUplnost: UplnostKroku | null = null;
+    let zdSourceListingIncomplete = false;
+    let discoveredAttachmentNames: string[] = [];
 
     if (stahnoutZd) {
-      if (item.zdroj === 'nen' && item.url) {
-        const attachments = await fetchNenAttachments(item.url);
-        pocetNalezenych = attachments.length;
-        if (attachments.length === 0) {
-          varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
-        } else {
-          const result = await downloadNenAttachments(attachments, join(INPUT_DIR, tenderId));
-          pocetStazenych = result.pocet_stazenych;
-          varovani.push(...result.varovani);
-          if (pocetStazenych > 0) {
-            await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+      try {
+        if (item.zdroj === 'nen' && item.url) {
+          // Legacy NEN klient při selhání další stránky vrací nasbíraný prefix pole.
+          // Sledujeme proto celý transport včetně čtení těla, redirect validace a
+          // vyčerpání page capu; prefix nikdy nepředáme jako kompletní seznam (10/18).
+          const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+          let redirectCount = 0;
+          let listingPage = 1;
+          const listingFetch: typeof fetch = async (input, init) => {
+            try {
+              const requestedUrl = String(input);
+              const pageMatch = /\/p:pzd:page=(\d+)/.exec(requestedUrl);
+              if (pageMatch) listingPage = Number(pageMatch[1]);
+              else if (requestedUrl.includes('/zadavaci-dokumentace')) listingPage = 1;
+              const response = await fetch(input, init);
+              if (!response.ok && !redirectStatuses.has(response.status)) {
+                zdSourceListingIncomplete = true;
+              }
+              if (redirectStatuses.has(response.status)) {
+                redirectCount += 1;
+                const location = response.headers.get('location');
+                let redirectAllowed = false;
+                try {
+                  redirectAllowed = Boolean(location)
+                    && isAllowedNenUrl(new URL(location!, requestedUrl));
+                } catch {}
+                if (!redirectAllowed || redirectCount > 3) zdSourceListingIncomplete = true;
+              } else {
+                redirectCount = 0;
+              }
+              const readText = response.text.bind(response);
+              response.text = async () => {
+                try {
+                  const body = await readText();
+                  if (listingPage >= MAX_NEN_PAGES && parseNenAttachments(body).length > 0) {
+                    zdSourceListingIncomplete = true;
+                  }
+                  return body;
+                } catch (error) {
+                  zdSourceListingIncomplete = true;
+                  throw error;
+                }
+              };
+              return response;
+            } catch (error) {
+              zdSourceListingIncomplete = true;
+              throw error;
+            }
+          };
+          const attachments = await fetchNenAttachments(item.url, { fetchFn: listingFetch });
+          pocetNalezenych = attachments.length;
+          discoveredAttachmentNames = attachments.map((attachment) => attachment.nazev || 'bez názvu');
+          if (zdSourceListingIncomplete) {
+            throw new Error('NEN nedokončil načtení všech stránek seznamu příloh');
           }
-        }
-      } else if (item.zdroj === 'hlidac' && item.zdroj_id) {
-        // Hlídač agreguje víc profilů (TenderArena aj.) — dokumenty jen v detail endpointu,
-        // ne v bulk hledání, a stahování povoleno jen z ověřených hostitelů (ALLOWED_HLIDAC_DOC_HOSTS).
-        const attachments = await fetchHlidacTenderDocuments(item.zdroj_id);
-        pocetNalezenych = attachments.length;
-        if (attachments.length === 0) {
-          varovani.push('Hlídač státu nevrátil žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
-        } else {
-          const result = await downloadHlidacAttachments(attachments, join(INPUT_DIR, tenderId));
+          const result = await downloadNenAttachments(attachments, join(INPUT_DIR, tenderId), {
+            uplnost: { outputDir: join(OUTPUT_DIR, tenderId), tenderId },
+          });
           pocetStazenych = result.pocet_stazenych;
+          ingestUplnost = result.uplnost;
           varovani.push(...result.varovani);
-          if (pocetStazenych > 0) {
-            await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+          if (attachments.length === 0) {
+            varovani.push('Na NEN nebyly nalezeny žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
+          } else if (pocetStazenych > 0) {
+            try {
+              await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+            } catch (auditError) {
+              console.warn(`Audit stažení ZD pro ${tenderId} se nepodařilo uložit:`, auditError);
+            }
           }
+        } else if (item.zdroj === 'hlidac' && item.zdroj_id) {
+          // Hlídač agreguje víc profilů (TenderArena aj.) — dokumenty jen v detail endpointu,
+          // ne v bulk hledání, a stahování povoleno jen z ověřených hostitelů (ALLOWED_HLIDAC_DOC_HOSTS).
+          const attachments = await fetchHlidacTenderDocuments(item.zdroj_id);
+          pocetNalezenych = attachments.length;
+          const result = await downloadHlidacAttachments(attachments, join(INPUT_DIR, tenderId), {
+            uplnost: { outputDir: join(OUTPUT_DIR, tenderId), tenderId },
+          });
+          pocetStazenych = result.pocet_stazenych;
+          ingestUplnost = result.uplnost;
+          varovani.push(...result.varovani);
+          if (attachments.length === 0) {
+            varovani.push('Hlídač státu nevrátil žádné přílohy zadávací dokumentace — nahrajte dokumenty ručně.');
+          } else if (pocetStazenych > 0) {
+            try {
+              await logActivity(tenderId, 'zd_downloaded', actor, { pocet: pocetStazenych, zdroj_id: item.zdroj_id });
+            } catch (auditError) {
+              console.warn(`Audit stažení ZD pro ${tenderId} se nepodařilo uložit:`, auditError);
+            }
+          }
+        } else {
+          throw new Error('Automatické stažení ZD je podporováno jen pro zakázky z NEN nebo Hlídače státu.');
         }
-      } else {
-        varovani.push('Automatické stažení ZD je podporováno jen pro zakázky z NEN nebo Hlídače státu — nahrajte dokumenty ručně.');
+      } catch (error) {
+        // Zakázka už byla korektně převzata; chyba discovery/download se proto vrací jako
+        // srozumitelný fail-closed ingest stav a varování, nikoli jako matoucí HTTP 500.
+        const detail = `Dokumentaci se nepodařilo načíst: ${String(error)}`;
+        const minimumExpected = Math.max(
+          discoveredAttachmentNames.length + (zdSourceListingIncomplete ? 1 : 0),
+          1,
+        );
+        const missing = discoveredAttachmentNames.length > 0
+          ? [
+            ...discoveredAttachmentNames,
+            ...(zdSourceListingIncomplete ? ['další přílohy z nedokončeného seznamu NEN'] : []),
+          ]
+          : ['zadávací dokumentace'];
+        ingestUplnost = vytvorUplnostKroku({
+          krok: 'ingest',
+          metriky: [{ nazev: 'dokumenty', jednotka: 'dokumenty', ocekavano: minimumExpected, dostano: 0 }],
+          chybi: missing,
+          selhalo: true,
+          zprava: detail,
+          naprava: 'Nahrajte zadávací dokumentaci ručně nebo opakujte stažení.',
+        });
+        try {
+          await ulozUplnostKroku(join(OUTPUT_DIR, tenderId), tenderId, ingestUplnost);
+        } catch (persistError) {
+          varovani.push(`Kontrolu úplnosti se nepodařilo uložit: ${String(persistError)}`);
+        }
+        varovani.push(`${detail}. Nahrajte dokumenty ručně nebo opakujte stažení.`);
       }
     }
 
@@ -1368,6 +1924,7 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
       pocet_stazenych: pocetStazenych,
       spusteno,
       jobId,
+      uplnost: ingestUplnost,
       varovani,
     });
   } catch (err) {
@@ -1375,6 +1932,9 @@ app.post('/api/monitoring/:id/prevzit', requireJwt, async (req, res) => {
       return res.status(503).json({ error: 'Databáze není dostupná — zakázku nelze převzít.' });
     }
     res.status(500).json({ error: String(err) });
+  } finally {
+    // Mažeme jen rezervaci, kterou tento request skutečně získal.
+    if (reservedTenderId) activeIngests.delete(reservedTenderId);
   }
 });
 
@@ -1633,8 +2193,36 @@ async function buildZipInfo(
   }));
 }
 
+/** Zapíše úplnost jedné multipart dávky a současně zneplatní staré downstream kroky. */
+async function recordMultipartIngest(
+  tenderId: string,
+  files: Express.Multer.File[],
+  previous?: UplnostKroku,
+  sourceNamesBefore: readonly string[] = [],
+): Promise<UplnostKroku> {
+  const outputDir = join(OUTPUT_DIR, tenderId);
+  const sourceNames = await listSourceAttachmentNames(join(INPUT_DIR, tenderId));
+  const duplicateNames = files
+    .filter((file, index, all) => all.findIndex((candidate) =>
+      candidate.filename.toLowerCase() === file.filename.toLowerCase()) !== index)
+    .map((file) => `${file.filename} (duplicitní název byl přepsán)`);
+  const kontrola = vytvorSloucenouUplnostIngestu({
+    skutecneDokumenty: sourceNames,
+    ocekavanoVDavce: files.length,
+    minimalniOcekavano: ocekavanyPocetPoMultipartDavce(
+      sourceNamesBefore,
+      files.map((file) => file.filename),
+    ),
+    predchozi: previous,
+    noveVyreseno: files.map((file) => file.filename),
+    noveChybi: duplicateNames,
+  });
+  await ulozUplnostKroku(outputDir, tenderId, kontrola);
+  return kontrola;
+}
+
 // POST /api/tenders/upload - upload new tender documents
-app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async (req, res) => {
+app.post('/api/tenders/upload', assignTenderId, reserveTenderIngest, uploadTenderDocuments, async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
@@ -1642,6 +2230,9 @@ app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async
     }
     // Extract tender ID from the first file's destination
     const tenderId = files[0].destination.split('/').pop()!;
+    const previous = (res.locals as Record<string, unknown>).previousIngest as UplnostKroku | null;
+    const sourceNamesBefore = (res.locals as Record<string, unknown>).sourceNamesBeforeIngest as string[] | undefined;
+    await recordMultipartIngest(tenderId, files, previous ?? undefined, sourceNamesBefore ?? []);
     const status = await getPipelineStatus(tenderId);
     res.json({
       id: tenderId,
@@ -1651,30 +2242,69 @@ app.post('/api/tenders/upload', assignTenderId, upload.array('files', 20), async
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  } finally {
+    releaseTenderIngestReservation(res);
   }
 });
 
 // POST /api/tenders/:id/upload - upload files to existing tender
-app.post<{ id: string }>('/api/tenders/:id/upload', upload.array('files', 20), async (req, res) => {
-  try {
-    const files = req.files as Express.Multer.File[];
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
+app.post<{ id: string }>(
+  '/api/tenders/:id/upload',
+  reserveTenderIngest,
+  uploadTenderDocuments,
+  async (req, res) => {
+    try {
+      const files = req.files as Express.Multer.File[];
+      if (!files || files.length === 0) {
+        return res.status(400).json({ error: 'No files uploaded' });
+      }
+      const previous = (res.locals as Record<string, unknown>).previousIngest as UplnostKroku | null;
+      const sourceNamesBefore = (res.locals as Record<string, unknown>).sourceNamesBeforeIngest as string[] | undefined;
+      await recordMultipartIngest(req.params.id, files, previous ?? undefined, sourceNamesBefore ?? []);
+      const status = await getPipelineStatus(req.params.id);
+      res.json({
+        id: req.params.id,
+        uploadedFiles: files.map((f) => f.filename),
+        zipFiles: await buildZipInfo(files),
+        ...status,
+      });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    } finally {
+      releaseTenderIngestReservation(res);
     }
-    const status = await getPipelineStatus(req.params.id);
-    res.json({
-      id: req.params.id,
-      uploadedFiles: files.map((f) => f.filename),
-      zipFiles: await buildZipInfo(files),
-      ...status,
-    });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
+  },
+);
+
+/** Rezervuje název bez přepsání stejně pojmenované přílohy z jiné URL. */
+function uniqueUrlUploadName(filename: string, usedNames: Set<string>): string {
+  if (!usedNames.has(filename.toLowerCase())) {
+    usedNames.add(filename.toLowerCase());
+    return filename;
   }
-});
+  const extension = extname(filename);
+  const stem = filename.slice(0, filename.length - extension.length) || 'dokument';
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${stem}-${suffix}${extension}`;
+    if (!usedNames.has(candidate.toLowerCase())) {
+      usedNames.add(candidate.toLowerCase());
+      return candidate;
+    }
+  }
+}
+
+const IGNORABLE_URL_UPLOAD_CONTENT_TYPES = new Set([
+  'application/pkix-cert',
+  'application/x-x509-ca-cert',
+  'application/x-x509-user-cert',
+  'application/pkcs7-signature',
+  'application/x-pkcs7-signature',
+  'image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/tiff', 'image/webp', 'image/svg+xml',
+]);
 
 // POST /api/tenders/upload-url - download tender documents from URLs (for n8n integration)
 app.post('/api/tenders/upload-url', async (req, res) => {
+  let reservedTenderId: string | undefined;
   try {
     const { urls, tenderId: customId, metadata } = req.body as {
       urls: string[];
@@ -1693,11 +2323,50 @@ app.post('/api/tenders/upload-url', async (req, res) => {
 
     const allowedExts = ['.pdf', '.docx', '.doc', '.xls', '.xlsx', '.zip'];
     const tenderId = customId || `tender-${Date.now()}`;
+    const conflict = findTenderExecutionConflict(tenderId);
+    if (conflict) {
+      return res.status(409).json({
+        error: 'Dokumenty nelze měnit během aktivního nebo pozastaveného pipeline. Nejdříve jej dokončete nebo zrušte.',
+        jobId: conflict.id,
+      });
+    }
+    activeIngests.add(tenderId);
+    reservedTenderId = tenderId;
     const dir = join(INPUT_DIR, tenderId);
+    const outputDir = join(OUTPUT_DIR, tenderId);
     await mkdir(dir, { recursive: true });
 
+    const previousIngest = (await nactiUplnostZakazky(outputDir))?.kroky.ingest;
+    const sourceNamesBefore = await listSourceAttachmentNames(dir);
+    const preliminarilyIgnored = urls.filter((url) => {
+      try {
+        return IGNORABLE_ZD_EXTENSIONS.has(extname(decodeURIComponent(basename(new URL(url).pathname))).toLowerCase());
+      } catch {
+        return false;
+      }
+    });
+    const preliminaryExpected = urls.length - preliminarilyIgnored.length;
+
     const downloaded: string[] = [];
+    const downloadedUrls: string[] = [];
     const errors: string[] = [];
+    const ignored: string[] = [];
+    const usedNames = new Set((await readdir(dir).catch(() => [] as string[]))
+      .map((name) => name.toLowerCase()));
+
+    // Fail-closed preflight: pád procesu uprostřed dávky nesmí zanechat několik souborů
+    // bez informace, že request původně očekával celou sadu URL.
+    await ulozUplnostKroku(outputDir, tenderId, vytvorSloucenouUplnostIngestu({
+      skutecneDokumenty: sourceNamesBefore,
+      ocekavanoVDavce: preliminaryExpected,
+      minimalniOcekavano: sourceNamesBefore.length + preliminaryExpected,
+      predchozi: previousIngest,
+      noveChybi: urls
+        .filter((url) => !preliminarilyIgnored.includes(url))
+        .map((url) => `stahování URL nebylo dokončeno: ${url}`),
+      noveIgnorovano: preliminarilyIgnored,
+      probiha: true,
+    }));
 
     for (const url of urls) {
       try {
@@ -1705,6 +2374,11 @@ app.post('/api/tenders/upload-url', async (req, res) => {
         const parsed = new URL(url);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           errors.push(`${url}: only http/https allowed`);
+          continue;
+        }
+        const linkedName = decodeURIComponent(basename(parsed.pathname));
+        if (IGNORABLE_ZD_EXTENSIONS.has(extname(linkedName).toLowerCase())) {
+          ignored.push(linkedName || url);
           continue;
         }
         const host = parsed.hostname.toLowerCase();
@@ -1725,7 +2399,6 @@ app.post('/api/tenders/upload-url', async (req, res) => {
           errors.push(`${url}: soubor překračuje limit 100 MB`);
           continue;
         }
-
         // Extract filename from URL or Content-Disposition header
         const disposition = response.headers.get('content-disposition');
         let filename: string;
@@ -1735,8 +2408,30 @@ app.post('/api/tenders/upload-url', async (req, res) => {
         } else {
           filename = decodeURIComponent(basename(new URL(url).pathname));
         }
+        const responseType = (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
+        if (IGNORABLE_URL_UPLOAD_CONTENT_TYPES.has(responseType)) {
+          await response.body?.cancel().catch(() => {});
+          const linkedExtension = extname(linkedName).toLowerCase();
+          const dispositionExtension = extname(filename).toLowerCase();
+          if (allowedExts.includes(linkedExtension) || allowedExts.includes(dispositionExtension)) {
+            errors.push(`${url}: očekávaný dokument má nepodporovaný typ odpovědi ${responseType}`);
+            continue;
+          }
+          ignored.push(linkedName || url);
+          continue;
+        }
         // Sanitize filename — strip path components
         filename = basename(filename).replace(/[^\w.\-\u00C0-\u024F ]/g, '_');
+
+        if (IGNORABLE_ZD_EXTENSIONS.has(extname(filename).toLowerCase())) {
+          await response.body?.cancel().catch(() => {});
+          if (allowedExts.includes(extname(linkedName).toLowerCase())) {
+            errors.push(`${url}: očekávaný dokument má ignorovatelnou příponu odpovědi ${extname(filename).toLowerCase()}`);
+            continue;
+          }
+          ignored.push(filename || url);
+          continue;
+        }
 
         // Ensure valid extension
         const ext = extname(filename).toLowerCase();
@@ -1753,6 +2448,12 @@ app.post('/api/tenders/upload-url', async (req, res) => {
           }
         }
 
+        if (!filename || /^\.+$/.test(filename)) {
+          errors.push(`${url}: missing filename`);
+          continue;
+        }
+        filename = uniqueUrlUploadName(filename, usedNames);
+
         const filePath = join(dir, filename);
         const body = response.body;
         if (!body) {
@@ -1766,6 +2467,7 @@ app.post('/api/tenders/upload-url', async (req, res) => {
             createWriteStream(filePath),
           );
           downloaded.push(filename);
+          downloadedUrls.push(url);
         } catch (error) {
           await rm(filePath, { force: true }).catch(() => {});
           errors.push(`${url}: ${String(error)}`);
@@ -1780,15 +2482,31 @@ app.post('/api/tenders/upload-url', async (req, res) => {
       await writeFile(join(dir, '_metadata.json'), JSON.stringify(metadata, null, 2), 'utf-8');
     }
 
+    const expectedUrlDocuments = urls.length - ignored.length;
+    const sourceNamesAfter = await listSourceAttachmentNames(dir);
+    const ingestUplnost = vytvorSloucenouUplnostIngestu({
+      skutecneDokumenty: sourceNamesAfter,
+      ocekavanoVDavce: expectedUrlDocuments,
+      minimalniOcekavano: sourceNamesBefore.length + expectedUrlDocuments,
+      predchozi: previousIngest,
+      noveVyreseno: [...downloaded, ...downloadedUrls],
+      noveChybi: errors,
+      noveIgnorovano: ignored,
+    });
+    await ulozUplnostKroku(outputDir, tenderId, ingestUplnost);
+
     const status = await getPipelineStatus(tenderId);
     res.json({
       id: tenderId,
       downloadedFiles: downloaded,
+      ignoredFiles: ignored.length > 0 ? ignored : undefined,
       errors: errors.length > 0 ? errors : undefined,
       ...status,
     });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  } finally {
+    if (reservedTenderId) activeIngests.delete(reservedTenderId);
   }
 });
 
@@ -1982,7 +2700,7 @@ app.get('/api/tenders/:id/product-match', async (req, res) => {
 
 // POST /api/tenders/:id/product-match/apply-market-prices — hromadně předvyplní
 // doložené reálné nákupní ceny. Potvrzení vždy zůstává na operátorovi.
-app.post('/api/tenders/:id/product-match/apply-market-prices', createApplyMarketPricesHandler({
+const applyMarketPricesHandler = createApplyMarketPricesHandler({
   loadProductMatch: async (tenderId) =>
     JSON.parse(await readFile(join(OUTPUT_DIR, tenderId, 'product-match.json'), 'utf-8')),
   saveProductMatch: async (tenderId, productMatch) => {
@@ -1999,7 +2717,17 @@ app.post('/api/tenders/:id/product-match/apply-market-prices', createApplyMarket
       polozka_indexy: indexes,
     });
   },
-}));
+});
+app.post('/api/tenders/:id/product-match/apply-market-prices', async (req, res, next) => {
+  const { id } = req.params;
+  const mutationConflict = reserveTenderSnapshotMutation(id);
+  if (mutationConflict) return snapshotMutationConflictResponse(res, mutationConflict);
+  try {
+    await applyMarketPricesHandler(req, res, next);
+  } finally {
+    activeIngests.delete(id);
+  }
+});
 
 // GET /api/tenders/:id/bid-score — profit-aware bid skóre počítané on-the-fly
 // z aktuálních analysis.json + product-match.json. Používá se po potvrzení ceny,
@@ -2271,13 +2999,96 @@ app.get('/api/tenders/:id/parts', async (req, res) => {
 // PUT /api/tenders/:id/parts - save parts selection
 app.put('/api/tenders/:id/parts', async (req, res) => {
   const { id } = req.params;
+  if (!isSafeTenderId(id)) {
+    return res.status(400).json({ error: 'Invalid tender ID' });
+  }
+  const { selected_parts } = req.body;
+  if (!Array.isArray(selected_parts)
+    || !selected_parts.every((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    || new Set(selected_parts).size !== selected_parts.length) {
+    return res.status(400).json({
+      error: 'selected_parts must be an array of unique, non-empty string IDs',
+    });
+  }
+
+  // Výběr částí mění vstup matchingu. Check + add jsou bez awaitu, takže se
+  // nemohou proložit s uploadem ani se startem kroku pro stejnou zakázku.
+  const conflict = findTenderExecutionConflict(id);
+  if (conflict) {
+    return res.status(409).json({
+      error: 'Výběr částí nelze měnit během příjmu dokumentů ani běžícího či pozastaveného pipeline.',
+      jobId: conflict.id,
+    });
+  }
+  activeIngests.add(id);
+  let ownsReservation = true;
   try {
-    const { selected_parts } = req.body;
-    if (!Array.isArray(selected_parts)) {
-      return res.status(400).json({ error: 'selected_parts must be an array' });
-    }
     const outputDir = join(OUTPUT_DIR, id);
     await mkdir(outputDir, { recursive: true });
+
+    let knownPartIds: string[];
+    try {
+      const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+      knownPartIds = Array.isArray(analysis?.casti)
+        ? analysis.casti.map((part: any) => part?.id)
+          .filter((partId: unknown): partId is string => typeof partId === 'string' && partId.length > 0)
+        : [];
+    } catch {
+      return res.status(409).json({
+        error: 'Výběr částí lze uložit až po úspěšné analýze zakázky.',
+      });
+    }
+    const knownParts = new Set(knownPartIds);
+    const unknownParts = selected_parts.filter((partId: string) => !knownParts.has(partId));
+    if (knownParts.size === 0 || selected_parts.length === 0 || unknownParts.length > 0) {
+      return res.status(400).json({
+        error: knownParts.size === 0
+          ? 'Analýza neobsahuje žádné části k výběru.'
+          : 'Vyberte alespoň jednu existující část zakázky.',
+        unknown_parts: unknownParts.length > 0 ? unknownParts : undefined,
+      });
+    }
+
+    // Fail-closed pořadí: nejdřív zneplatnit match a všechny jeho následníky,
+    // teprve potom zveřejnit nový výběr. Opakovaný analyze report využije běžné
+    // pravidlo ulozUplnostKroku, které odřízne všechny pozdější krokové reporty.
+    const report = await nactiUplnostZakazky(outputDir);
+    const analyzeReport = report?.kroky.analyze;
+    if (analyzeReport) {
+      await ulozUplnostKroku(outputDir, id, {
+        ...analyzeReport,
+        aktualizovano: new Date().toISOString(),
+      });
+    } else {
+      // Legacy výstupy nemají nutně analyze kontrakt. Pokud už ale existuje
+      // matching či některý navazující artefakt, explicitní červený match marker
+      // zabrání tomu, aby po změně výběru zůstal starý soubor zelený.
+      const outputNames = await readdir(outputDir);
+      const hasDownstreamArtifact = outputNames.some((name) =>
+        name === 'product-match.json'
+        || name === 'generation-meta.json'
+        || name === 'field-validation.json'
+        || name === 'validation-report.json'
+        || name === 'technicky_navrh.docx'
+        || name === 'cenova_nabidka.docx'
+        || name.startsWith('soupis_filled_')
+        || name.startsWith('soupis_mapping_'));
+      if (hasDownstreamArtifact) {
+        await ulozUplnostKroku(outputDir, id, vytvorUplnostKroku({
+          krok: 'match',
+          metriky: [{
+            nazev: 'aktualni_matching',
+            jednotka: 'vystupy',
+            ocekavano: 1,
+            dostano: 0,
+          }],
+          chybi: ['nový matching pro aktuální výběr částí'],
+          zprava: 'Výběr částí byl změněn; dosavadní matching a navazující dokumenty jsou zastaralé.',
+          naprava: 'Spusťte znovu krok Produkty a poté navazující kroky pipeline.',
+        }));
+      }
+    }
+
     await writeFile(
       join(outputDir, 'parts-selection.json'),
       JSON.stringify({ selected_parts, updated_at: new Date().toISOString() }, null, 2),
@@ -2286,6 +3097,11 @@ app.put('/api/tenders/:id/parts', async (req, res) => {
     res.json({ success: true, selected_parts });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  } finally {
+    if (ownsReservation) {
+      ownsReservation = false;
+      activeIngests.delete(id);
+    }
   }
 });
 
@@ -2306,6 +3122,8 @@ app.get('/api/tenders/:id/validation', async (req, res) => {
 app.put('/api/tenders/:id/product-match/price', async (req, res) => {
   const { id } = req.params;
   const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+  const mutationConflict = reserveTenderSnapshotMutation(id);
+  if (mutationConflict) return snapshotMutationConflictResponse(res, mutationConflict);
 
   try {
     const raw = await readFile(matchPath, 'utf-8');
@@ -2338,6 +3156,8 @@ app.put('/api/tenders/:id/product-match/price', async (req, res) => {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
     }
     res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  } finally {
+    activeIngests.delete(id);
   }
 });
 
@@ -2375,6 +3195,8 @@ function formatSanityBlockingMessage(productMatch: any, findings: PriceSanityFla
 app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
   const { id } = req.params;
   const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+  const mutationConflict = reserveTenderSnapshotMutation(id);
+  if (mutationConflict) return snapshotMutationConflictResponse(res, mutationConflict);
 
   try {
     const items = (req.body as any)?.items;
@@ -2452,6 +3274,8 @@ app.put('/api/tenders/:id/product-match/price/bulk', async (req, res) => {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
     }
     res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  } finally {
+    activeIngests.delete(id);
   }
 });
 
@@ -2460,6 +3284,8 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
   const { id, itemIndex } = req.params;
   const idx = parseInt(itemIndex, 10);
   const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+  const mutationConflict = reserveTenderSnapshotMutation(id);
+  if (mutationConflict) return snapshotMutationConflictResponse(res, mutationConflict);
 
   try {
     const raw = await readFile(matchPath, 'utf-8');
@@ -2498,6 +3324,8 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
     }
     res.status(400).json({ error: `Invalid price data: ${String(err.message || err)}` });
+  } finally {
+    activeIngests.delete(id);
   }
 });
 
@@ -2514,6 +3342,8 @@ app.put('/api/tenders/:id/product-match/price/:itemIndex', async (req, res) => {
 app.put('/api/tenders/:id/product-match/select', async (req, res) => {
   const { id } = req.params;
   const matchPath = join(OUTPUT_DIR, id, 'product-match.json');
+  const mutationConflict = reserveTenderSnapshotMutation(id);
+  if (mutationConflict) return snapshotMutationConflictResponse(res, mutationConflict);
 
   try {
     const { itemIndex, candidateIndex } = (req.body ?? {}) as { itemIndex?: unknown; candidateIndex?: unknown };
@@ -2548,6 +3378,17 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
       return res.status(400).json({ error: `Neplatný index kandidáta ${candIdx}` });
     }
 
+    // Nejdřív durable fail-closed marker: kdyby proces spadl mezi změnou produktu a
+    // přepočtem kontraktu, staré verify/generate/validate už nesmí zůstat zelené.
+    await ulozUplnostKroku(join(OUTPUT_DIR, id), id, vytvorUplnostKroku({
+      krok: 'verify-prices',
+      metriky: [{ nazev: 'overene_polozky', jednotka: 'polozky', ocekavano: 1, dostano: 0 }],
+      chybi: ['nové ověření ceny po změně vybraného produktu'],
+      selhalo: true,
+      zprava: 'Změna vybraného produktu zneplatnila předchozí ověření ceny.',
+      naprava: 'Spusťte znovu ověření cen a následné generování dokumentů.',
+    }));
+
     // Změnou kandidáta se ruší dřív potvrzená cena (vázaná na jiný produkt).
     const priceCleared = target.cenova_uprava !== undefined;
     const reviewWasInvalidated = clearPriceForProductChange(target);
@@ -2565,6 +3406,10 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
     await writeFile(tmpPath, JSON.stringify(productMatch, null, 2), 'utf-8');
     await rename(tmpPath, matchPath);
 
+    const verificationCompleteness = await zaznamenejVysledekPipelineKroku(
+      join(OUTPUT_DIR, id), id, 'verify-prices', true,
+    );
+
     if (reviewWasInvalidated) {
       await logActivity(id, 'cena_potvrzeni_zruseno', (req as any).user?.sub ?? null, {
         duvod: 'operátor změnil vybraný produkt',
@@ -2572,12 +3417,21 @@ app.put('/api/tenders/:id/product-match/select', async (req, res) => {
       });
     }
 
-    res.json({ success: true, itemIndex: Number(itemIndex), candidateIndex: candIdx, priceCleared, verificationCleared });
+    res.json({
+      success: true,
+      itemIndex: Number(itemIndex),
+      candidateIndex: candIdx,
+      priceCleared,
+      verificationCleared,
+      uplnost: verificationCompleteness,
+    });
   } catch (err: any) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ error: 'product-match.json not found — run match step first' });
     }
     res.status(400).json({ error: `Nepodařilo se vybrat produkt: ${String(err.message || err)}` });
+  } finally {
+    activeIngests.delete(id);
   }
 });
 
@@ -3096,39 +3950,59 @@ app.put('/api/tenders/:id/company', async (req, res) => {
 
 // --- Job Queue API ---
 
+async function jobUplnost(tenderId: string): Promise<{
+  uplnost: UplnostZakazky | null;
+  uplnostChyba?: string;
+}> {
+  try {
+    return { uplnost: await nactiUplnostZakazky(join(OUTPUT_DIR, tenderId)) };
+  } catch (error) {
+    return { uplnost: null, uplnostChyba: `Kontrolu úplnosti nelze načíst: ${String(error)}` };
+  }
+}
+
 // GET /api/jobs - list all jobs (optional ?tenderId= filter)
-app.get('/api/jobs', (req, res) => {
+app.get('/api/jobs', async (req, res) => {
   const tenderId = req.query.tenderId as string | undefined;
   let allJobs = [...jobs.values()];
   if (tenderId) {
     allJobs = allJobs.filter(j => j.tenderId === tenderId);
   }
+  const reports = new Map<string, Awaited<ReturnType<typeof jobUplnost>>>();
+  await Promise.all([...new Set(allJobs.map((job) => job.tenderId))].map(async (id) => {
+    reports.set(id, await jobUplnost(id));
+  }));
   // Return without full logs for list endpoint
-  res.json(allJobs.map(j => ({
-    id: j.id,
-    tenderId: j.tenderId,
-    step: j.step,
-    status: j.status,
-    startedAt: j.startedAt,
-    finishedAt: j.finishedAt,
-    error: j.error,
-    kind: j.kind,
-    parentJobId: j.parentJobId,
-    currentStep: j.currentStep,
-    failedStep: j.failedStep,
-    stepDurationsMs: getPipelineStepDurationsMs(j),
-    logLines: j.logs.length,
-  })));
+  res.json(allJobs.map((j) => {
+    const report = reports.get(j.tenderId) ?? { uplnost: null };
+    return {
+      id: j.id,
+      tenderId: j.tenderId,
+      step: j.step,
+      status: j.status,
+      startedAt: j.startedAt,
+      finishedAt: j.finishedAt,
+      error: j.error,
+      kind: j.kind,
+      parentJobId: j.parentJobId,
+      currentStep: j.currentStep,
+      failedStep: j.failedStep,
+      stepDurationsMs: getPipelineStepDurationsMs(j),
+      logLines: j.logs.length,
+      ...report,
+    };
+  }));
 });
 
 // GET /api/jobs/:jobId - get job status + logs
-app.get('/api/jobs/:jobId', (req, res) => {
+app.get('/api/jobs/:jobId', async (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
   }
   // Support ?since=N to only return new log lines
   const since = parseInt(String(req.query.since || '0')) || 0;
+  const report = await jobUplnost(job.tenderId);
   res.json({
     id: job.id,
     tenderId: job.tenderId,
@@ -3145,6 +4019,7 @@ app.get('/api/jobs/:jobId', (req, res) => {
     stepDurationsMs: getPipelineStepDurationsMs(job),
     logs: job.logs.slice(since),
     totalLogLines: job.logs.length,
+    ...report,
   });
 });
 
@@ -3158,7 +4033,21 @@ app.post('/api/tenders/:id/run/all', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
+  if (activeIngests.has(id)) {
+    return res.status(409).json({ error: 'Pro zakázku právě probíhá příjem dokumentů; pipeline spusťte až po jeho dokončení.' });
+  }
+
   if (rejectIfDraining(res)) return;
+
+  const activeStandalone = [...jobs.values()].find((job) =>
+    job.tenderId === id && job.kind !== 'pipeline' && !job.parentJobId
+    && (job.status === 'running' || job.status === 'queued'));
+  if (activeStandalone) {
+    return res.status(409).json({
+      error: `Samostatný krok ${activeStandalone.step} už běží; celý pipeline spusťte až po jeho dokončení.`,
+      jobId: activeStandalone.id,
+    });
+  }
 
   const { job: parent, created } = enqueueRunAllPipeline(id);
   if (!created) {
@@ -3199,6 +4088,10 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
 
   if (rejectIfDraining(res)) return;
 
+  if (activeIngests.has(id)) {
+    return res.status(409).json({ error: 'Pro zakázku právě probíhá příjem dokumentů; pokračování pipeline by četlo neúplný snapshot.' });
+  }
+
   const wasBudgetPaused = waiting.status === 'budget_paused';
   const wasInterrupted = waiting.status === 'interrupted';
   const claimed = wasBudgetPaused
@@ -3233,6 +4126,18 @@ app.post('/api/tenders/:id/run-all/resume', async (req, res) => {
   // checkpointJobsForDrain vrátil do interrupted; nový child se nesmí založit.
   if (rejectIfDraining(res)) return;
 
+  const activeStandaloneOnResume = [...jobs.values()].find((job) =>
+    job.tenderId === id && job.kind !== 'pipeline' && !job.parentJobId
+    && (job.status === 'running' || job.status === 'queued'));
+  if (activeStandaloneOnResume) {
+    const message = `Samostatný krok ${activeStandaloneOnResume.step} už běží; pokračování pipeline by narušilo pořadí.`;
+    if (wasBudgetPaused) restoreBudgetPaused(waiting, message);
+    else if (wasInterrupted) restoreInterrupted(waiting, message);
+    else restoreWaitingApproval(waiting, message);
+    scheduleJobsPersist();
+    return res.status(409).json({ error: message, jobId: waiting.id });
+  }
+
   enqueueStepJob(id, resumeStep, waiting.id, true, waiting.initiator);
   scheduleJobsPersist();
 
@@ -3262,8 +4167,19 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
     return res.status(404).json({ error: `Tender "${id}" not found in input/` });
   }
 
+  if (activeIngests.has(id)) {
+    return res.status(409).json({ error: 'Pro zakázku právě probíhá příjem dokumentů; krok spusťte až po jeho dokončení.' });
+  }
+
   // Check if this step is already running/queued for this tender
   for (const job of jobs.values()) {
+    if (job.tenderId === id && job.kind === 'pipeline'
+      && (ACTIVE_EXECUTION_STATUSES.has(job.status) || RESUMABLE_PIPELINE_STATUSES.has(job.status))) {
+      return res.status(409).json({
+        error: 'Pro zakázku už běží celý pipeline; samostatný krok by narušil jeho pořadí.',
+        jobId: job.id,
+      });
+    }
     if (job.tenderId === id && job.step === step && (job.status === 'running' || job.status === 'queued')) {
       return res.json({ jobId: job.id, status: job.status, message: 'Step already in progress' });
     }
@@ -3274,6 +4190,26 @@ app.post('/api/tenders/:id/run/:step', async (req, res) => {
   if (gateError) return res.status(400).json({ error: gateError });
 
   if (rejectIfDraining(res)) return;
+
+  if (activeIngests.has(id)) {
+    return res.status(409).json({ error: 'Pro zakázku právě probíhá příjem dokumentů; krok by četl neúplný snapshot.' });
+  }
+
+  // `generate` gate výše awaituje čtení souborů; v jeho průběhu mohl vzniknout parent
+  // pipeline nebo druhý stejný job. Opakovaná kontrola je poslední synchronní claim.
+  for (const existing of jobs.values()) {
+    if (existing.tenderId === id && existing.kind === 'pipeline'
+      && (ACTIVE_EXECUTION_STATUSES.has(existing.status) || RESUMABLE_PIPELINE_STATUSES.has(existing.status))) {
+      return res.status(409).json({
+        error: 'Pro zakázku už běží celý pipeline; samostatný krok by narušil jeho pořadí.',
+        jobId: existing.id,
+      });
+    }
+    if (existing.tenderId === id && existing.step === step
+      && (existing.status === 'running' || existing.status === 'queued')) {
+      return res.json({ jobId: existing.id, status: existing.status, message: 'Step already in progress' });
+    }
+  }
 
   const job = enqueueStepJob(id, step);
   res.json({ jobId: job.id, status: job.status });
@@ -3762,8 +4698,7 @@ app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, r
       skipped.push({ id, status: 409, reason: 'not_found' });
       continue;
     }
-    const active = [...jobs.values()].find((job) =>
-      job.tenderId === id && job.step === 'generate' && (job.status === 'running' || job.status === 'queued'));
+    const active = findTenderExecutionConflict(id);
     if (active) {
       skipped.push({ id, status: 409, reason: 'already_running', detail: { jobId: active.id } });
       continue;
@@ -3781,6 +4716,15 @@ app.post(['/api/inbox/bulk-generate', '/api/inbox/bulk/generate'], async (req, r
     } as unknown as express.Response;
     if (!(await enforceGovernance(governanceResponse, 'generate_enabled', true))) {
       skipped.push({ id, status: governanceStatus, reason: 'governance_disabled', detail: governanceBody });
+      continue;
+    }
+    if (draining) {
+      skipped.push({ id, status: 503, reason: 'draining' });
+      continue;
+    }
+    const activeAfterGate = findTenderExecutionConflict(id);
+    if (activeAfterGate) {
+      skipped.push({ id, status: 409, reason: 'already_running', detail: { jobId: activeAfterGate.id } });
       continue;
     }
     enqueueStepJob(id, 'generate');

@@ -4,6 +4,7 @@ import { open, unlink } from 'node:fs/promises';
 import type { NenAttachment } from './nen-client.js';
 import { fetchAllowedNenUrl, isAllowedNenUrl } from './nen-client.js';
 import type { HlidacTenderDocument } from './hlidac-client.js';
+import { ulozUplnostKroku, vytvorUplnostKroku, type UplnostKroku } from '../uplnost.js';
 
 /**
  * SSRF pojistka pro přílohy z Hlídače státu — ten agreguje dokumenty z různých
@@ -73,8 +74,13 @@ const IGNORABLE_CONTENT_TYPES = new Set([
 ]);
 
 export interface DownloadZdResult {
+  pocet_nalezenych: number;
   pocet_stazenych: number;
+  pocet_ignorovanych: number;
+  ignorovane: string[];
+  chybejici: string[];
   varovani: string[];
+  uplnost: UplnostKroku;
 }
 
 export interface DownloadZdOptions {
@@ -82,6 +88,8 @@ export interface DownloadZdOptions {
   maxFiles?: number;
   maxFileBytes?: number;
   maxTotalBytes?: number;
+  /** Explicitní cíl kontraktu; cestu z input adresáře záměrně nehádáme. */
+  uplnost?: { outputDir: string; tenderId: string };
 }
 
 /**
@@ -334,12 +342,61 @@ async function downloadAttachments(
   const usedNames = new Set<string>();
   let pocet_stazenych = 0;
   let totalBytes = 0;
+  const ignoredIndexes = new Set<number>();
+  const downloadedIndexes = new Set<number>();
 
-  for (const attachment of attachments) {
+  // Jména s explicitně ignorovatelnou příponou známe ještě před prvním síťovým
+  // požadavkem. Uložíme fail-closed očekávání před zápisem souborů, takže případný
+  // pád procesu uprostřed dávky nezanechá částečný input bez kontraktu.
+  for (const [index, attachment] of attachments.entries()) {
+    if (ignorableExtension(attachment.nazev)) ignoredIndexes.add(index);
+  }
+  if (options.uplnost) {
+    const preliminaryExpected = attachments.length - ignoredIndexes.size;
+    const preliminaryMissing = attachments
+      .filter((_attachment, index) => !ignoredIndexes.has(index))
+      .map((attachment) => attachment.nazev || 'bez názvu');
+    if (preliminaryExpected === 0) {
+      preliminaryMissing.push('alespoň jeden podporovaný dokument zadávací dokumentace');
+    }
+    const preflight = vytvorUplnostKroku({
+      krok: 'ingest',
+      metriky: [{
+        nazev: 'dokumenty',
+        jednotka: 'dokumenty',
+        ocekavano: preliminaryExpected,
+        dostano: 0,
+      }],
+      chybi: preliminaryMissing,
+      vedomeIgnorovano: attachments
+        .filter((_attachment, index) => ignoredIndexes.has(index))
+        .map((attachment) => attachment.nazev || 'bez názvu'),
+      selhalo: true,
+      zprava: `Stahování ${preliminaryExpected} očekávaných dokumentů nebylo dokončeno.`,
+      naprava: 'Opakujte stažení nebo chybějící dokumenty nahrajte ručně.',
+    });
+    try {
+      await ulozUplnostKroku(options.uplnost.outputDir, options.uplnost.tenderId, preflight);
+    } catch (error) {
+      const varovaniPersistence = `Kontrolu úplnosti nelze uložit (${String(error)}) — soubory nebyly staženy a pipeline nespuštěna.`;
+      return {
+        pocet_nalezenych: attachments.length,
+        pocet_stazenych: 0,
+        pocet_ignorovanych: ignoredIndexes.size,
+        ignorovane: preflight.vedomeIgnorovano,
+        chybejici: preliminaryMissing,
+        varovani: [varovaniPersistence],
+        uplnost: preflight,
+      };
+    }
+  }
+
+  for (const [attachmentIndex, attachment] of attachments.entries()) {
     const displayName = attachment.nazev || 'bez názvu';
     const ignoredFromLink = ignorableExtension(attachment.nazev);
     if (ignoredFromLink) {
       varovani.push(ignoredAttachmentNotice(displayName, `ignorovatelná přípona ${ignoredFromLink}`));
+      ignoredIndexes.add(attachmentIndex);
       continue;
     }
 
@@ -372,13 +429,28 @@ async function downloadAttachments(
       const contentType = responseContentType(response);
       const dispositionName = contentDispositionFilename(response.headers.get('content-disposition'));
       const ignoredFromDisposition = ignorableExtension(dispositionName ?? '');
-      if (ignoredFromDisposition || (contentType && IGNORABLE_CONTENT_TYPES.has(contentType))) {
+      const supportedSourceName = sanitizeAttachmentName(attachment.nazev);
+      const supportedDispositionName = dispositionName ? sanitizeAttachmentName(dispositionName) : null;
+      const hasSupportedNameSignal = Boolean(supportedSourceName || supportedDispositionName);
+      const ignoredFromContentType = Boolean(contentType && IGNORABLE_CONTENT_TYPES.has(contentType));
+      if ((ignoredFromDisposition || ignoredFromContentType) && !hasSupportedNameSignal) {
         controller.abort();
         await response.body?.cancel().catch(() => {});
         const reason = ignoredFromDisposition
           ? `ignorovatelná přípona ${ignoredFromDisposition}`
           : `nepodporovaný typ ${contentType}`;
         varovani.push(ignoredAttachmentNotice(displayName, reason));
+        ignoredIndexes.add(attachmentIndex);
+        continue;
+      }
+      if ((ignoredFromDisposition || ignoredFromContentType) && hasSupportedNameSignal) {
+        controller.abort();
+        await response.body?.cancel().catch(() => {});
+        // Fyzicky stále nic nestahujeme; pouze nesmíme nalezené podporované PDF/DOC/XLS
+        // přepsat v účetnictví očekávání na „vědomě ignorované“ podle chybného MIME.
+        varovani.push(
+          `Příloha „${displayName}“ byla nalezena jako podporovaný dokument, ale metadata odpovědi uvádějí nepodporovaný typ ${ignoredFromDisposition ?? contentType}; stáhněte ji ručně.`,
+        );
         continue;
       }
 
@@ -386,7 +458,6 @@ async function downloadAttachments(
       // ochrana / vyžaduje session), ne soubor. Explicitní bezpečný filename v
       // Content-Disposition je ale silnější signál: textové DOC soubory bývají chybně
       // označené jako text/plain a Response v testech jej pro string doplní automaticky.
-      const supportedDispositionName = dispositionName ? sanitizeAttachmentName(dispositionName) : null;
       if ((contentType === 'text/html' || contentType === 'text/plain') && !supportedDispositionName) {
         controller.abort();
         await response.body?.cancel().catch(() => {});
@@ -446,6 +517,7 @@ async function downloadAttachments(
       }
       totalBytes += downloadedBytes;
       pocet_stazenych += 1;
+      downloadedIndexes.add(attachmentIndex);
     } catch (error) {
       if (filePath) await unlink(filePath).catch(() => {});
       if (error instanceof DownloadLimitError) {
@@ -464,7 +536,68 @@ async function downloadAttachments(
     }
   }
 
-  return { pocet_stazenych, varovani };
+  const ignorovane = attachments
+    .filter((_attachment, index) => ignoredIndexes.has(index))
+    .map((attachment) => attachment.nazev || 'bez názvu');
+  const chybejici = attachments
+    .filter((_attachment, index) => !ignoredIndexes.has(index) && !downloadedIndexes.has(index))
+    .map((attachment) => attachment.nazev || 'bez názvu');
+  // Očekávání vychází z nalezené sady, nikdy z právě staženého počtu. Jen explicitně
+  // ignorované podpisy/certifikáty/obrázky jsou z očekávání odečtené jako záměr.
+  const expectedCount = attachments.length - ignoredIndexes.size;
+  if (expectedCount === 0) chybejici.push('alespoň jeden podporovaný dokument zadávací dokumentace');
+  const uplnost = vytvorUplnostKroku({
+    krok: 'ingest',
+    metriky: [{ nazev: 'dokumenty', jednotka: 'dokumenty', ocekavano: expectedCount, dostano: pocet_stazenych }],
+    chybi: chybejici,
+    vedomeIgnorovano: ignorovane,
+    selhalo: expectedCount === 0 || pocet_stazenych === 0,
+    zprava: expectedCount > 0 && pocet_stazenych < expectedCount
+      ? `Stažení zadávací dokumentace je neúplné: získáno ${pocet_stazenych} z ${expectedCount} očekávaných dokumentů.`
+      : expectedCount === 0
+        ? 'Nebyl nalezen žádný podporovaný dokument zadávací dokumentace.'
+        : undefined,
+    naprava: expectedCount === pocet_stazenych && expectedCount > 0
+      ? ''
+      : 'Doplňte uvedené dokumenty ručně nebo opakujte stažení před spuštěním pipeline.',
+  });
+  let publishedUplnost = uplnost;
+  if (options.uplnost) {
+    try {
+      await ulozUplnostKroku(options.uplnost.outputDir, options.uplnost.tenderId, uplnost);
+    } catch (error) {
+      // Převzetí zakázky z monitoringu je hlavní operace a zůstává graceful. Toto
+      // varování zároveň zablokuje auto-start, protože bez uloženého kontraktu není
+      // bezpečné tvrdit, že navazující pipeline dostala úplný vstup.
+      const persistenceError = `Kontrolu úplnosti stažených dokumentů se nepodařilo uložit (${String(error)}) — pipeline nespuštěna.`;
+      varovani.push(persistenceError);
+      // API nesmí zveřejnit zelený objekt, když durable kontrakt zůstal v červeném
+      // preflightu. Soubory mohou být stažené, ale krok jako celek selhal na persistenci.
+      publishedUplnost = vytvorUplnostKroku({
+        krok: 'ingest',
+        metriky: [{
+          nazev: 'dokumenty',
+          jednotka: 'dokumenty',
+          ocekavano: expectedCount,
+          dostano: pocet_stazenych,
+        }],
+        chybi: ['trvalý záznam kontroly úplnosti ingestu'],
+        vedomeIgnorovano: ignorovane,
+        selhalo: true,
+        zprava: persistenceError,
+        naprava: 'Opravte úložiště výstupů a zopakujte ingest před spuštěním pipeline.',
+      });
+    }
+  }
+  return {
+    pocet_nalezenych: attachments.length,
+    pocet_stazenych,
+    pocet_ignorovanych: ignoredIndexes.size,
+    ignorovane,
+    chybejici,
+    varovani,
+    uplnost: publishedUplnost,
+  };
 }
 
 export function downloadNenAttachments(
