@@ -91,3 +91,23 @@ Nasazeno na produkci: kontrakt provenience cen · CPV a stránkování v monitor
       (WAREHOUSE_MATCH_ENABLED není 1)"`. Není to tedy (jen) chybějící `OPENAI_API_KEY`,
       jak jsem si původně myslel, ale nesepnutý přepínač. Rozhodni, jestli ho chceš zapnout —
       **nesahal jsem na něj, killswitche mimo rozsah běhu se nepřepínají.**
+
+## 2026-09-04 — Dělené zakázky dotažené (PR #110, #111)
+
+Nasazeno: cena a strop za každou část zvlášť · dokumenty se vyplňují do formulářů zadavatele ·
+šablony svázané s částmi. **Dělená zakázka je tím podatelná.**
+
+**Vady nalezené mimo rozsah, vědomě NEOPRAVENÉ** (workeři je poctivě nahlásili, neopravovali):
+
+- [ ] 🔴 `generate-bid.ts` při úklidu **maže `document-modes.json` dřív, než ho přečte.**
+      Skutečná vada, jen nespadala do rozsahu packetu. Chce vlastní malou opravu.
+- [ ] `document-parser.ts` má zrcadlový vzor bez varianty „poddavatel" (překlep zadavatele),
+      takže content fallback Přílohu 8 pořád označí jako šablonu.
+- [ ] `resolveDocumentData()` používá `vybrany_index` přímo, zatímco `generate-bid.ts` má
+      obranný fallback — nekonzistence, která zatím nekouše.
+- [ ] Sémantické čtení vyrenderovaného DOCX (ověřit, že v souboru fakticky je cena té části)
+      zatím není; kontrola D v E6a ověřuje jen cenový kontext předaný generátoru.
+
+**Stropy částí u testovací zakázky** (vytěženo z reálné ZD, ne odhad): 646 500 / 552 000 /
+531 600 Kč **včetně DPH**. Překročení dnes **varuje**, neblokuje; tvrdé blokování zapneš
+přepínačem `BLOCK_PART_PRICE_CAP_EXCEEDED=true`. **Nesahal jsem na něj** — je to tvoje volba.
