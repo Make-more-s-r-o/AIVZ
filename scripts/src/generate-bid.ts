@@ -21,7 +21,7 @@ import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './
 import { extractCastIdFromFilename } from './parse-soupis.js';
 import {
   assertPartDocumentPriceAssignments,
-  resolveDocumentCastId,
+  resolveFormGenerationPolicy,
   resolveDocumentData,
   scopeDocumentDataToPart,
   type DocumentData,
@@ -351,7 +351,7 @@ async function main() {
 
   // 3. Template-based documents
   console.log('\n4C: Discovering and filling templates...');
-  const templates = await discoverTemplates(inputDir);
+  const templates = await discoverTemplates(inputDir, { partCount: analysis.casti?.length });
   console.log(`  Found ${templates.length} tender template(s): ${templates.map((t) => t.type).join(', ') || 'none'}`);
 
   // Add fallback templates from templates/ for missing types (zero AI cost — uses docxtemplater)
@@ -361,10 +361,13 @@ async function main() {
   for (const fallbackType of FALLBACK_TYPES) {
     if (!foundTypes.has(fallbackType)) {
       const fallbackPath = join(globalTemplatesDir, `${fallbackType}.docx`);
-      if (existsSync(fallbackPath)) {
-        templates.push({ path: fallbackPath, filename: `${fallbackType}.docx`, type: fallbackType });
-        console.log(`  Added global fallback: ${fallbackType}.docx`);
-      }
+      templates.push({
+        path: fallbackPath,
+        filename: `${fallbackType}.docx`,
+        type: fallbackType,
+        origin: 'own-fallback',
+      });
+      console.warn(`  ⚠ Formulář zadavatele typu ${fallbackType} chybí; použit vlastní fallback builder.`);
     }
   }
   console.log(`  Total templates to fill: ${templates.length}`);
@@ -380,13 +383,12 @@ async function main() {
   const typeCounters = new Map<string, number>();
 
   for (const template of templates) {
-    const explicitTemplateCastId = (template as DiscoveredTemplate & { cast_id?: string }).cast_id;
-    const claimedTemplateCastId = explicitTemplateCastId || extractCastIdFromFilename(template.filename);
-    const templateCastId = hasParts
-      ? resolveDocumentCastId({ filename: template.filename, cast_id: explicitTemplateCastId }, analysis.casti)
+    const templateCastId = hasParts && template.cast_id
+      && analysis.casti.some((part) => part.id === template.cast_id)
+      ? template.cast_id
       : undefined;
-    if (hasParts && claimedTemplateCastId && !templateCastId) {
-      console.warn(`  ⚠ Šablona ${template.filename} odkazuje na neznámou část ${claimedTemplateCastId}; nebude vygenerována s globální cenou.`);
+    if (hasParts && template.cast_id && !templateCastId) {
+      console.warn(`  ⚠ Šablona ${template.filename} odkazuje na neznámou část ${template.cast_id}; nebude vygenerována s globální cenou.`);
       continue;
     }
     const count = typeCounters.get(template.type) || 0;
@@ -405,20 +407,14 @@ async function main() {
       dph: formatMoney(templateDocData.dph_castka),
     };
 
-    // Resolve generation mode: override > default > fill
-    let mode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
-    // Vada #3: druhé+ čestné prohlášení téhož typu NESMÍ jít na clean-builder (natvrdo obecný
-    // text) — jinak se specifické prohlášení (např. Příloha 5 protiruské sankční dle nař. 833/2014)
-    // degraduje na bajt-identickou kopii obecného a požadovaná příloha fakticky chybí. První
-    // (obecné) může na clean-builderu zůstat; 2.+ zpracujeme z REÁLNÉ šablony přes reconstruct
-    // (s fallbackem na fill), aby se zachoval jeho specifický obsah.
-    if (template.type === 'cestne_prohlaseni' && count > 0 && mode === 'clean') {
-      mode = 'reconstruct';
-      console.log(`    2.+ čestné prohlášení → clean-builder vynechán, reconstruct z reálné šablony (${template.filename})`);
-    }
+    // Override/default určí techniku, ale formulář zadavatele nikdy nesmí skončit
+    // v clean-builderu. Ten je povolen jen pro explicitně označený vlastní fallback.
+    const requestedMode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
+    const { mode, form_source: formSource } = resolveFormGenerationPolicy(template, requestedMode);
+    const formSourceMeta = formSource ? { form_source: formSource } : {};
     const modeLabel = mode.toUpperCase();
 
-    console.log(`  - ${outputName} [${modeLabel}] (from: ${template.filename})`);
+    console.log(`  - ${outputName} [${modeLabel}] (from: ${template.filename}${formSource ? `; ${formSource}` : ''})`);
 
     try {
       // Mode 1: Clean — deterministic builder, zero AI cost
@@ -427,7 +423,7 @@ async function main() {
         // Clean builder vždy generuje DOCX — vynutit příponu .docx bez ohledu na source template
         const cleanOutputName = `${baseName}${suffix}.docx`;
         await writeFile(join(outputDir, cleanOutputName), buffer);
-        generationMeta[cleanOutputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
+        generationMeta[cleanOutputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename, ...formSourceMeta };
         recordPartDocumentPrice(cleanOutputName, templateCastId, templateDocData);
         fillDocuments.push(buildDocumentFillReport(cleanOutputName, programmaticAttempts(templateDocData)));
         console.log(`    Clean builder: 0 CZK`);
@@ -443,7 +439,7 @@ async function main() {
           if (result.costCZK > 0) {
             await logCost(tenderId, `generate-template-${outputName}`, 'reconstruct', 0, 0, result.costCZK);
           }
-          generationMeta[outputName] = { mode: 'reconstruct', source: 'reconstruct-engine', cost_czk: result.costCZK, template_source: template.filename };
+          generationMeta[outputName] = { mode: 'reconstruct', source: 'reconstruct-engine', cost_czk: result.costCZK, template_source: template.filename, ...formSourceMeta };
           recordPartDocumentPrice(outputName, templateCastId, templateDocData);
           const attempts: FillAttempt[] = result.structure.sections.flatMap((section) => [
             ...(section.fields ?? []).map((field) => ({
@@ -472,7 +468,7 @@ async function main() {
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'excel-ai', 0, 0, result.costCZK);
         }
-        generationMeta[outputName] = { mode: 'fill', source: 'excel-ai', cost_czk: result.costCZK, template_source: template.filename };
+        generationMeta[outputName] = { mode: 'fill', source: 'excel-ai', cost_czk: result.costCZK, template_source: template.filename, ...formSourceMeta };
         recordPartDocumentPrice(outputName, templateCastId, templateDocData);
         fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
           original: rep.original, hodnota: rep.replacement,
@@ -495,7 +491,7 @@ async function main() {
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'docx-ai', 0, 0, result.costCZK);
         }
-        generationMeta[outputName] = { mode: 'fill', source: 'ai-fill', cost_czk: result.costCZK, template_source: template.filename };
+        generationMeta[outputName] = { mode: 'fill', source: 'ai-fill', cost_czk: result.costCZK, template_source: template.filename, ...formSourceMeta };
         recordPartDocumentPrice(outputName, templateCastId, templateDocData);
         fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
           original: rep.original, hodnota: rep.replacement,
