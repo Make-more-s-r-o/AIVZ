@@ -17,6 +17,32 @@ const ROOT = new URL('../../../', import.meta.url).pathname;
 
 // Generation mode for each document
 export type DocMode = 'clean' | 'reconstruct' | 'fill';
+export type FormSource = 'tender-form' | 'own-fallback';
+
+const FORM_TEMPLATE_TYPES = new Set([
+  'kryci_list',
+  'cestne_prohlaseni',
+  'seznam_poddodavatelu',
+]);
+
+/**
+ * Formulář zadavatele se vždy skutečně vyplňuje; clean-builder je povolen jen
+ * pro explicitní vlastní fallback. Vrácený původ se zapisuje do metadata dokumentu.
+ */
+export function resolveFormGenerationPolicy(
+  template: { type: string; origin?: FormSource },
+  requestedMode: DocMode,
+): { mode: DocMode; form_source?: FormSource } {
+  if (!FORM_TEMPLATE_TYPES.has(template.type)) return { mode: requestedMode };
+  if (template.origin === 'own-fallback') {
+    return { mode: 'clean', form_source: 'own-fallback' };
+  }
+  return {
+    // In-place fill jako jediné zachová zadavatelem předepsaný dokument.
+    mode: 'fill',
+    form_source: 'tender-form',
+  };
+}
 
 /** Metadata about generated document mode */
 export interface GenerationMeta {
@@ -25,6 +51,7 @@ export interface GenerationMeta {
     source: 'clean-builder' | 'reconstruct-engine' | 'ai-fill' | 'excel-ai' | 'programmatic';
     cost_czk: number;
     template_source?: string;
+    form_source?: FormSource;
     cast_id?: string;
     cena_bez_dph?: number;
     cena_s_dph?: number;

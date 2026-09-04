@@ -23,6 +23,7 @@ import {
 } from 'docx';
 import { parseDocx, parseExcel, convertDocToDocx } from './document-parser.js';
 import type { TenderAnalysis, ProductCandidate } from './types.js';
+import { extractCastIdFromFilename } from '../parse-soupis.js';
 
 export interface CompanyProfile {
   nazev: string;
@@ -1342,6 +1343,24 @@ export interface DiscoveredTemplate {
   path: string;
   filename: string;
   type: 'kryci_list' | 'cestne_prohlaseni' | 'seznam_poddodavatelu' | 'kupni_smlouva' | 'technicka_specifikace' | 'other';
+  /** Část odvozená pouze ze stabilního markeru v názvu; bez markeru zůstává undefined. */
+  cast_id?: string;
+  /** Chybějící hodnota se kvůli zpětné kompatibilitě považuje za formulář zadavatele. */
+  origin?: 'tender-form' | 'own-fallback';
+}
+
+export interface DiscoverTemplatesOptions {
+  /** Skutečný počet částí zakázky; hodnoty 0 a 1 zachovávají dosavadní limit. */
+  partCount?: number;
+}
+
+export const BASE_TEMPLATE_LIMIT_PER_TYPE = 4;
+
+/** U dělené zakázky ponechá stejnou pojistku čtyř šablon na typ a na část. */
+export function templateLimitPerType(partCount?: number): number {
+  return Number.isInteger(partCount) && Number(partCount) > 1
+    ? BASE_TEMPLATE_LIMIT_PER_TYPE * Number(partCount)
+    : BASE_TEMPLATE_LIMIT_PER_TYPE;
 }
 
 const TEMPLATE_PATTERNS: Array<{ type: DiscoveredTemplate['type']; patterns: RegExp[] }> = [
@@ -1355,7 +1374,7 @@ const TEMPLATE_PATTERNS: Array<{ type: DiscoveredTemplate['type']; patterns: Reg
   },
   {
     type: 'seznam_poddodavatelu',
-    patterns: [/seznam\s*poddodavatel/i, /subcontractor/i],
+    patterns: [/seznam\s*pod(?:do)?davatel/i, /subcontractor/i],
   },
   {
     type: 'kupni_smlouva',
@@ -1381,12 +1400,13 @@ const SKIP_FILENAME_PATTERNS = [
 function classifyByContent(text: string): DiscoveredTemplate['type'] | null {
   const lower = text.toLowerCase();
   if (/kryc[ií]\s*list/i.test(lower)) return 'kryci_list';
-  if (/čestně\s*prohlašuj/i.test(lower) || /čestné\s*prohlášení/i.test(lower)) return 'cestne_prohlaseni';
   if (/technická\s*specifikace/i.test(lower)) return 'technicka_specifikace';
   // kupni_smlouva BEFORE poddodavatel — kupní smlouva often mentions "poddodavatelů" in legal clauses
   if (/kupní\s*smlouv/i.test(lower) || /smlouva\s*o\s*dodávce/i.test(lower)) return 'kupni_smlouva';
-  // Require "seznam" prefix to avoid false positives from contract clauses mentioning poddodavatelé
-  if (/seznam\s*poddodavatel/i.test(lower)) return 'seznam_poddodavatelu';
+  // Seznam musí mít přednost před obecným „čestně prohlašuje", které jeho formulář obsahuje.
+  // Přijímáme i doložený překlep „poddavatel" z NEN přílohy 8.
+  if (/seznam\s*pod(?:do)?davatel/i.test(lower)) return 'seznam_poddodavatelu';
+  if (/čestně\s*prohlašuj/i.test(lower) || /čestné\s*prohlášení/i.test(lower)) return 'cestne_prohlaseni';
   return null;
 }
 
@@ -1424,7 +1444,10 @@ export async function docHasResidualPlaceholders(docxPath: string): Promise<bool
  * Scan an input directory and classify DOCX/XLSX template files.
  * Uses filename regex first, then falls back to content-based detection.
  */
-export async function discoverTemplates(inputDir: string): Promise<DiscoveredTemplate[]> {
+export async function discoverTemplates(
+  inputDir: string,
+  options: DiscoverTemplatesOptions = {},
+): Promise<DiscoveredTemplate[]> {
   // Robustní discovery (stejná jako v extract kroku): rekurzivně projde podadresáře
   // + rozbalí ZIPy do .extracted/. Nutné, protože .doc→.docx konverze tenderových
   // šablon vzniká VEDLE zdroje (i uvnitř .extracted/), takže plochý readdir(inputDir)
@@ -1432,6 +1455,8 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
   const { files: discovered } = await discoverInputFiles(inputDir);
   const templates: DiscoveredTemplate[] = [];
   const typeCounts = new Map<string, number>();
+  const droppedByType = new Map<DiscoveredTemplate['type'], string[]>();
+  const perTypeLimit = templateLimitPerType(options.partCount);
 
   // Set objevených .docx basenamů (lowercase) — aby se .doc, který má vedle sebe
   // i .docx dvojče, nekonvertoval zbytečně (a nezdvojil se výstup).
@@ -1501,14 +1526,31 @@ export async function discoverTemplates(inputDir: string): Promise<DiscoveredTem
       }
     }
 
-    // 3. Add if detected, with dedup limit of 4 per type
+    // 3. Add if detected, with a bounded per-type limit. U dělených zakázek se
+    // pojistka násobí skutečným počtem částí, aby legitimní per-part formuláře nevypadly.
     if (type) {
       const count = typeCounts.get(type) || 0;
-      if (count < 4) {
+      if (count < perTypeLimit) {
         typeCounts.set(type, count + 1);
-        templates.push({ path: filePath, filename, type });
+        templates.push({
+          path: filePath,
+          filename,
+          type,
+          cast_id: extractCastIdFromFilename(filename),
+          origin: 'tender-form',
+        });
+      } else {
+        const dropped = droppedByType.get(type) ?? [];
+        dropped.push(filename);
+        droppedByType.set(type, dropped);
       }
     }
+  }
+
+  for (const [type, filenames] of droppedByType) {
+    console.warn(
+      `  ⚠ Limit ${perTypeLimit} šablon typu ${type}: zahozeno ${filenames.length} (${filenames.join(', ')})`,
+    );
   }
 
   return templates;
