@@ -54,3 +54,40 @@ z „3a/3b/3c", ZodError na termínech u dělené zakázky, sčítání předpok
 **Pro Patrika:** u téhle zakázky je nachystaná kompletní ZD (18 souborů) v `input/n006-26-v00027380/`
 na Danově stroji. Lhůta pro podání nabídek je **14. 9. 2026 v 10:00**, zakázka je dělená na tři
 části a ke každé je samostatný výkaz výměr a samostatný návrh kupní smlouvy.
+
+## 2026-09-04 — Noční běh: doložitelné ceny, zdroje, úplnost (PR #105–#109)
+
+Nasazeno na produkci: kontrakt provenience cen · CPV a stránkování v monitoringu · kontrola
+úplnosti vstupu · checky na PR. Detaily v `docs/changes/agent-a-ceny/` a v obou PR popisech.
+
+**Rozhodl jsem za tebe (vratné, přehlasuj, co chceš jinak):**
+
+- [ ] **Obory monitoringu** jsem naplnil 14 klíčovými slovy: výpočetní technika, počítač, notebook,
+      server, monitor, tiskárna, síťové prvky, software, dílenské vybavení, nářadí, obráběcí stroje,
+      svářečka, 3D tiskárna, nábytek. Krátké zkratky (IT, PC, AV) jsem vynechal jako hlučné.
+      **Je to konfigurace v `config/monitoring.json`, uprav si ji bez zásahu do kódu.**
+- [ ] **CPV prefixy jsem si NEVYMÝŠLEL.** Tvrdím jediný ověřený kód `44510000` (dílenské nářadí).
+      Nábytek a další obory zůstávají bez CPV, protože ověřený číselník nebyl k dispozici.
+      **Chce to doplnit z oficiálního číselníku NIPEZ** — pak bude kategorizace mnohem přesnější.
+- [ ] **Kolizi „3D tisk"** mezi třemi taxonomiemi jsem rozhodl ve prospěch dílenského oboru
+      (výrobní zařízení). Jestli to má být vlastní obor, řekni.
+- [ ] **Strop 42 requestů na zdroj a sync**, prodleva 500 ms. Odhad, ne měření — sleduj pár dní,
+      jestli to NEN/Hlídač snese, nebo naopak jestli si můžeš dovolit víc.
+- [ ] **Práh minimální délky textu pro `analyze`** má bezpečný default v konfiguraci; když ti bude
+      vyhazovat legitimní krátké zakázky, sniž ho.
+
+**Co jsem NEUDĚLAL (zbytek plánu, čeká na rozhodnutí nebo na další běh):**
+
+- [ ] **E4 — agentní identita** (odvolatelný klíč v DB, vlastní denní AI strop, `actor` v auditu).
+      Bez toho se Hermes dovnitř nedostane: legacy `API_TOKEN` neprojde přes `requireJwt` na
+      `monitoring/prevzit` a akce statickým tokenem se zapisují s `actor: null`.
+- [ ] **E5 — MCP server** na `/mcp` + upload lístek pro portály bez API + `SKILL.md` pro Hermese.
+- [ ] **E6 — dělené zakázky do podatelného stavu**: tři smlouvy tři ceny, stropy částí,
+      krycí list do formuláře zadavatele. **Tohle je z odloženého nejdražší, když zakázku podáte.**
+- [ ] **UI pro provenienci cen** — backend rozlišuje doložené od odhadu, ale uživatel to zatím
+      nevidí. Sahá to na `.tsx`, což je schvalovací brána → chce to tvůj pohled na návrh.
+- [ ] **Vektorový tier matcheru je vypnutý** — a díky E3 to teď produkce sama přiznává:
+      `/api/health` vrací `vectorMatcher.reason: "Vektorový tier matcheru je vypnutý
+      (WAREHOUSE_MATCH_ENABLED není 1)"`. Není to tedy (jen) chybějící `OPENAI_API_KEY`,
+      jak jsem si původně myslel, ale nesepnutý přepínač. Rozhodni, jestli ho chceš zapnout —
+      **nesahal jsem na něj, killswitche mimo rozsah běhu se nepřepínají.**
