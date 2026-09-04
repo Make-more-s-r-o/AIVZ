@@ -1,0 +1,915 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "VZ agentní REST cesta",
+    "version": "1.0.0",
+    "description": "Vedlejší OpenAPI popis REST operací, které obaluje primární MCP rozhraní. Cenový návrh je záměrně MCP-only omezená operace a lidské money-path endpointy zde nejsou."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/monitoring/sync": {
+      "post": {
+        "operationId": "monitoringSync",
+        "summary": "Synchronizuje monitoring podporovaného zdroje.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "zdroj": {
+                    "type": "string",
+                    "enum": [
+                      "nen",
+                      "hlidac"
+                    ]
+                  },
+                  "q": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "zdroj",
+                  "q"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/monitoring/feed": {
+      "get": {
+        "operationId": "monitoringFeed",
+        "summary": "Vrátí monitoring feed pro dohledání zakázky podle zdrojového odkazu.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "stav",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "nova",
+                "prevzata",
+                "ignorovana"
+              ]
+            }
+          },
+          {
+            "name": "vse",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "meta",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/monitoring/{id}/prevzit": {
+      "post": {
+        "operationId": "takeMonitoringTender",
+        "summary": "Založí zakázku z monitoring feedu a stáhne její dokumentaci.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stahnout_zd": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "spustit": {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  }
+                },
+                "required": [
+                  "stahnout_zd",
+                  "spustit"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tenders/upload-url": {
+      "post": {
+        "operationId": "uploadTenderFromUrl",
+        "summary": "Založí zakázku stažením dokumentu z přímé HTTP(S) URL.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "urls": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "minItems": 1
+                  },
+                  "tenderId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "urls"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/upload": {
+      "post": {
+        "operationId": "uploadTenderFiles",
+        "summary": "Nahraje dokumenty do existující zakázky přes multipart/form-data.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "description": "Binární soubor v multipart poli files",
+                      "format": "binary"
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
+                  }
+                },
+                "required": [
+                  "files"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/run/all": {
+      "post": {
+        "operationId": "runPipeline",
+        "summary": "Zařadí celý pipeline zakázky; před generováním čeká na lidské potvrzení cen.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/jobs/{jobId}": {
+      "get": {
+        "operationId": "getJob",
+        "summary": "Vrátí stav, logy a úplnost jednoho pipeline jobu.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "operationId": "listJobs",
+        "summary": "Vrátí joby zakázky pro bezpečnou kontrolu souběhu.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tenderId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/status": {
+      "get": {
+        "operationId": "getTenderStatus",
+        "summary": "Vrátí stav pipeline a kontrakt úplnosti zakázky.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/analysis": {
+      "get": {
+        "operationId": "getTenderAnalysis",
+        "summary": "Vrátí strukturovanou analýzu zakázky.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/parts": {
+      "get": {
+        "operationId": "getTenderParts",
+        "summary": "Vrátí části zakázky a jejich aktuální výběr.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    },
+    "/api/tenders/{id}/product-match": {
+      "get": {
+        "operationId": "getTenderItems",
+        "summary": "Vrátí položky, kandidáty a rozpracované ceny zakázky.",
+        "tags": [
+          "Agentní cesta"
+        ],
+        "security": [
+          {
+            "AgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Úspěšná odpověď existující REST cesty.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Neplatný vstup."
+          },
+          "401": {
+            "description": "Chybějící, neplatný nebo odvolaný credential."
+          },
+          "403": {
+            "description": "Operace není pro danou identitu povolena."
+          },
+          "404": {
+            "description": "Zakázka, job nebo artefakt nebyl nalezen."
+          },
+          "409": {
+            "description": "Konflikt se stavem zakázky nebo běžícím jobem."
+          },
+          "429": {
+            "description": "Agent vyčerpal denní limit."
+          },
+          "503": {
+            "description": "Závislost nebo řízení provozu není dostupné."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AgentBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "VZ agent key",
+        "description": "Agentní klíč s prefixem vza_; server uchovává pouze jeho hash a ověřuje revokaci při každém requestu."
+      }
+    }
+  },
+  "x-generated-from": "scripts/src/mcp/definitions.ts",
+  "x-mcp-tools": [
+    {
+      "name": "zakazka_z_odkazu",
+      "type": "write",
+      "wraps": [
+        "monitoringSync",
+        "monitoringFeed",
+        "takeMonitoringTender",
+        "uploadTenderFromUrl"
+      ]
+    },
+    {
+      "name": "vydej_upload_listek",
+      "type": "write",
+      "wraps": [
+        "uploadTenderFiles"
+      ],
+      "localEffect": "upload_ticket"
+    },
+    {
+      "name": "spust_pipeline",
+      "type": "write",
+      "wraps": [
+        "runPipeline"
+      ]
+    },
+    {
+      "name": "zjisti_stav_jobu",
+      "type": "read",
+      "wraps": [
+        "getJob"
+      ]
+    },
+    {
+      "name": "cti_analyzu",
+      "type": "read",
+      "wraps": [
+        "getTenderAnalysis"
+      ]
+    },
+    {
+      "name": "cti_casti",
+      "type": "read",
+      "wraps": [
+        "getTenderParts"
+      ]
+    },
+    {
+      "name": "cti_polozky",
+      "type": "read",
+      "wraps": [
+        "getTenderItems"
+      ]
+    },
+    {
+      "name": "cti_uplnost",
+      "type": "read",
+      "wraps": [
+        "getTenderStatus"
+      ]
+    },
+    {
+      "name": "navrhni_cenu",
+      "type": "write",
+      "wraps": [
+        "listJobs",
+        "getTenderItems"
+      ],
+      "localEffect": "price_proposal"
+    }
+  ]
+}
