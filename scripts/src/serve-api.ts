@@ -196,6 +196,7 @@ import {
   type PipelineJob as Job,
   type PipelineStep,
 } from './lib/pipeline-job-state.js';
+import { createMcpRouter, createSnapshotMutationRunner } from './mcp/index.js';
 
 config({ path: new URL('../../.env', import.meta.url).pathname });
 
@@ -220,6 +221,15 @@ let draining = false;
 app.set('case sensitive routing', true);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+app.use('/mcp', createMcpRouter({
+  restBaseUrl: `http://127.0.0.1:${PORT}`,
+  outputDir: OUTPUT_DIR,
+  isDraining: () => draining,
+  withSnapshotMutation: createSnapshotMutationRunner({
+    reserve: reserveTenderSnapshotMutation,
+    release: (tenderId) => activeIngests.delete(tenderId),
+  }),
+}));
 
 // Po SIGTERM server zůstane po dobu drain okna dostupný pro čtení stavu, ale žádná
 // API mutace už nesmí vytvořit novou práci ani změnit snapshot před exitem.
