@@ -1,4 +1,5 @@
-import type { PolozkaMatch, PriceSanityFlag, ProductMatch } from './types.js';
+import type { Cast, PolozkaMatch, PriceSanityFlag, ProductMatch } from './types.js';
+import { roundCurrency, type PartPriceRecap } from './price-calculator.js';
 import { compareAiVsMarket, informationalCostForQuantity } from './price-reality.js';
 import { isPlaceholderProductName } from './price-prefill.js';
 
@@ -129,6 +130,47 @@ function median(values: number[]): number | null {
 
 function formatPrice(value: number): string {
   return value.toLocaleString('cs-CZ', { maximumFractionDigits: 2 });
+}
+
+export interface PartPriceCapFinding {
+  cast_id: string;
+  cast_nazev: string;
+  cena: number;
+  strop: number;
+  rozdil: number;
+  vcetne_dph: boolean;
+  message: string;
+}
+
+/** Překročení je ostré: cena přesně rovná stropu je v pořádku. */
+export function checkPartPriceCaps(
+  parts: readonly Cast[],
+  recaps: readonly PartPriceRecap[],
+): PartPriceCapFinding[] {
+  const recapById = new Map(recaps.map((recap) => [recap.id, recap]));
+  const findings: PartPriceCapFinding[] = [];
+
+  for (const part of parts) {
+    if (part.cenovy_strop == null || typeof part.cenovy_strop_vcetne_dph !== 'boolean') continue;
+    const recap = recapById.get(part.id);
+    if (!recap) continue;
+    const price = part.cenovy_strop_vcetne_dph ? recap.cena_s_dph : recap.cena_bez_dph;
+    if (price <= part.cenovy_strop) continue;
+
+    const difference = roundCurrency(price - part.cenovy_strop);
+    const basis = part.cenovy_strop_vcetne_dph ? 'včetně DPH' : 'bez DPH';
+    findings.push({
+      cast_id: part.id,
+      cast_nazev: part.nazev,
+      cena: price,
+      strop: part.cenovy_strop,
+      rozdil: difference,
+      vcetne_dph: part.cenovy_strop_vcetne_dph,
+      message: `Část ${part.id} „${part.nazev}": nabídková cena ${formatPrice(price)} Kč ${basis} překračuje strop ${formatPrice(part.cenovy_strop)} Kč ${basis} o ${formatPrice(difference)} Kč.`,
+    });
+  }
+
+  return findings;
 }
 
 function formatShare(value: number): string {

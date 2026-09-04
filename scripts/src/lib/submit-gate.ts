@@ -12,9 +12,11 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'path';
-import type { ProductMatch, PolozkaMatch } from './types.js';
+import type { Cast, ProductMatch, PolozkaMatch } from './types.js';
 import { findUnconfirmedPrices } from './price-confirmation.js';
 import { checkPriceSanity } from './price-sanity.js';
+import { calculateTenderPriceRecap } from './price-calculator.js';
+import { buildPartPriceCapValidationChecks } from './validation-deterministic.js';
 import { docHasResidualPlaceholders } from './template-engine.js';
 import { splitFillProblems, type FillReport } from './fill-report.js';
 import { isStale } from './stale-check.js';
@@ -39,14 +41,28 @@ export interface SubmitGateResult {
 }
 
 export const STALE_DOCUMENTS_MESSAGE = 'Dokumenty neodpovídají aktuálním cenám — spusťte znovu Generování a Kontrolu.';
+export const BLOCK_PART_PRICE_CAP_ENV = 'BLOCK_PART_PRICE_CAP_EXCEEDED';
+
+export function isPartPriceCapBlockingEnabled(
+  configuredValue = process.env[BLOCK_PART_PRICE_CAP_ENV] ?? '',
+): boolean {
+  return /^(?:1|true|yes|on)$/i.test(configuredValue);
+}
 
 /**
  * Vrátí množinu vybraných částí (parts-selection.json). Null = zakázka bez částí (jedna
  * část) → filtrování se neuplatní. Chybějící/nečitelný soubor u vícečástové zakázky ⇒
  * bereme všechny části (konzervativně, jako validate-bid).
  */
-async function loadSelectedPartIds(outputDir: string, items: PolozkaMatch[]): Promise<Set<string> | null> {
-  const castIds = new Set(items.map((i) => (i as any).cast_id).filter(Boolean));
+async function loadSelectedPartIds(
+  outputDir: string,
+  items: PolozkaMatch[],
+  declaredParts: readonly Cast[] = [],
+): Promise<Set<string> | null> {
+  const castIds = new Set(
+    (declaredParts.length > 1 ? declaredParts.map((part) => part.id) : items.map((item) => item.cast_id))
+      .filter((id): id is string => Boolean(id)),
+  );
   if (castIds.size <= 1) return null; // jedna nebo žádná část → nefiltruj
   try {
     const sel = JSON.parse(await readFile(join(outputDir, 'parts-selection.json'), 'utf-8'));
@@ -68,6 +84,8 @@ function filterBySelectedParts(items: PolozkaMatch[], selected: Set<string> | nu
 export interface SubmitGateOptions {
   now?: Date;
   getCompanyManifest?: (companyId: string) => Promise<DocManifest>;
+  /** Výchozí false; produkčně lze zapnout také přes BLOCK_PART_PRICE_CAP_EXCEEDED. */
+  blockPartPriceCapExceeded?: boolean;
 }
 
 export async function computeSubmitGate(
@@ -199,6 +217,13 @@ export async function computeSubmitGate(
       ? (pm as any).prices_updated_at
       : null;
     const allItems = pm.polozky_match || [];
+    let declaredParts: Cast[] = [];
+    try {
+      const analysis = JSON.parse(await readFile(join(outputDir, 'analysis.json'), 'utf-8'));
+      if (Array.isArray(analysis?.casti)) declaredParts = analysis.casti;
+    } catch {
+      // Chybějící analýzu řeší ostatní kontroly; bez ní nelze strop části vymýšlet.
+    }
     if (hasPartsSelectionSnapshot(pm)) {
       try {
         const current = await readPartsSelectionSnapshot(outputDir);
@@ -210,7 +235,22 @@ export async function computeSubmitGate(
     }
     // Filtruj jen položky vybraných částí — u vícečástových zakázek se podává jedna část
     // a položky ostatních částí zůstanou nepotvrzené (jinak by gate byl navždy ready=false).
-    const items = filterBySelectedParts(allItems, await loadSelectedPartIds(outputDir, allItems));
+    const selectedPartIds = await loadSelectedPartIds(outputDir, allItems, declaredParts);
+    const items = filterBySelectedParts(allItems, selectedPartIds);
+    const recap = calculateTenderPriceRecap(pm, declaredParts, selectedPartIds);
+    for (const item of recap.polozky_bez_cast_id) {
+      warnings.push(`Položka „${item.polozka_nazev}“ (#${item.polozka_index + 1}) nemá u dělené zakázky cast_id a není zahrnuta v rekapitulaci žádné části.`);
+    }
+    const blockPartPriceCap = options.blockPartPriceCapExceeded ?? isPartPriceCapBlockingEnabled();
+    const submittedParts = selectedPartIds
+      ? declaredParts.filter((part) => selectedPartIds.has(part.id))
+      : declaredParts;
+    const submittedPartIds = new Set(submittedParts.map((part) => part.id));
+    const submittedRecaps = recap.casti.filter((part) => submittedPartIds.has(part.id));
+    for (const check of buildPartPriceCapValidationChecks(submittedParts, submittedRecaps, blockPartPriceCap)) {
+      if (check.status === 'fail') problems.push(`${check.kontrola}: ${check.detail}`);
+      else warnings.push(`${check.kontrola}: ${check.detail}`);
+    }
     const sanityFindings = checkPriceSanity(items, {});
     const names = new Map(items.map((item) => [item.polozka_index, item.polozka_nazev]));
     for (const finding of sanityFindings) {

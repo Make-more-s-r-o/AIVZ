@@ -19,7 +19,16 @@ import { fillSoupisWithPrices } from './fill-soupis.js';
 import { convertToPdf, isGotenbergConfigured } from './lib/pdf-converter.js';
 import { TECHNICAL_PROPOSAL_SYSTEM, buildTechnicalProposalUserMessage } from './prompts/technical-proposal.js';
 import { extractCastIdFromFilename } from './parse-soupis.js';
-import { resolveDocumentData, type DocumentData, type DocMode, type GenerationMeta } from './lib/data-resolver.js';
+import {
+  assertPartDocumentPriceAssignments,
+  resolveDocumentCastId,
+  resolveDocumentData,
+  scopeDocumentDataToPart,
+  type DocumentData,
+  type DocMode,
+  type GenerationMeta,
+  type PartDocumentPriceAssignment,
+} from './lib/data-resolver.js';
 import { buildKryciList, buildCestneProhlaseni, buildSeznamPoddodavatelu } from './lib/clean-builders/index.js';
 import { reconstructDocument } from './lib/reconstruct-engine.js';
 import type { TenderAnalysis, ProductMatch, ProductCandidate, ExtractedText } from './lib/types.js';
@@ -278,15 +287,31 @@ async function main() {
   const docData = await resolveDocumentData(tenderId);
   const generationMeta: GenerationMeta = {};
   const fillDocuments: FillDocumentReport[] = [];
+  const partDocumentPrices: PartDocumentPriceAssignment[] = [];
 
-  const programmaticAttempts = (): FillAttempt[] => [
-    { klic: 'nazev_firmy', original: 'Název firmy', hodnota: docData.nazev, vyplneno: Boolean(docData.nazev) },
-    { klic: 'ico', original: 'IČO', hodnota: docData.ico, vyplneno: Boolean(docData.ico) },
-    { klic: 'dic', original: 'DIČ', hodnota: docData.dic, vyplneno: Boolean(docData.dic) },
-    { klic: 'cena', original: 'Celková cena', hodnota: String(docData.celkova_cena_bez_dph), vyplneno: Number.isFinite(docData.celkova_cena_bez_dph) },
-    { klic: 'datum', original: 'Datum', hodnota: docData.datum, vyplneno: Boolean(docData.datum) },
-    { klic: 'podpis', original: 'Podpis oprávněné osoby', hodnota: docData.jednajici_osoba, vyplneno: Boolean(docData.jednajici_osoba) },
+  const programmaticAttempts = (data: DocumentData = docData): FillAttempt[] => [
+    { klic: 'nazev_firmy', original: 'Název firmy', hodnota: data.nazev, vyplneno: Boolean(data.nazev) },
+    { klic: 'ico', original: 'IČO', hodnota: data.ico, vyplneno: Boolean(data.ico) },
+    { klic: 'dic', original: 'DIČ', hodnota: data.dic, vyplneno: Boolean(data.dic) },
+    { klic: 'cena', original: 'Celková cena', hodnota: String(data.celkova_cena_bez_dph), vyplneno: Number.isFinite(data.celkova_cena_bez_dph) },
+    { klic: 'datum', original: 'Datum', hodnota: data.datum, vyplneno: Boolean(data.datum) },
+    { klic: 'podpis', original: 'Podpis oprávněné osoby', hodnota: data.jednajici_osoba, vyplneno: Boolean(data.jednajici_osoba) },
   ];
+
+  const recordPartDocumentPrice = (document: string, castId: string | undefined, data: DocumentData) => {
+    if (!castId) return;
+    partDocumentPrices.push({
+      document,
+      cast_id: castId,
+      cena_bez_dph: data.celkova_cena_bez_dph,
+      cena_s_dph: data.celkova_cena_s_dph,
+    });
+    Object.assign(generationMeta[document], {
+      cast_id: castId,
+      cena_bez_dph: data.celkova_cena_bez_dph,
+      cena_s_dph: data.celkova_cena_s_dph,
+    });
+  };
 
   // Load document-modes.json overrides (if exists)
   let modeOverrides: Record<string, DocMode> = {};
@@ -355,6 +380,15 @@ async function main() {
   const typeCounters = new Map<string, number>();
 
   for (const template of templates) {
+    const explicitTemplateCastId = (template as DiscoveredTemplate & { cast_id?: string }).cast_id;
+    const claimedTemplateCastId = explicitTemplateCastId || extractCastIdFromFilename(template.filename);
+    const templateCastId = hasParts
+      ? resolveDocumentCastId({ filename: template.filename, cast_id: explicitTemplateCastId }, analysis.casti)
+      : undefined;
+    if (hasParts && claimedTemplateCastId && !templateCastId) {
+      console.warn(`  ⚠ Šablona ${template.filename} odkazuje na neznámou část ${claimedTemplateCastId}; nebude vygenerována s globální cenou.`);
+      continue;
+    }
     const count = typeCounters.get(template.type) || 0;
     typeCounters.set(template.type, count + 1);
 
@@ -363,6 +397,13 @@ async function main() {
     const isExcel = template.filename.toLowerCase().endsWith('.xls') || template.filename.toLowerCase().endsWith('.xlsx');
     const ext = isExcel ? '.xlsx' : '.docx';
     const outputName = `${baseName}${suffix}${ext}`;
+    const templateDocData = scopeDocumentDataToPart(docData, templateCastId);
+    const templateTenderData = {
+      ...tenderData,
+      cena_bez_dph: formatMoney(templateDocData.celkova_cena_bez_dph),
+      cena_s_dph: formatMoney(templateDocData.celkova_cena_s_dph),
+      dph: formatMoney(templateDocData.dph_castka),
+    };
 
     // Resolve generation mode: override > default > fill
     let mode: DocMode = modeOverrides[outputName] || DEFAULT_MODES[template.type] || 'fill';
@@ -382,12 +423,13 @@ async function main() {
     try {
       // Mode 1: Clean — deterministic builder, zero AI cost
       if (mode === 'clean' && CLEAN_BUILDERS[template.type]) {
-        const buffer = await CLEAN_BUILDERS[template.type](docData);
+        const buffer = await CLEAN_BUILDERS[template.type](templateDocData);
         // Clean builder vždy generuje DOCX — vynutit příponu .docx bez ohledu na source template
         const cleanOutputName = `${baseName}${suffix}.docx`;
         await writeFile(join(outputDir, cleanOutputName), buffer);
         generationMeta[cleanOutputName] = { mode: 'clean', source: 'clean-builder', cost_czk: 0, template_source: template.filename };
-        fillDocuments.push(buildDocumentFillReport(cleanOutputName, programmaticAttempts()));
+        recordPartDocumentPrice(cleanOutputName, templateCastId, templateDocData);
+        fillDocuments.push(buildDocumentFillReport(cleanOutputName, programmaticAttempts(templateDocData)));
         console.log(`    Clean builder: 0 CZK`);
         continue;
       }
@@ -395,13 +437,14 @@ async function main() {
       // Mode 2: Reconstruct — AI extracts structure, then deterministic build
       if (mode === 'reconstruct' && !isExcel) {
         try {
-          const result = await reconstructDocument(template.path, docData, tenderId);
+          const result = await reconstructDocument(template.path, templateDocData, tenderId);
           await writeFile(join(outputDir, outputName), result.buffer);
           totalCostCZK += result.costCZK;
           if (result.costCZK > 0) {
             await logCost(tenderId, `generate-template-${outputName}`, 'reconstruct', 0, 0, result.costCZK);
           }
           generationMeta[outputName] = { mode: 'reconstruct', source: 'reconstruct-engine', cost_czk: result.costCZK, template_source: template.filename };
+          recordPartDocumentPrice(outputName, templateCastId, templateDocData);
           const attempts: FillAttempt[] = result.structure.sections.flatMap((section) => [
             ...(section.fields ?? []).map((field) => ({
               klic: inferFillKey(`${field.label} ${field.value_type}`), original: field.label,
@@ -423,13 +466,14 @@ async function main() {
 
       // Mode 3: Fill — existing AI-powered template filling
       if (isExcel) {
-        const result = await fillExcelWithAI(template.path, company, tenderData);
+        const result = await fillExcelWithAI(template.path, company, templateTenderData);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'excel-ai', 0, 0, result.costCZK);
         }
         generationMeta[outputName] = { mode: 'fill', source: 'excel-ai', cost_czk: result.costCZK, template_source: template.filename };
+        recordPartDocumentPrice(outputName, templateCastId, templateDocData);
         fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
           original: rep.original, hodnota: rep.replacement,
           vyplneno: Boolean(rep.replacement?.trim()),
@@ -445,13 +489,14 @@ async function main() {
           console.log(`    Saved ${result.replacements.length} replacements to ${logName}`);
         }
       } else {
-        const result = await fillTemplateWithAI(template.path, company, tenderData, template.type);
+        const result = await fillTemplateWithAI(template.path, company, templateTenderData, template.type);
         await writeFile(join(outputDir, outputName), result.buffer);
         totalCostCZK += result.costCZK;
         if (result.costCZK > 0) {
           await logCost(tenderId, `generate-template-${outputName}`, 'docx-ai', 0, 0, result.costCZK);
         }
         generationMeta[outputName] = { mode: 'fill', source: 'ai-fill', cost_czk: result.costCZK, template_source: template.filename };
+        recordPartDocumentPrice(outputName, templateCastId, templateDocData);
         fillDocuments.push(buildDocumentFillReport(outputName, result.replacements.map((rep) => ({
           original: rep.original, hodnota: rep.replacement,
           vyplneno: Boolean(rep.replacement.trim()) && rep.strategy !== 'not-found',
@@ -471,6 +516,11 @@ async function main() {
       console.log(`    Error filling template: ${err}`);
     }
   }
+
+  assertPartDocumentPriceAssignments(
+    partDocumentPrices,
+    docData.cenova_rekapitulace_po_castech ?? docData.casti ?? [],
+  );
 
   // Kontrola úplnosti smlouvy: je-li v podkladech EDITOVATELNÁ kupní smlouva (.doc/.docx/.xlsx),
   // ale ve výstupu žádná není, UPOZORNI (ne throw — abort by zahodil ostatní hotové dokumenty).
